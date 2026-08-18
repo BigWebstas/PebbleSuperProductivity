@@ -1,31 +1,27 @@
 // Thin client for the SuperSync REST API (packages/super-sync-server in the
 // super-productivity repo), plus the E2EE payload encrypt/decrypt helpers.
 //
-// ASSUMPTIONS THAT NEED CONFIRMING AGAINST A LIVE SERVER / ACCOUNT
+// Routes, auth scheme, and GET /api/sync/ops's response shape are confirmed
+// against a live account's real traffic (see README.md's "What is verified
+// vs. assumed" section) - see task-store.js for the confirmed Operation
+// field names (opType/entityType/isPayloadEncrypted, not
+// type/entityType/encrypted, and entries are wrapped as
+// { serverSeq, op, receivedAt }).
+//
+// STILL UNCONFIRMED
 // -------------------------------------------------------------------------
-// This was implemented from the sync server's route list and prose
-// architecture docs, not from the literal TypeScript contract file, because
-// this environment has no way to create a SuperSync account (registration
-// requires a real email + clicking a magic link, or WebAuthn) to capture a
-// live request/response for reference. Treat the following as best-effort
-// and re-verify against packages/shared-schema/src/supersync-http-contract.ts
-// and packages/super-sync-server/docs/supersync-encryption-architecture.md
-// once you have a live token:
-//   1. Exact field names on Operation objects (id/type/entityType/entityId/
-//      payload/clientId/timestamp/vectorClock) - `applyOperation()` below.
-//   2. The E2EE key derivation (this uses PBKDF2-HMAC-SHA256, 210000
-//      iterations, salt = utf8("supersync:" + email) - the real app almost
-//      certainly uses a different salt/iteration count, which would produce
-//      a different key and fail to decrypt existing data even with the
-//      right password).
-//   3. The exact shape of the IV/ciphertext/tag encoding inside
-//      `operation.payload` when encrypted (assumed: base64 JSON envelope
-//      `{iv, ciphertext, tag}`).
-//   4. Whether GET /api/sync/restore/:serverSeq returns entities in
-//      encrypted-payload form (like ops) or as one encrypted blob.
-// None of this affects the crypto primitives themselves (aes-gcm.js,
-// sha256.js), which are verified byte-for-byte against Node's `crypto` in
-// scripts/test-crypto.js - only the *wire format* around them is a guess.
+//   1. The E2EE key derivation (this uses PBKDF2-HMAC-SHA256, 210000
+//      iterations, salt = utf8("supersync:" + email) - unverified, would
+//      produce a different key and fail to decrypt existing data even with
+//      the right password if wrong).
+//   2. The exact byte layout inside an encrypted `op.payload`. Confirmed to
+//      be a single base64 string (not a `{iv, ciphertext, tag}` JSON
+//      envelope as originally assumed), but the IV/ciphertext/tag split
+//      within those bytes is still unknown - decryptPayload() below will
+//      throw on real data until this is pinned down.
+// GET /api/sync/restore/:serverSeq is confirmed to reject E2EE accounts
+// outright (400 ENCRYPTED_OPS_NOT_SUPPORTED) - index.js no longer treats
+// that as a sync failure, it falls through to a full ops replay instead.
 'use strict';
 
 var aesGcm = require('./aes-gcm.js');

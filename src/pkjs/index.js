@@ -172,6 +172,18 @@ function doSync() {
         }
         lastSeq = points[0].serverSeq;
       });
+    }).catch(function (err) {
+      // Confirmed against a live account: the server flatly refuses to hand
+      // out a server-side snapshot for E2EE accounts (400
+      // ENCRYPTED_OPS_NOT_SUPPORTED - "Use the client app's Sync Now button
+      // to decrypt and restore locally"). That's the only supported path
+      // for an encrypted account, which is exactly what pullPage() below
+      // does by replaying the full op history from lastSeq 0 - so this
+      // isn't a sync failure, just a signal to skip straight to that.
+      if (err && err.body && err.body.errorCode === 'ENCRYPTED_OPS_NOT_SUPPORTED') {
+        return;
+      }
+      throw err;
     });
   };
 

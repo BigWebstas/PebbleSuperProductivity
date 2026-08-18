@@ -31,26 +31,37 @@ function ensureCollection(state, entityType) {
 // Never throws - a single malformed/unrecognized op should not take down
 // the whole sync (it just means that entity may be stale until next
 // snapshot restore).
-function applyOperation(op, state, key) {
+//
+// `entry` is one element of GET /api/sync/ops's `ops` array, confirmed
+// against a live account to be shaped { serverSeq, op: {...}, receivedAt } -
+// NOT a flat Operation object. entityType is uppercase ("TASK",
+// "GLOBAL_CONFIG", ...), the op-type field is `opType` not `type`, and the
+// encrypted flag is `isPayloadEncrypted` not `encrypted`.
+function applyOperation(entry, state, key) {
+  var op = entry && entry.op;
+  if (!op) {
+    return;
+  }
   try {
     var payload = op.payload;
-    if (op.encrypted && payload && key) {
+    if (op.isPayloadEncrypted && payload && key) {
       payload = supersync.decryptPayload(payload, key);
     }
+    var entityType = op.entityType && String(op.entityType).toLowerCase();
 
-    switch (op.type) {
+    switch (op.opType) {
       case 'CRT': {
-        var created = ensureCollection(state, op.entityType);
+        var created = ensureCollection(state, entityType);
         created[op.entityId] = payload;
         break;
       }
       case 'UPD': {
-        var coll = ensureCollection(state, op.entityType);
+        var coll = ensureCollection(state, entityType);
         coll[op.entityId] = Object.assign({}, coll[op.entityId], payload);
         break;
       }
       case 'DEL': {
-        var delColl = ensureCollection(state, op.entityType);
+        var delColl = ensureCollection(state, entityType);
         if (payload && Array.isArray(payload.ids)) {
           payload.ids.forEach(function (id) { delete delColl[id]; });
         } else {
@@ -72,16 +83,16 @@ function applyOperation(op, state, key) {
         }
         break;
       default:
-        console.log('[task-store] unhandled op type: ' + op.type);
+        console.log('[task-store] unhandled op type: ' + op.opType);
     }
   } catch (err) {
     console.log('[task-store] failed to apply op ' + (op && op.id) + ': ' + err.message);
   }
 }
 
-function applyOperations(ops, state, key) {
-  ops.forEach(function (op) {
-    applyOperation(op, state, key);
+function applyOperations(entries, state, key) {
+  entries.forEach(function (entry) {
+    applyOperation(entry, state, key);
   });
 }
 
@@ -102,7 +113,13 @@ function getTodayTasks(state, limit) {
     if (!!a.isDone !== !!b.isDone) {
       return a.isDone ? 1 : -1;
     }
-    return String(a.title).localeCompare(String(b.title));
+    // Plain ordinal comparison, not localeCompare(): confirmed against the
+    // basalt emulator that its embedded JS engine throws "Internal error.
+    // Icu error." on locale-aware string ops with no ICU data loaded, and
+    // locale-aware sorting isn't needed for this anyway.
+    var at = String(a.title);
+    var bt = String(b.title);
+    return at < bt ? -1 : at > bt ? 1 : 0;
   });
 
   return pool.slice(0, limit).map(function (t) {

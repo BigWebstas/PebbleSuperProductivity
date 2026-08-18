@@ -61,7 +61,10 @@ built against the SuperSync server's public route list and architecture
 docs, not a captured live request/response. Two layers of this project have
 very different confidence levels as a result:
 
-**Solid — actually verified:**
+**Solid — actually verified**, the crypto primitives against Node's
+`crypto` module and the rest against a live SuperSync account's real
+authenticated traffic (`GET /api/sync/ops`, `/api/sync/restore-points`,
+`/api/sync/restore/:serverSeq`) on 2026-08-18:
 - The crypto primitives (`aes-gcm.js`, `sha256.js`, `base64.js`) are checked
   against Node's built-in `crypto` module for AES-128/256-GCM
   encrypt/decrypt/tag-verification, HMAC-SHA256, PBKDF2, and SHA-256, plus
@@ -70,44 +73,49 @@ very different confidence levels as a result:
   in isolation. Run `node scripts/test-task-store.js`.
 - The AppMessage protocol between `main.c` and `index.js` is internally
   consistent (same key/enum values on both sides).
-- The pairing flow's premise: `sync.super-productivity.com`'s own root page
-  confirms it's a login portal ("Connection Successful — copy this token
-  and paste it in Super Productivity's sync settings") that issues the same
-  bearer token used by the app's Settings → Sync → SuperSync → Access Token
-  field. `config/pairing.html` just opens that same page and has you paste
-  the token it gives you — no guessed endpoints involved for this part.
+- The pairing flow, end to end: `sync.super-productivity.com`'s root page
+  issues the same bearer token used by the app's Settings → Sync →
+  SuperSync → Access Token field, and `Authorization: Bearer <token>` is
+  confirmed to be the real auth scheme (matches the server's own `app.js`).
+- The API routes: `/api/sync/ops`, `/api/sync/restore-points`,
+  `/api/sync/status` all confirmed live (structured 401s when
+  unauthenticated, real data when authenticated).
+- `GET /api/sync/ops`'s response shape: `{ ops: [...], hasMore, latestSeq,
+  ... }`, where each entry is `{ serverSeq, op: {...}, receivedAt }` - **not**
+  a flat Operation object as originally assumed. `op` itself has `opType`
+  (not `type`), `entityType` **uppercase** (`"TASK"`, `"GLOBAL_CONFIG"`,
+  `"TAG"`, `"TIME_TRACKING"`, `"PLUGIN_USER_DATA"`, `"SIMPLE_COUNTER"`,
+  `"ALL"` for the initial `SYNC_IMPORT`), `entityId`, `clientId`,
+  `actionType`, `timestamp`, `schemaVersion`, `vectorClock`, and
+  `isPayloadEncrypted` (not `encrypted`). `task-store.js` and `index.js`
+  now match this.
+- `GET /api/sync/restore/:serverSeq` (the snapshot-bootstrap optimization
+  for a fresh watch): confirmed to **always fail with 400
+  `ENCRYPTED_OPS_NOT_SUPPORTED`** for E2EE accounts - "Server-side snapshot
+  is unavailable because operations are end-to-end encrypted. Use the
+  client app's 'Sync Now' button to decrypt and restore locally." Since
+  SuperSync is built around E2EE, `doSync()` now treats this specific error
+  as expected and falls straight through to a full `GET /api/sync/ops`
+  replay from `sinceSeq=0` instead of failing the sync - which is exactly
+  what the server's own error message says to do.
 
-**Assumed — needs confirming against a real account before this works
-end-to-end**, all flagged in comments at the top of
-`src/pkjs/lib/supersync-client.js`:
-1. The exact JSON field names on an `Operation` object (`type`,
-   `entityType`, `entityId`, `payload`, `encrypted`, ...) — guessed from the
-   route/architecture docs, not the literal
-   `packages/shared-schema/src/supersync-http-contract.ts` TypeScript
-   source.
-2. The E2EE key derivation (this uses PBKDF2-HMAC-SHA256, 210,000
-   iterations, salt = `"supersync:" + email"`). Getting this wrong doesn't
-   corrupt anything — it just means decryption fails with an
-   authentication error until the real KDF parameters are dropped in.
-3. The wire shape of an encrypted `operation.payload` (assumed:
-   `{ iv, ciphertext, tag }`, each base64).
-4. What `GET /api/sync/restore/:serverSeq` actually returns (used only for
-   the very first sync on a fresh watch).
-5. The `Task` entity's field names (`title`, `isDone`, `dueDay`) — the
-   `dueDay === today` "today" filter is a reasonable guess based on how
-   Super Productivity's UI groups tasks, with a fallback to "everything not
-   done" if nothing matches, so the watch doesn't just show an empty list
-   if this guess is wrong.
-6. ~~Whether Super Productivity exposes a copyable sync token.~~ **Resolved
-   — it does.** `sync.super-productivity.com`'s root page is a login portal
-   that, after a passkey/magic-link sign-in, displays a bearer token with
-   an explicit "copy this token and paste it in Super Productivity's sync
-   settings" instruction — the same token the desktop/mobile app uses in
-   Settings → Sync → SuperSync → Access Token. `config/pairing.html` opens
-   that same page and has you paste the token it gives you; there's no
-   OAuth-style `redirect_uri` to auto-capture it, but manual copy/paste of
-   a real, already-working token is a solved, working flow, not a
-   guess.
+**Still assumed — the one open item:**
+- The exact byte layout of `op.payload` when `isPayloadEncrypted` is true.
+  Confirmed to be a single base64 string (not the `{ iv, ciphertext, tag }`
+  envelope object originally assumed), but the split between IV/ciphertext/
+  tag within those bytes, and the real KDF parameters (this uses
+  PBKDF2-HMAC-SHA256, 210,000 iterations, salt = `"supersync:" + email`),
+  are still unconfirmed. Until this is nailed down, `decryptPayload()`
+  throws on real encrypted payloads - caught per-operation in
+  `task-store.js`, so a sync still completes and shows whatever entities
+  *did* apply, just not any encrypted `TASK` content. Pinning this down
+  needs either the real client source for the encryption code, or testing
+  candidate byte layouts/KDF params against real ciphertext until AES-GCM's
+  tag check passes.
+- The `Task` entity's field names (`title`, `isDone`, `dueDay`) once
+  decrypted - the `dueDay === today` "today" filter is a reasonable guess
+  based on how Super Productivity's UI groups tasks, with a fallback to
+  "everything not done" if nothing matches.
 
 None of this is guesswork about *how to write a Pebble watchapp* — the
 AppMessage/MenuLayer/Storage APIs and the phone-relay networking
