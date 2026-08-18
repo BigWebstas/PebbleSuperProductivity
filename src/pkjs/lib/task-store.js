@@ -8,24 +8,26 @@
 // history: this is a Redux action-replay log, not a flat CRUD op log.
 // `op.opType` (CRT/UPD/...) doesn't tell you how to interpret the payload
 // for TASK entities - `op.actionType` does, and each action type has its
-// own bespoke `payload.actionPayload` shape (mirroring the app's actual
-// NgRx actions):
-//   "[Task Shared] addTask"            -> actionPayload.task = full task
-//   "[Task Shared] scheduleTaskWithTime" -> actionPayload.task = full task
-//   "[Task Shared] updateTask"         -> actionPayload.task = {id, changes}
-//   "[Task Shared] planTasksForToday"  -> actionPayload = {taskIds, today}
-// Across one real account's entire 500-op history, these were the only
-// TASK actionTypes that affect title/isDone/today-membership; everything
-// else observed (time-tracking syncs, dismissReminderOnly, plugin/tag/
-// global-config updates) doesn't affect what the watch shows, and falls
-// through to the default no-op case below.
+// own bespoke `payload.actionPayload` shape, mirroring the app's actual
+// NgRx actions (root-store/meta/task-shared.actions.ts) and their meta-
+// reducer (root-store/meta/task-shared-meta-reducers/
+// task-shared-scheduling.reducer.ts) in the super-productivity GitHub repo.
+//
+// What actually determines "is this task in Today", confirmed from
+// tag.const.ts's own doc comment plus the scheduling reducer: **task.dueDay
+// (or task.dueWithTime falling on today)**, not tag membership. The
+// TODAY_TAG.taskIds list the app also maintains is purely display
+// ordering, not membership, and isn't tracked here - the watch doesn't
+// need to render a user-chosen order among a handful of titles.
+// `dueDay`/`dueWithTime` are mutually exclusive (setting one clears the
+// other) per the app's own "ARCHITECTURE-DECISIONS.md Decision #1".
 //
 // SYNC_IMPORT/BACKUP_IMPORT/REPAIR carry a full NgRx EntityState snapshot
-// per feature slice (payload.task = { ids: [...], entities: {...} }) -
+// per feature slice (payload.task = { ids: [...], entities: {...} }),
 // also confirmed against the same real account, whose op history starts
-// with exactly this op. Without it, any task created before the visible
-// op history begins is invisible except for whatever fields a later
-// updateTask's partial `changes` happened to touch.
+// with exactly this op - without it, a task created before the visible
+// history begins would only ever show whatever fields a later action
+// happened to touch.
 'use strict';
 
 function todayStr() {
@@ -35,27 +37,30 @@ function todayStr() {
   return d.getFullYear() + '-' + mm + '-' + dd;
 }
 
-// dueWithTime is a Unix-epoch-ms timestamp (used by calendar-imported
-// tasks); dueDay is a plain "YYYY-MM-DD" string (used elsewhere in the
-// app). Only one is normally present. Converts either into "YYYY-MM-DD" in
-// local time, or null if neither is set.
+function dateStrFromMs(ms) {
+  var d = new Date(ms);
+  var mm = ('0' + (d.getMonth() + 1)).slice(-2);
+  var dd = ('0' + d.getDate()).slice(-2);
+  return d.getFullYear() + '-' + mm + '-' + dd;
+}
+
+// dueWithTime is a Unix-epoch-ms timestamp (used by calendar-imported and
+// time-of-day-scheduled tasks); dueDay is a plain "YYYY-MM-DD" string. The
+// app keeps these mutually exclusive, but this tolerates both being set
+// anyway rather than assuming that invariant holds across every op.
 function taskDueDay(task) {
   if (task.dueDay) {
     return task.dueDay;
   }
   if (task.dueWithTime) {
-    var d = new Date(task.dueWithTime);
-    var mm = ('0' + (d.getMonth() + 1)).slice(-2);
-    var dd = ('0' + d.getDate()).slice(-2);
-    return d.getFullYear() + '-' + mm + '-' + dd;
+    return dateStrFromMs(task.dueWithTime);
   }
   return null;
 }
 
-// state: { task: { [id]: {id, title, isDone, dueDay|dueWithTime, ...} },
-//          plannedToday: { date: 'YYYY-MM-DD', taskIds: [...] } | null, ... }
+// state: { task: { [id]: {id, title, isDone, dueDay|dueWithTime, ...} } }
 function emptyState() {
-  return { task: {}, plannedToday: null };
+  return { task: {} };
 }
 
 function ensureCollection(state, entityType) {
@@ -65,33 +70,99 @@ function ensureCollection(state, entityType) {
   return state[entityType];
 }
 
+function replaceTask(tasks, task) {
+  if (task && task.id) {
+    tasks[task.id] = task;
+  }
+}
+
+function mergeTaskChanges(tasks, id, changes) {
+  if (id) {
+    tasks[id] = Object.assign({}, tasks[id], changes);
+  }
+}
+
+function deleteTasks(tasks, ids) {
+  (ids || []).forEach(function (id) { delete tasks[id]; });
+}
+
 function applyTaskAction(op, actionPayload, state) {
   var tasks = state.task;
+  if (!actionPayload) {
+    return;
+  }
   switch (op.actionType) {
+    // These carry a full, already-correct task snapshot (the action
+    // creator itself bakes in dueDay/dueWithTime before dispatch) - a
+    // straight replace matches what the real reducer's entity-adapter
+    // add/update ends up storing.
     case '[Task Shared] addTask':
-    case '[Task Shared] scheduleTaskWithTime': {
-      var task = actionPayload && actionPayload.task;
-      if (task && task.id) {
-        tasks[task.id] = task;
+    case '[Task Shared] scheduleTaskWithTime':
+    case '[Task Shared] reScheduleTaskWithTime':
+    case '[Task Shared] restoreTask':
+    case '[Task Shared] restoreDeletedTask':
+      replaceTask(tasks, actionPayload.task);
+      break;
+
+    case '[Task Shared] updateTask':
+      if (actionPayload.task) {
+        mergeTaskChanges(tasks, actionPayload.task.id, actionPayload.task.changes);
       }
       break;
-    }
-    case '[Task Shared] updateTask': {
-      var upd = actionPayload && actionPayload.task;
-      if (upd && upd.id) {
-        tasks[upd.id] = Object.assign({}, tasks[upd.id], upd.changes);
-      }
+
+    case '[Task Shared] updateTasks':
+      (actionPayload.tasks || []).forEach(function (u) {
+        mergeTaskChanges(tasks, u.id, u.changes);
+      });
       break;
-    }
+
+    // Mirrors handlePlanTasksForToday in task-shared-scheduling.reducer.ts:
+    // sets dueDay to the target day and clears remindAt (and, in the real
+    // reducer, sometimes dueWithTime - skipped here since it doesn't
+    // affect title/isDone/today-membership either way).
     case '[Task Shared] planTasksForToday': {
-      if (actionPayload && Array.isArray(actionPayload.taskIds) && actionPayload.today) {
-        state.plannedToday = { date: actionPayload.today, taskIds: actionPayload.taskIds };
-      }
+      var today = actionPayload.today || todayStr();
+      (actionPayload.taskIds || []).forEach(function (id) {
+        if (tasks[id]) {
+          mergeTaskChanges(tasks, id, { dueDay: today, remindAt: undefined });
+        }
+      });
       break;
     }
+
+    // Mirrors handleUnScheduleTask: clears scheduling, or pins to today if
+    // isLeaveInToday.
+    case '[Task Shared] unscheduleTask': {
+      var day = actionPayload.isLeaveInToday ? (actionPayload.today || todayStr()) : undefined;
+      mergeTaskChanges(tasks, actionPayload.id, {
+        dueDay: day,
+        dueWithTime: undefined,
+        remindAt: undefined,
+      });
+      break;
+    }
+
+    case '[Task Shared] deleteTask':
+      if (actionPayload.task) {
+        deleteTasks(tasks, [actionPayload.task.id]);
+      }
+      break;
+
+    case '[Task Shared] deleteTasks':
+      deleteTasks(tasks, actionPayload.taskIds);
+      break;
+
+    // Archived tasks leave the active Today view entirely, regardless of
+    // dueDay.
+    case '[Task Shared] moveToArchive':
+      deleteTasks(tasks, (actionPayload.tasks || []).map(function (t) { return t.id; }));
+      break;
+
     default:
-      // Time tracking, reminders, and other TASK-entity actions don't
-      // affect title/isDone/today-membership - nothing to do.
+      // Time tracking, reminders, Today-tag *ordering* (as opposed to
+      // membership - see the top-of-file comment), tags/projects/deadlines,
+      // and other TASK-entity actions don't affect
+      // title/isDone/today-membership - nothing to do.
       break;
   }
 }
@@ -158,10 +229,7 @@ function applyOperation(entry, state, crypto) {
         // payload.task = { ids: [...], entities: { [id]: Task } }. Only
         // task entities matter for the watch. This is a full replacement,
         // not a merge - it fires once, at whatever point the local
-        // history begins, so any task created before that point would
-        // otherwise never appear (its only visible mutations are
-        // updateTask ops with a partial `changes` object, missing
-        // whichever fields were never subsequently touched).
+        // history begins.
         if (payload && payload.task && payload.task.entities) {
           state.task = payload.task.entities;
         }
@@ -180,32 +248,19 @@ function applyOperations(entries, state, crypto) {
   });
 }
 
-// Returns up to `limit` tasks relevant to "today", not-done first.
+// Returns up to `limit` tasks actually due today - i.e. exactly Super
+// Productivity's own Today section, per task.dueDay/dueWithTime (see the
+// top-of-file comment for why that's the real membership signal, not the
+// Today tag's ordering list). Deliberately no "everything not done"
+// fallback: an empty result means Today is actually empty, not "we
+// couldn't figure out what's due."
 function getTodayTasks(state, limit) {
   var today = todayStr();
-  var all = Object.keys(state.task || {}).map(function (id) {
-    return state.task[id];
-  }).filter(Boolean);
+  var todays = Object.keys(state.task || {})
+    .map(function (id) { return state.task[id]; })
+    .filter(function (t) { return t && taskDueDay(t) === today; });
 
-  var todays;
-  // Prefer the app's own authoritative "planned for today" list (from a
-  // "[Task Shared] planTasksForToday" action) when it's actually for
-  // today - it's a direct signal from the real app rather than a guess
-  // about which due-date field means "today".
-  if (state.plannedToday && state.plannedToday.date === today) {
-    todays = state.plannedToday.taskIds
-      .map(function (id) { return state.task[id]; })
-      .filter(Boolean);
-  } else {
-    todays = all.filter(function (t) { return taskDueDay(t) === today; });
-  }
-
-  // Fall back to "everything not done" if nothing matched - keeps the
-  // watch useful even on a fresh account with no planTasksForToday/due-date
-  // signal yet.
-  var pool = todays.length > 0 ? todays : all.filter(function (t) { return !t.isDone; });
-
-  pool.sort(function (a, b) {
+  todays.sort(function (a, b) {
     if (!!a.isDone !== !!b.isDone) {
       return a.isDone ? 1 : -1;
     }
@@ -218,7 +273,7 @@ function getTodayTasks(state, limit) {
     return at < bt ? -1 : at > bt ? 1 : 0;
   });
 
-  return pool.slice(0, limit).map(function (t) {
+  return todays.slice(0, limit).map(function (t) {
     return { id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone };
   });
 }

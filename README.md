@@ -139,19 +139,25 @@ traffic. Since then, three things resolved almost everything that was
   from `sinceSeq=0` instead - exactly what the server's error says to do.
 
 **Known gaps, not "assumed" so much as "not yet built":**
-- Only the TASK action types actually observed in one real (fairly
-  calendar/JIRA-integration-heavy) account are handled: `addTask`,
-  `updateTask`, `scheduleTaskWithTime`, `planTasksForToday`. Notably
-  **absent: deletion/archival** (`deleteTask`, `moveToArchive`,
-  `restoreTask`, or similar) - a task deleted on another device won't
-  disappear from the watch's view, since nothing currently removes it from
-  the local cache. A heavier or longer-lived account almost certainly uses
-  more action types than this one did.
-- The "today" list prefers the app's own `planTasksForToday` action when
-  it's fresh (dated today); otherwise it falls back to a
-  `dueDay`/`dueWithTime` guess, and finally to "everything not done" if
-  neither matches anything - which can mean a full backlog rather than a
-  curated list, on an account whose last sync predates that day's planning.
+- Handled TASK action types, confirmed against
+  `root-store/meta/task-shared.actions.ts` and its scheduling meta-reducer
+  in the super-productivity GitHub repo: `addTask`, `updateTask`,
+  `updateTasks`, `scheduleTaskWithTime`, `reScheduleTaskWithTime`,
+  `planTasksForToday`, `unscheduleTask`, `deleteTask`, `deleteTasks`,
+  `moveToArchive`, `restoreTask`, `restoreDeletedTask`. Everything else in
+  that file (`convertToMainTask`, `convertToSubTask`, `moveToOtherProject`,
+  `setDeadline`/deadline-related actions, `applyShortSyntax`,
+  `addTagToTask`, ...) is a no-op - the task keeps whatever state it had
+  before that action, which is usually harmless (most of those don't touch
+  title/isDone/due-date) but not guaranteed to be.
+- The Today list is exactly `task.dueDay`/`task.dueWithTime === today`, no
+  broader fallback - confirmed from `tag.const.ts`'s own doc comment
+  ("membership is determined by task.dueDay") plus
+  `task-shared-scheduling.reducer.ts`. `TODAY_TAG.taskIds`, which the real
+  app also maintains, is purely display ordering and isn't tracked here -
+  irrelevant for a watch just listing titles. An account with genuinely
+  nothing due today will correctly show an empty list rather than a
+  backlog dump.
 
 None of this is guesswork about *how to write a Pebble watchapp* — the
 AppMessage/MenuLayer/Storage APIs and the phone-relay networking
@@ -160,12 +166,6 @@ uncertainty that's left is narrowly about less-common Super Productivity
 action types this session's one test account never happened to exercise.
 
 ## Building
-
-**Not yet compiled in this environment** — there's no Pebble SDK/ARM
-toolchain installed here (`pebble-tool` / `arm-none-eabi-gcc` are both
-absent), and installing the real one requires network access to
-Pebble/Rebble's SDK distribution, which felt like the wrong thing to do
-without checking first. Once you have the toolchain:
 
 ```bash
 # Rebble's maintained pebble-tool (the original Pebble SDK build servers are gone)

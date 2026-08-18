@@ -23,8 +23,8 @@ const today = store.todayStr();
 // { serverSeq, op: {...}, receivedAt }, and for TASK entities op.payload is
 // a Redux-action envelope { actionPayload: {...} } whose shape depends on
 // op.actionType - NOT a flat entity record. entry() below builds that real
-// shape for the TASK action types actually observed in a live account's
-// full op history.
+// shape for the TASK action types confirmed against
+// root-store/meta/task-shared.actions.ts in the super-productivity repo.
 function entry(actionType, actionPayload) {
   return {
     serverSeq: 1,
@@ -91,6 +91,89 @@ check('updateTask on an unknown id creates a bare record rather than throwing', 
   assert.strictEqual(state.task.ghost.isDone, true);
 });
 
+check('planTasksForToday sets dueDay on existing tasks (the real today-membership field)', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Zebra', isDone: false, dueDay: '2099-01-01' }),
+      addTask({ id: 'b', title: 'Apple', isDone: true }),
+      planTasksForToday(today, ['a', 'b']),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueDay, today);
+  assert.strictEqual(state.task.b.dueDay, today);
+});
+
+check('planTasksForToday ignores ids that do not exist yet (matches the real reducer)', () => {
+  const state = store.emptyState();
+  store.applyOperations([planTasksForToday(today, ['ghost'])], state);
+  assert.strictEqual(state.task.ghost, undefined);
+});
+
+check('unscheduleTask clears dueDay/dueWithTime/remindAt', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'X', dueDay: today, remindAt: 123 }),
+      entry('[Task Shared] unscheduleTask', { id: 'a' }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueDay, undefined);
+  assert.strictEqual(state.task.a.remindAt, undefined);
+});
+
+check('unscheduleTask with isLeaveInToday keeps the task in today', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'X', dueWithTime: Date.now() }),
+      entry('[Task Shared] unscheduleTask', { id: 'a', isLeaveInToday: true, today: today }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueDay, today);
+  assert.strictEqual(state.task.a.dueWithTime, undefined);
+});
+
+check('deleteTask removes the task entirely', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'X', dueDay: today }),
+      entry('[Task Shared] deleteTask', { task: { id: 'a' } }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a, undefined);
+});
+
+check('deleteTasks (bulk) removes all listed tasks', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'X', dueDay: today }),
+      addTask({ id: 'b', title: 'Y', dueDay: today }),
+      entry('[Task Shared] deleteTasks', { taskIds: ['a', 'b'] }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(state.task, {});
+});
+
+check('moveToArchive removes tasks from the active view even if dueDay still says today', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'X', dueDay: today, isDone: true }),
+      entry('[Task Shared] moveToArchive', { tasks: [{ id: 'a' }] }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a, undefined);
+});
+
 check('unrecognized TASK actionType is ignored, not thrown', () => {
   const state = store.emptyState();
   assert.doesNotThrow(() => {
@@ -108,32 +191,25 @@ check('malformed op does not throw', () => {
   });
 });
 
-check('getTodayTasks prefers planTasksForToday when it matches today', () => {
+check('getTodayTasks only returns tasks actually due today - no backlog fallback', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
-      addTask({ id: 'a', title: 'Zebra', isDone: false, dueDay: '2099-01-01' }), // due date says NOT today
-      addTask({ id: 'b', title: 'Apple', isDone: true }),
-      planTasksForToday(today, ['a', 'b']), // but the app says both are planned for today
+      addTask({ id: 'a', title: 'Zebra', isDone: false, dueDay: today }),
+      addTask({ id: 'b', title: 'Apple', isDone: true, dueDay: today }),
+      addTask({ id: 'c', title: 'Backlog, no due date', isDone: false }),
+      addTask({ id: 'd', title: 'Due some other day', isDone: false, dueDay: '2099-01-01' }),
     ],
     state
   );
   const tasks = store.getTodayTasks(state, 30);
-  assert.deepStrictEqual(tasks.map((t) => t.id), ['a', 'b']); // not-done ('a') before done ('b')
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['a', 'b']); // not-done ('a') before done ('b'); c and d excluded
 });
 
-check('getTodayTasks ignores a stale planTasksForToday for a different day', () => {
+check('getTodayTasks returns nothing when nothing is due today (no fallback)', () => {
   const state = store.emptyState();
-  store.applyOperations(
-    [
-      addTask({ id: 'a', title: 'Today via dueDay', isDone: false, dueDay: today }),
-      addTask({ id: 'b', title: 'Planned yesterday', isDone: false }),
-      planTasksForToday('2099-01-01', ['b']), // stale/future plan, not for today
-    ],
-    state
-  );
-  const tasks = store.getTodayTasks(state, 30);
-  assert.deepStrictEqual(tasks.map((t) => t.id), ['a']);
+  store.applyOperations([addTask({ id: 'a', title: 'Backlog', isDone: false })], state);
+  assert.deepStrictEqual(store.getTodayTasks(state, 30), []);
 });
 
 check('getTodayTasks falls back to dueWithTime (calendar-imported tasks) when dueDay is absent', () => {
@@ -142,19 +218,6 @@ check('getTodayTasks falls back to dueWithTime (calendar-imported tasks) when du
   todayNoon.setHours(12, 0, 0, 0);
   store.applyOperations(
     [addTask({ id: 'a', title: 'Calendar event', isDone: false, dueWithTime: todayNoon.getTime() })],
-    state
-  );
-  const tasks = store.getTodayTasks(state, 30);
-  assert.deepStrictEqual(tasks.map((t) => t.id), ['a']);
-});
-
-check('getTodayTasks falls back to not-done tasks when nothing matches today', () => {
-  const state = store.emptyState();
-  store.applyOperations(
-    [
-      addTask({ id: 'a', title: 'No due date', isDone: false }),
-      addTask({ id: 'b', title: 'Done already', isDone: true }),
-    ],
     state
   );
   const tasks = store.getTodayTasks(state, 30);
