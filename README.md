@@ -60,6 +60,10 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
   pairing page. `src/pkjs/lib/pairing-page.js` mirrors this same markup and
   is what actually ships, inlined as a `data:` URI and opened from the
   watchapp's Settings entry in the Pebble mobile app.
+- **`resources/images/icon.png`** — the watch app-launcher icon: Super
+  Productivity's own checkmark logo (`src/assets/icons/sp.svg` in the
+  super-productivity repo, MIT-licensed), rendered down to Pebble's 25×25
+  menu-icon size limit.
 
 ## ⚠️ What is verified vs. assumed
 
