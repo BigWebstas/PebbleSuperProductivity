@@ -30,20 +30,27 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
 ### Components
 
 - **`src/c/main.c`** — the watchapp. A sectioned `MenuLayer`: a "Resync" row
-  pinned to section 0 with a red background (a standing call-to-action, not
-  just another list item), its subtitle reflecting live sync status so a
-  failed resync is visible even with a cached list still showing, followed
-  by one section per project group when "Group tasks by project" is on
-  (bold, underlined, blue project-name header per section - drawn manually
-  with `graphics_draw_text`/`graphics_draw_line`, since Pebble has no
-  built-in bold+underline cell style) or a single unheaded section when
-  it's off. Select-click on a task toggles done/not-done, and a done task's
-  "Done" status shows centered under its title. A selected title too wide
-  for the screen scrolls as a looping marquee, black background/white text
-  matching the platform's own invert-on-select style (`AppTimer`-driven,
-  redrawn via `menu_draw_row`'s own selection-state check - see "Marquee
-  title scrolling" below); other rows keep `menu_cell_basic_draw`'s normal
-  truncation. Persists the last-synced list via the `Storage` API so the
+  pinned to section 0 with a red background and black text (a standing
+  call-to-action, not just another list item), its subtitle reflecting live
+  sync status so a failed resync is visible even with a cached list still
+  showing, followed by one section per project group when "Group tasks by
+  project" is on (large, bold, underlined, blue project-name header per
+  section - drawn manually with `graphics_draw_text`/`graphics_draw_line`,
+  since Pebble has no built-in bold+underline cell style) or a single
+  unheaded section when it's off. Every task row (not just the ones that
+  need to scroll or show "Done") is drawn through the same custom path
+  rather than `menu_cell_basic_draw`, so title size is consistent across the
+  whole list; select-click toggles done/not-done, and a done task's "Done"
+  status shows centered under its title (something `menu_cell_basic_draw`'s
+  subtitle can't do - it's always left-aligned). A selected title too wide
+  for the screen scrolls as a looping marquee instead, black background/
+  white text matching the platform's own invert-on-select style
+  (`AppTimer`-driven, redrawn via `menu_draw_row`'s own selection-state
+  check - see "Marquee title scrolling" below). The empty/status screen
+  shown before any task list has ever loaded animates ("Syncing" ->
+  "Syncing." -> ".." -> "...", another `AppTimer`) while that first sync is
+  in flight, instead of sitting on static text with no sign anything is
+  happening. Persists the last-synced list via the `Storage` API so the
   list survives an app relaunch even offline.
 - **`src/pkjs/index.js`** — the sync engine. Downloads operations from
   SuperSync, replays them into a local task cache, decrypts payloads if
@@ -174,6 +181,22 @@ traffic. Since then, three things resolved almost everything that was
   `scripts/test-task-store.js` case that round-trips this exact upload
   shape through `applyOperations()`, plus a manual encrypt/decrypt check
   through `createCrypto()`.
+- **`downloadOps`'s `excludeClient` query param was an unverified
+  assumption, and index.js no longer sends it.** Every other route/field in
+  this file was checked against real traffic; this one wasn't - it was
+  meant purely as an optimization to avoid re-downloading this client's own
+  already-applied uploads (which `saveLastSeq()` after each upload already
+  makes unnecessary anyway, by advancing past them). A completed-task
+  change made on another device not coming back down on the next sync
+  matches exactly the kind of bug a wrong assumption about that param's
+  real filtering semantics would cause. Removing it is safe either way:
+  `task-store.js`'s merges are idempotent, so re-downloading and
+  re-applying this client's own ops (on the rare occasion `saveLastSeq`
+  hasn't already skipped past them) is a no-op, not a correctness risk.
+  Verified in the emulator end-to-end: a task marked done by a different
+  `clientId`, via a plain `"[Task Shared] updateTask"` op the same as any
+  other client would send, now reliably shows up as "Done" on the watch
+  after a resync.
 
 **Known gaps, not "assumed" so much as "not yet built":**
 - Handled TASK action types, confirmed against
@@ -220,31 +243,46 @@ traffic. Since then, three things resolved almost everything that was
   consecutive `TASK_PROJECT` values - when grouping is off, every row gets
   `''`, which always collapses to one run covering the whole list, so the
   off case is a special case of the same code path, not a separate one.
-- **Marquee title scrolling and centered "Done" status**: `menu_draw_row`
-  takes over drawing a task row itself (instead of `menu_cell_basic_draw`)
-  whenever the title needs to scroll, or the task is done - the latter
-  because `menu_cell_basic_draw`'s subtitle is always left-aligned, with no
-  way to center "Done" under the title. That custom path picks its
-  background/text colors from the row's own selection state (black
-  background/white text selected, white/black unselected) to match the
-  platform's own invert-on-select cell style exactly - confirmed in the
-  emulator that skipping this fill leaves stale (black) framebuffer content
-  behind the text. When scrolling, the title is drawn twice back-to-back at
-  a scrolling x-offset (an `AppTimer` ticking every 300ms) so the full title
-  is eventually readable instead of permanently ellipsis-truncated;
-  `selection_changed` resets the offset and starts/stops the timer as
-  selection moves on/off a too-wide row. Pebble SDK 4.33.1 has no public
-  `graphics_context_set_clip_rect`-style API, so the "don't bleed into
-  neighboring rows" guarantee comes entirely from `menu_draw_row`'s own
-  `cell_layer` bounds, the same as every other row, not from any manual
-  clip call.
+- **Every task row shares one custom draw path** in `menu_draw_row`, instead
+  of only the ones that need to scroll or show "Done" going through it and
+  everything else falling back to `menu_cell_basic_draw` - that split used
+  to mean a plain row's title rendered in `menu_cell_basic_draw`'s own
+  (larger) default title font, visibly different in size from a
+  scrolling/done title drawn manually with `TITLE_FONT_KEY`. One font for
+  every row fixes that. The custom path also has to pick its own
+  background/text colors from the row's selection state (black background/
+  white text selected, white/black unselected) to match the platform's own
+  invert-on-select cell style exactly, since it no longer gets that for
+  free from `menu_cell_basic_draw` - confirmed in the emulator that
+  skipping this fill leaves stale (black) framebuffer content behind the
+  text.
+- **Marquee title scrolling**: when the selected row's title doesn't fit,
+  it's drawn twice back-to-back at a scrolling x-offset (an `AppTimer`
+  ticking every 300ms) so the full title is eventually readable instead of
+  permanently ellipsis-truncated; `selection_changed` resets the offset and
+  starts/stops the timer as selection moves on/off a too-wide row. Pebble
+  SDK 4.33.1 has no public `graphics_context_set_clip_rect`-style API, so
+  the "don't bleed into neighboring rows" guarantee comes entirely from
+  `menu_draw_row`'s own `cell_layer` bounds, the same as every other row,
+  not from any manual clip call.
+- **Centered "Done" status**: a done task's "Done" label is drawn centered
+  under its title - `menu_cell_basic_draw`'s subtitle is always
+  left-aligned, with no way to override that, which is the other reason
+  every row needs the shared custom draw path above.
 - **Resync row and project headers are colored** to read as distinct UI
   elements rather than just more list rows: Resync is a standing red
-  banner (background stays red regardless of selection, so it can't be
-  mistaken for a task), and project group headers are blue (text and both
-  underlines). Plain color constants (`GColorRed`, `GColorBlue`) - Pebble's
-  SDK degrades these automatically on the B&W platforms this app also
-  targets (aplite, diorite), no per-platform branching needed.
+  banner with black text (background stays red regardless of selection, so
+  it can't be mistaken for a task), and project group headers are large,
+  bold, and blue (text and both underlines). Plain color constants
+  (`GColorRed`, `GColorBlue`) - Pebble's SDK degrades these automatically
+  on the B&W platforms this app also targets (aplite, diorite), no
+  per-platform branching needed.
+- **Syncing animation**: the empty/status screen cycles "Syncing" through 0-3
+  trailing dots (another `AppTimer`, 400ms) while `s_task_count == 0` and a
+  sync is in flight - i.e. only for the very first sync, before any task
+  list has ever loaded. A resync with an already-populated list has its own
+  live status via the Resync row's subtitle instead, so this doesn't apply
+  there.
 
 None of this is guesswork about *how to write a Pebble watchapp* — the
 AppMessage/MenuLayer/Storage APIs and the phone-relay networking

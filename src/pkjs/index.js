@@ -158,13 +158,23 @@ function doSync() {
 
   var client = new supersync.SuperSyncClient({ baseUrl: config.baseUrl, token: config.jwt });
   var crypto = getCrypto();
-  var clientId = getOrCreateClientId();
   var state = loadState();
   var lastSeq = loadLastSeq();
   var isFirstSync = lastSeq === 0 && Object.keys(state.task).length === 0;
 
   var pullPage = function () {
-    return client.downloadOps(lastSeq, clientId, 500).then(function (res) {
+    // Deliberately NOT passing clientId as excludeClient here (unlike every
+    // other wire-format/route detail in this file, that query param was
+    // never checked against live traffic - see supersync-client.js's
+    // downloadOps). A completed-task change made on another device wasn't
+    // coming back down on the next sync; skipping ops by clientId, if the
+    // real server's matching semantics differ at all from this guess, is
+    // exactly the kind of bug that would produce that symptom silently.
+    // Downloading (and re-replaying) this client's own already-applied ops
+    // instead is harmless: applyOperations()'s merges are idempotent, and
+    // saveLastSeq() after each of our own uploads already keeps us from
+    // requesting them again in the first place.
+    return client.downloadOps(lastSeq, null, 500).then(function (res) {
       store.applyOperations(res.ops || [], state, crypto);
       lastSeq = res.latestSeq != null ? res.latestSeq : lastSeq;
       if (res.hasMore) {

@@ -208,6 +208,12 @@ function SuperSyncClient(opts) {
   this.token = opts && opts.token;
 }
 
+// excludeClient is deliberately unused by index.js's doSync() - unlike every
+// other route/field in this file, that query param's filtering semantics
+// were never checked against live traffic, and a mismatch there was the
+// likely cause of a real bug (other devices' completed-task changes not
+// coming back down). Left supported here, rather than removed outright, in
+// case it's ever re-verified against a real account and worth re-enabling.
 SuperSyncClient.prototype.downloadOps = function (sinceSeq, excludeClient, limit) {
   var qs = '?sinceSeq=' + encodeURIComponent(sinceSeq);
   if (limit) {

@@ -87,6 +87,14 @@ static int s_group_count = 0;
 static AppTimer *s_scroll_timer = NULL;
 static int s_scroll_offset_px = 0;
 
+// Cycles "Syncing" -> "Syncing." -> "Syncing.." -> "Syncing..." on the empty
+// screen while the very first sync (no cached task list yet) is in flight -
+// otherwise that screen just sits on static text with no sign anything is
+// happening, for however long the initial full op-log replay takes.
+#define SYNCING_ANIM_INTERVAL_MS 400
+static AppTimer *s_syncing_timer = NULL;
+static int s_syncing_dots = 0;
+
 static void recompute_groups(void) {
   s_group_count = 0;
   int i = 0;
@@ -172,7 +180,7 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
   if (group_idx >= s_group_count || s_groups[group_idx].name[0] == '\0') {
     return 0;
   }
-  return 32;
+  return 40;
 }
 
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
@@ -185,7 +193,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   }
   const char *name = s_groups[group_idx].name;
   GRect bounds = layer_get_bounds(cell_layer);
-  GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+  GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
   GRect text_rect = GRect(6, 2, bounds.size.w - 12, bounds.size.h - 4);
 
   graphics_context_set_text_color(ctx, GColorBlue);
@@ -303,7 +311,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     GRect bounds = layer_get_bounds(cell_layer);
     graphics_context_set_fill_color(ctx, GColorRed);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_context_set_text_color(ctx, GColorBlack);
     GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 22);
     graphics_draw_text(ctx, "Resync", fonts_get_system_font(TITLE_FONT_KEY), title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
@@ -329,19 +337,16 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   int16_t natural_width = title_natural_width(task->title);
   bool needs_marquee = is_selected && natural_width > available;
 
-  if (!needs_marquee && !task->done) {
-    menu_cell_basic_draw(ctx, cell_layer, task->title, NULL, NULL);
-    return;
-  }
-
-  // Custom draw path, needed either because the title has to scroll, or
-  // because "Done" needs to be centered - menu_cell_basic_draw's subtitle
-  // is always left-aligned with no way to override that. Either way this
-  // bypasses that helper, so the row's own background has to be redrawn
-  // here too, using colors matching the platform's own default
-  // invert-on-select cell style (confirmed in the emulator: selected rows
-  // are black background/white text, not white/black like an unselected
-  // row) - otherwise leftover framebuffer content stays behind the text.
+  // Every task row goes through this same custom draw path, not just the
+  // marquee/done ones - menu_cell_basic_draw's own title font (used for the
+  // fast path this used to take) doesn't match TITLE_FONT_KEY, so titles
+  // rendered by it looked a different size than a scrolling/done title
+  // drawn here. Using one font for every row keeps that consistent, and
+  // means the row's own background has to be redrawn here too, using colors
+  // matching the platform's own default invert-on-select cell style
+  // (confirmed in the emulator: selected rows are black background/white
+  // text, not white/black like an unselected row) - otherwise leftover
+  // framebuffer content stays behind the text.
   GColor bg = is_selected ? GColorBlack : GColorWhite;
   GColor fg = is_selected ? GColorWhite : GColorBlack;
   graphics_context_set_fill_color(ctx, bg);
@@ -416,12 +421,46 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
 
 // ---------- empty / status placeholder ----------
 
+static void stop_syncing_animation(void) {
+  if (s_syncing_timer) {
+    app_timer_cancel(s_syncing_timer);
+    s_syncing_timer = NULL;
+  }
+}
+
+static void syncing_timer_callback(void *data) {
+  s_syncing_dots = (s_syncing_dots + 1) % 4;
+  static char s_syncing_text[16];
+  snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing%.*s", s_syncing_dots, "...");
+  text_layer_set_text(s_empty_layer, s_syncing_text);
+  s_syncing_timer = app_timer_register(SYNCING_ANIM_INTERVAL_MS, syncing_timer_callback, NULL);
+}
+
+static void start_syncing_animation(void) {
+  if (s_syncing_timer) {
+    return;
+  }
+  s_syncing_dots = 0;
+  text_layer_set_text(s_empty_layer, "Syncing");
+  s_syncing_timer = app_timer_register(SYNCING_ANIM_INTERVAL_MS, syncing_timer_callback, NULL);
+}
+
 static void update_empty_layer(void) {
   bool show_empty = (s_task_count == 0);
   layer_set_hidden(text_layer_get_layer(s_empty_layer), !show_empty);
   layer_set_hidden(menu_layer_get_layer(s_menu_layer), show_empty);
 
-  if (!show_empty) {
+  // Only the empty screen (no cached list yet at all - i.e. the very first
+  // sync) gets the animation; a resync with a populated list already has
+  // its own live status via the Resync row's subtitle.
+  bool is_initial_syncing = show_empty && s_status_code == STATUS_SYNCING;
+  if (is_initial_syncing) {
+    start_syncing_animation();
+  } else {
+    stop_syncing_animation();
+  }
+
+  if (!show_empty || is_initial_syncing) {
     return;
   }
 
@@ -438,9 +477,6 @@ static void update_empty_layer(void) {
       } else {
         text_layer_set_text(s_empty_layer, "Sync error.\nSelect to retry.");
       }
-      break;
-    case STATUS_SYNCING:
-      text_layer_set_text(s_empty_layer, "Syncing...");
       break;
     default:
       text_layer_set_text(s_empty_layer, "No tasks for today.");
@@ -583,6 +619,7 @@ static void window_load(Window *window) {
 
 static void window_unload(Window *window) {
   stop_scroll_timer();
+  stop_syncing_animation();
   menu_layer_destroy(s_menu_layer);
   text_layer_destroy(s_empty_layer);
   status_bar_layer_destroy(s_status_bar);
