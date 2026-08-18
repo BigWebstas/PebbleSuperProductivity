@@ -1,0 +1,45 @@
+{
+  "name": "pebble-super-productivity",
+  "version": "0.1.0",
+  "description": "Pebble/PebbleOS watchapp that syncs tasks with Super Productivity's SuperSync server",
+  "author": "BW",
+  "private": true,
+  "keywords": ["pebble-app"],
+  "scripts": {
+    "test": "node scripts/test-crypto.js && node scripts/test-task-store.js"
+  },
+  "dependencies": {},
+  "pebble": {
+    "displayName": "Super Productivity",
+    "uuid": "e9d1f6cd-ca0e-4f09-877e-de9ebbaaac49",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "projectType": "native",
+    "capabilities": [
+      "configurable"
+    ],
+    "resources": {
+      "media": []
+    },
+    "messageKeys": [
+      "MSG_TYPE",
+      "TASK_TOTAL",
+      "TASK_INDEX",
+      "TASK_ID",
+      "TASK_TITLE",
+      "TASK_DONE",
+      "STATUS_CODE",
+      "STATUS_MSG"
+    ]
+  }
+}

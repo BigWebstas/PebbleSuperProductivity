@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pair with SuperSync</title>
+<style>
+  body { font-family: -apple-system, Roboto, sans-serif; margin: 0; padding: 16px; background: #fff; color: #111; }
+  h1 { font-size: 18px; }
+  label { display: block; margin-top: 14px; font-size: 13px; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; }
+  button { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; }
+  button.secondary { background: #eee; color: #111; margin-top: 8px; }
+  p.hint { font-size: 12px; color: #666; }
+  p.error { font-size: 13px; color: #c00; }
+  p.success { font-size: 13px; color: #0a0; }
+</style>
+</head>
+<body>
+  <h1>Pair Super Productivity with your watch</h1>
+  <p class="hint">
+    This app relays over Bluetooth via your phone (Pebble watchapps have no
+    networking of their own), so pairing happens here in the phone browser,
+    not on the watch.
+  </p>
+
+  <label for="baseUrl">SuperSync server URL</label>
+  <input id="baseUrl" type="url" value="https://sync.super-productivity.com">
+
+  <label for="email">Account email</label>
+  <input id="email" type="email" placeholder="you@example.com">
+
+  <label for="password">Sync encryption password</label>
+  <input id="password" type="password" placeholder="Only used to decrypt on this phone - never sent anywhere">
+  <p class="hint">
+    This is the end-to-end encryption password you set in Super
+    Productivity's sync settings (not your login password, if those
+    differ). It never leaves this device: it's used locally to derive the
+    AES key that decrypts your tasks.
+  </p>
+
+  <label for="jwt">SuperSync access token</label>
+  <input id="jwt" type="text" placeholder="Paste the token shown after you log in below">
+  <p class="hint">
+    SuperSync accounts are authenticated via an emailed magic link or a
+    passkey, not a password, so there's no login form here. Tap "Open
+    SuperSync login" below, sign in there, copy the token it shows you
+    ("Connection Successful - copy this token and paste it in Super
+    Productivity's sync settings"), then come back here and paste it above.
+    It's the same token you'd paste into Super Productivity's own
+    Settings → Sync → SuperSync screen.
+  </p>
+
+  <button id="openLoginBtn" class="secondary">Open SuperSync login</button>
+  <p id="status"></p>
+
+  <button id="saveBtn">Save &amp; sync</button>
+  <button id="cancelBtn" class="secondary">Cancel</button>
+
+<script>
+(function () {
+  function qsParam(name) {
+    var m = new RegExp('[?&]' + name + '=([^&]*)').exec(location.search);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  document.getElementById('baseUrl').value = qsParam('baseUrl') || document.getElementById('baseUrl').value;
+  document.getElementById('email').value = qsParam('email') || '';
+
+  function setStatus(msg, isError) {
+    var el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = isError ? 'error' : 'success';
+  }
+
+  function returnToWatchApp(data) {
+    var encoded = encodeURIComponent(JSON.stringify(data));
+    location.href = 'pebblejs://close#' + encoded;
+  }
+
+  document.getElementById('openLoginBtn').addEventListener('click', function () {
+    var baseUrl = document.getElementById('baseUrl').value.replace(/\/+$/, '');
+    // sync.super-productivity.com's own root page is the login/"Connect"
+    // portal that issues the copyable token - no custom auth flow needed.
+    window.open(baseUrl + '/', '_blank');
+    setStatus('Log in there, copy the token it shows you, then paste it below.', false);
+  });
+
+  document.getElementById('saveBtn').addEventListener('click', function () {
+    var jwt = document.getElementById('jwt').value.trim();
+    if (!jwt) {
+      setStatus('Paste your SuperSync token first.', true);
+      return;
+    }
+    returnToWatchApp({
+      baseUrl: document.getElementById('baseUrl').value.replace(/\/+$/, ''),
+      email: document.getElementById('email').value.trim(),
+      password: document.getElementById('password').value,
+      jwt: jwt
+    });
+  });
+
+  document.getElementById('cancelBtn').addEventListener('click', function () {
+    returnToWatchApp({ cancelled: true });
+  });
+})();
+</script>
+</body>
+</html>
