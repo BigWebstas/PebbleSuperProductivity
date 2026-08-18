@@ -29,9 +29,12 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
 
 ### Components
 
-- **`src/c/main.c`** — the watchapp. A `MenuLayer` showing today's tasks;
-  select-click toggles done/not-done. Persists the last-synced list via the
-  `Storage` API so the list survives an app relaunch even offline.
+- **`src/c/main.c`** — the watchapp. A `MenuLayer` showing today's tasks,
+  with a "Resync" row pinned to the top (its subtitle reflects live sync
+  status, so a failed resync is visible even with a cached list still
+  showing) followed by the tasks themselves; select-click on a task toggles
+  done/not-done. Persists the last-synced list via the `Storage` API so the
+  list survives an app relaunch even offline.
 - **`src/pkjs/index.js`** — the sync engine. Downloads operations from
   SuperSync, replays them into a local task cache, decrypts payloads if
   end-to-end encryption is on, sends the day's tasks to the watch, and

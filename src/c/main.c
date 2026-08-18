@@ -85,20 +85,53 @@ static void request_sync(void);
 
 // ---------- menu layer callbacks ----------
 
+// When there are tasks, row 0 is always a "Resync" action, and task rows
+// shift down by one (cell_index->row - 1 into s_tasks). When the list is
+// empty, there are no task rows to shift, so row 0 keeps its existing job
+// as the empty/error screen's retry target.
 static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
   // The menu layer is hidden whenever s_task_count is 0 (see
   // update_empty_layer), but it still owns the window's click config, so it
   // needs at least one reportable row for SELECT to be dispatched at all -
   // otherwise "Select to retry" on the error screen is dead text. Row 0 is
   // never actually drawn in that state since the layer is hidden.
-  return s_task_count > 0 ? (uint16_t)s_task_count : 1;
+  return s_task_count > 0 ? (uint16_t)(s_task_count + 1) : 1;
 }
 
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
-  if (cell_index->row >= (uint16_t)s_task_count) {
+  if (s_task_count == 0) {
     return;
   }
-  Task *task = &s_tasks[cell_index->row];
+  if (cell_index->row == 0) {
+    // Reflects live sync status so a resync failure is visible even while
+    // the previously-cached list is still showing, instead of being
+    // silently swallowed (only the empty/error screen showed status
+    // before this row existed).
+    static char s_resync_subtitle[MAX_STATUS_MSG_LEN + 16];
+    const char *subtitle = "Get latest tasks";
+    switch (s_status_code) {
+      case STATUS_SYNCING:
+        subtitle = "Syncing...";
+        break;
+      case STATUS_ERROR:
+        if (s_status_msg[0] != '\0') {
+          snprintf(s_resync_subtitle, sizeof(s_resync_subtitle), "Failed: %s", s_status_msg);
+          subtitle = s_resync_subtitle;
+        } else {
+          subtitle = "Sync failed";
+        }
+        break;
+      default:
+        break;
+    }
+    menu_cell_basic_draw(ctx, cell_layer, "Resync", subtitle, NULL);
+    return;
+  }
+  uint16_t task_row = cell_index->row - 1;
+  if (task_row >= (uint16_t)s_task_count) {
+    return;
+  }
+  Task *task = &s_tasks[task_row];
   menu_cell_basic_draw(ctx, cell_layer, task->title, task->done ? "Done" : NULL, NULL);
 }
 
@@ -120,10 +153,16 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     request_sync();
     return;
   }
-  if (cell_index->row >= (uint16_t)s_task_count) {
+  if (cell_index->row == 0) {
+    // The "Resync" row atop the populated list.
+    request_sync();
     return;
   }
-  Task *task = &s_tasks[cell_index->row];
+  uint16_t task_row = cell_index->row - 1;
+  if (task_row >= (uint16_t)s_task_count) {
+    return;
+  }
+  Task *task = &s_tasks[task_row];
   task->done = !task->done;
   save_tasks();
   menu_layer_reload_data(s_menu_layer);
@@ -232,6 +271,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       } else {
         s_status_msg[0] = '\0';
       }
+      // update_empty_layer() only redraws the empty-state text layer, which
+      // stays hidden while s_task_count > 0 - reload_data is what actually
+      // refreshes the Resync row's status subtitle in that case.
+      menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
       break;
     }
