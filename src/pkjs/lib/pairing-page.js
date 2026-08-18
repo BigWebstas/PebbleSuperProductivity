@@ -14,7 +14,7 @@ function escapeHtmlAttr(s) {
     .replace(/>/g, '&gt;');
 }
 
-function buildPairingPageUrl(baseUrl, email) {
+function buildPairingPageUrl(baseUrl, email, groupByProject) {
   var html = '<!doctype html>\n' +
 '<html lang="en">\n' +
 '<head>\n' +
@@ -24,8 +24,12 @@ function buildPairingPageUrl(baseUrl, email) {
 '<style>\n' +
 '  body { font-family: -apple-system, Roboto, sans-serif; margin: 0; padding: 16px; background: #fff; color: #111; }\n' +
 '  h1 { font-size: 18px; }\n' +
+'  h2 { font-size: 15px; margin-top: 24px; }\n' +
 '  label { display: block; margin-top: 14px; font-size: 13px; font-weight: 600; }\n' +
 '  input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; }\n' +
+'  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }\n' +
+'  .checkbox-row input { width: auto; margin: 0; }\n' +
+'  .checkbox-row label { display: inline; margin: 0; font-weight: normal; }\n' +
 '  button { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; }\n' +
 '  button.secondary { background: #eee; color: #111; margin-top: 8px; }\n' +
 '  p.hint { font-size: 12px; color: #666; }\n' +
@@ -71,6 +75,16 @@ function buildPairingPageUrl(baseUrl, email) {
 '  <button id="openLoginBtn" class="secondary">Open SuperSync login</button>\n' +
 '  <p id="status"></p>\n' +
 '\n' +
+'  <h2>Watch display</h2>\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="groupByProject" type="checkbox"' + (groupByProject ? ' checked' : '') + '>\n' +
+'    <label for="groupByProject">Group tasks by project</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Shows a bold, underlined project name above each group of tasks on\n' +
+'    the watch, instead of one flat list.\n' +
+'  </p>\n' +
+'\n' +
 '  <button id="saveBtn">Save &amp; sync</button>\n' +
 '  <button id="cancelBtn" class="secondary">Cancel</button>\n' +
 '\n' +
@@ -105,7 +119,8 @@ function buildPairingPageUrl(baseUrl, email) {
 '      baseUrl: document.getElementById(\'baseUrl\').value.replace(/\\/+$/, \'\'),\n' +
 '      email: document.getElementById(\'email\').value.trim(),\n' +
 '      password: document.getElementById(\'password\').value,\n' +
-'      jwt: jwt\n' +
+'      jwt: jwt,\n' +
+'      groupByProject: document.getElementById(\'groupByProject\').checked\n' +
 '    });\n' +
 '  });\n' +
 '\n' +

@@ -128,6 +128,7 @@ function sendTaskAt(tasks, index) {
     TASK_ID: String(t.id),
     TASK_TITLE: String(t.title).slice(0, 63),
     TASK_DONE: t.isDone ? 1 : 0,
+    TASK_PROJECT: String(t.project || '').slice(0, 31),
   };
   Pebble.sendAppMessage(dict, function () {
     sendTaskAt(tasks, index + 1);
@@ -206,7 +207,7 @@ function doSync() {
     .then(function () {
       saveState(state);
       saveLastSeq(lastSeq);
-      var tasks = store.getTodayTasks(state, MAX_TASKS);
+      var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject);
       sendTaskListToWatch(tasks);
       sendStatus(STATUS_OK);
     })
@@ -283,7 +284,11 @@ Pebble.addEventListener('appmessage', function (e) {
 
 Pebble.addEventListener('showConfiguration', function () {
   var config = loadConfig() || {};
-  var url = pairingPage.buildPairingPageUrl(config.baseUrl || supersync.DEFAULT_BASE_URL, config.email || '');
+  var url = pairingPage.buildPairingPageUrl(
+    config.baseUrl || supersync.DEFAULT_BASE_URL,
+    config.email || '',
+    !!config.groupByProject
+  );
   Pebble.openURL(url);
 });
 
@@ -302,7 +307,12 @@ Pebble.addEventListener('webviewclosed', function (e) {
     return;
   }
 
-  saveConfig({ baseUrl: result.baseUrl || supersync.DEFAULT_BASE_URL, email: result.email, jwt: result.jwt });
+  saveConfig({
+    baseUrl: result.baseUrl || supersync.DEFAULT_BASE_URL,
+    email: result.email,
+    jwt: result.jwt,
+    groupByProject: !!result.groupByProject,
+  });
 
   if (result.password) {
     localStorage.setItem('sp_password', result.password);

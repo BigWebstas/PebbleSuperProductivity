@@ -1,5 +1,5 @@
 // Maintains a local cache of SuperSync entities (rebuilt by replaying
-// operations) and derives "today's" task list from it.
+// operations) and derives the watch's task list from it.
 //
 // See the top-of-file comment in supersync-client.js for the operation
 // field-name assumptions this replay logic depends on.
@@ -9,36 +9,35 @@
 // `op.opType` (CRT/UPD/...) doesn't tell you how to interpret the payload
 // for TASK entities - `op.actionType` does, and each action type has its
 // own bespoke `payload.actionPayload` shape, mirroring the app's actual
-// NgRx actions (root-store/meta/task-shared.actions.ts) and their meta-
-// reducer (root-store/meta/task-shared-meta-reducers/
-// task-shared-scheduling.reducer.ts) in the super-productivity GitHub repo.
+// NgRx actions (root-store/meta/task-shared.actions.ts,
+// features/project/store/project.actions.ts) and their meta-reducers
+// (root-store/meta/task-shared-meta-reducers/*) in the super-productivity
+// GitHub repo.
 //
-// What actually determines "is this task in Today", confirmed from
-// tag.const.ts's own doc comment plus the scheduling reducer: **task.dueDay
-// (or task.dueWithTime falling on today)**, not tag membership. The
-// TODAY_TAG.taskIds list the app also maintains is purely display
-// ordering, not membership, and isn't tracked here - the watch doesn't
-// need to render a user-chosen order among a handful of titles.
-// `dueDay`/`dueWithTime` are mutually exclusive (setting one clears the
-// other) per the app's own "ARCHITECTURE-DECISIONS.md Decision #1".
+// getActiveTasks() returns every main task that is NOT sitting in a
+// project's backlog - no date filtering. Confirmed against
+// project.model.ts: backlog membership lives on the PROJECT entity
+// (project.taskIds vs project.backlogTaskIds), not on the task itself, so
+// it's tracked here as a synthetic task.__inBacklog flag, seeded from the
+// SYNC_IMPORT project snapshot and kept up to date by the handful of
+// "[Project] ... Backlog ..." move actions and the isAddToBacklog/
+// isMoveToBacklog flags addTask/scheduleTaskWithTime/applyShortSyntax
+// carry. (project.actions.ts also has several backlog *reorder* actions -
+// moveProjectTask{Up,Down,ToTop,ToBottom,In}BacklogList - which only
+// change position within the backlog, never membership, so they're
+// deliberately not handled here.)
 //
-// getTodayTasks() only returns tasks with dueDay/dueWithTime === today -
-// no backlog fallback. An account with genuinely nothing planned for today
-// shows an empty list, not a dump of the backlog.
-//
-// Subtasks (task.parentId set) never carry their own due date in the real
-// app - membership in Today is a main-task-only concept, and a subtask is
-// shown by being nested under its (visible) parent via parentId's
-// task.subTaskIds. getTodayTasks() mirrors that: it selects and sorts main
-// tasks only (by today-membership), then interleaves each one's subtasks
-// immediately after it, regardless of the subtask's own isDone/due-date.
+// Subtasks (task.parentId set) are never selected independently - a
+// subtask is shown by riding along with its (visible) parent via the
+// parent's subTaskIds, indented, regardless of the subtask's own
+// isDone/backlog status.
 //
 // SYNC_IMPORT/BACKUP_IMPORT/REPAIR carry a full NgRx EntityState snapshot
-// per feature slice (payload.task = { ids: [...], entities: {...} }),
-// also confirmed against the same real account, whose op history starts
-// with exactly this op - without it, a task created before the visible
-// history begins would only ever show whatever fields a later action
-// happened to touch.
+// per feature slice (payload.task = { ids: [...], entities: {...} },
+// payload.project likewise), also confirmed against the same real
+// account, whose op history starts with exactly this op - without it, a
+// task/project created before the visible history begins would only ever
+// show whatever fields a later action happened to touch.
 'use strict';
 
 function todayStr() {
@@ -48,30 +47,11 @@ function todayStr() {
   return d.getFullYear() + '-' + mm + '-' + dd;
 }
 
-function dateStrFromMs(ms) {
-  var d = new Date(ms);
-  var mm = ('0' + (d.getMonth() + 1)).slice(-2);
-  var dd = ('0' + d.getDate()).slice(-2);
-  return d.getFullYear() + '-' + mm + '-' + dd;
-}
-
-// dueWithTime is a Unix-epoch-ms timestamp (used by calendar-imported and
-// time-of-day-scheduled tasks); dueDay is a plain "YYYY-MM-DD" string. The
-// app keeps these mutually exclusive, but this tolerates both being set
-// anyway rather than assuming that invariant holds across every op.
-function taskDueDay(task) {
-  if (task.dueDay) {
-    return task.dueDay;
-  }
-  if (task.dueWithTime) {
-    return dateStrFromMs(task.dueWithTime);
-  }
-  return null;
-}
-
-// state: { task: { [id]: {id, title, isDone, dueDay|dueWithTime, ...} } }
+// state: { task: { [id]: {id, title, isDone, parentId?, projectId?,
+//                          __inBacklog?, ...} },
+//          project: { [id]: {id, title, ...} } }
 function emptyState() {
-  return { task: {} };
+  return { task: {}, project: {} };
 }
 
 function ensureCollection(state, entityType) {
@@ -81,10 +61,23 @@ function ensureCollection(state, entityType) {
   return state[entityType];
 }
 
-function replaceTask(tasks, task) {
-  if (task && task.id) {
-    tasks[task.id] = task;
+function setInBacklog(tasks, id, val) {
+  if (id && tasks[id]) {
+    tasks[id].__inBacklog = val;
   }
+}
+
+// Like a plain replace, but carries the synthetic __inBacklog flag
+// forward - real Task payloads never include it (we invented it), so a
+// naive `tasks[id] = task` would silently drop whatever backlog state
+// we'd tracked so far every time one of these full-snapshot actions fires.
+function replaceTaskPreservingBacklog(tasks, task) {
+  if (!task || !task.id) {
+    return;
+  }
+  var prevInBacklog = tasks[task.id] ? tasks[task.id].__inBacklog : false;
+  tasks[task.id] = task;
+  tasks[task.id].__inBacklog = !!prevInBacklog;
 }
 
 function mergeTaskChanges(tasks, id, changes) {
@@ -103,16 +96,29 @@ function applyTaskAction(op, actionPayload, state) {
     return;
   }
   switch (op.actionType) {
+    case '[Task Shared] addTask':
+      replaceTaskPreservingBacklog(tasks, actionPayload.task);
+      if (actionPayload.task) {
+        setInBacklog(tasks, actionPayload.task.id, !!actionPayload.isAddToBacklog);
+      }
+      break;
+
     // These carry a full, already-correct task snapshot (the action
     // creator itself bakes in dueDay/dueWithTime before dispatch) - a
     // straight replace matches what the real reducer's entity-adapter
-    // add/update ends up storing.
-    case '[Task Shared] addTask':
+    // update ends up storing. isMoveToBacklog mirrors
+    // handleScheduleTaskWithTime's backlog-move side effect.
     case '[Task Shared] scheduleTaskWithTime':
     case '[Task Shared] reScheduleTaskWithTime':
+      replaceTaskPreservingBacklog(tasks, actionPayload.task);
+      if (actionPayload.isMoveToBacklog && actionPayload.task) {
+        setInBacklog(tasks, actionPayload.task.id, true);
+      }
+      break;
+
     case '[Task Shared] restoreTask':
     case '[Task Shared] restoreDeletedTask':
-      replaceTask(tasks, actionPayload.task);
+      replaceTaskPreservingBacklog(tasks, actionPayload.task);
       break;
 
     case '[Task Shared] updateTask':
@@ -128,9 +134,9 @@ function applyTaskAction(op, actionPayload, state) {
       break;
 
     // Mirrors handlePlanTasksForToday in task-shared-scheduling.reducer.ts:
-    // sets dueDay to the target day and clears remindAt (and, in the real
-    // reducer, sometimes dueWithTime - skipped here since it doesn't
-    // affect title/isDone/today-membership either way).
+    // sets dueDay to the target day and clears remindAt. Kept for its own
+    // sake (dueDay is still real task state worth having correct) even
+    // though it no longer drives the active-task filter.
     case '[Task Shared] planTasksForToday': {
       var today = actionPayload.today || todayStr();
       (actionPayload.taskIds || []).forEach(function (id) {
@@ -163,17 +169,16 @@ function applyTaskAction(op, actionPayload, state) {
       deleteTasks(tasks, actionPayload.taskIds);
       break;
 
-    // Archived tasks leave the active Today view entirely, regardless of
-    // dueDay.
+    // Archived tasks leave the active view entirely, regardless of
+    // backlog/due-date status.
     case '[Task Shared] moveToArchive':
       deleteTasks(tasks, (actionPayload.tasks || []).map(function (t) { return t.id; }));
       break;
 
     // Mirrors handleApplyShortSyntax in short-syntax-shared.reducer.ts: a
     // task's title can itself carry scheduling ("do the thing today" or
-    // "at 3pm"), which this atomic action applies alongside plain field
-    // changes. A real gap without this - short syntax is a common way
-    // tasks end up due today, and it was silently a no-op before.
+    // "at 3pm") and/or a backlog move, applied atomically alongside plain
+    // field changes.
     case '[Task Shared] applyShortSyntax': {
       var scId = actionPayload.task && actionPayload.task.id;
       if (scId) {
@@ -187,6 +192,9 @@ function applyTaskAction(op, actionPayload, state) {
           scChanges.dueWithTime = undefined;
         }
         mergeTaskChanges(tasks, scId, scChanges);
+        if (info && info.isMoveToBacklog) {
+          setInBacklog(tasks, scId, true);
+        }
       }
       break;
     }
@@ -214,11 +222,60 @@ function applyTaskAction(op, actionPayload, state) {
       mergeTaskChanges(tasks, actionPayload.taskId, { parentId: actionPayload.targetParentId });
       break;
 
+    // The following four, from project.actions.ts's "MOVE TASK ACTIONS"
+    // section, change backlog *membership* (as opposed to the several
+    // *reorder-within-backlog* actions there, which don't and are
+    // deliberately not handled).
+    case '[Project] Auto Move Task from regular to backlog':
+    case '[Project] Move Task from regular to backlog':
+      setInBacklog(tasks, actionPayload.taskId, true);
+      break;
+
+    case '[Project] Auto Move Task from backlog to regular':
+    case '[Project] Move Task from backlog to regular':
+      setInBacklog(tasks, actionPayload.taskId, false);
+      break;
+
     default:
-      // Time tracking, reminders, Today-tag *ordering* (as opposed to
-      // membership - see the top-of-file comment), tags/projects/deadlines,
-      // and other TASK-entity actions don't affect
-      // title/isDone/today-membership - nothing to do.
+      // Time tracking, reminders, Today-tag ordering, tags, deadlines, and
+      // other TASK-entity actions don't affect
+      // title/isDone/backlog-membership - nothing to do.
+      break;
+  }
+}
+
+function applyProjectAction(op, actionPayload, state) {
+  var projects = ensureCollection(state, 'project');
+  if (!actionPayload) {
+    return;
+  }
+  switch (op.actionType) {
+    case '[Project] Add Project':
+      if (actionPayload.project && actionPayload.project.id) {
+        projects[actionPayload.project.id] = actionPayload.project;
+      }
+      break;
+
+    case '[Project] Update Project':
+      if (actionPayload.project && actionPayload.project.id) {
+        projects[actionPayload.project.id] =
+          Object.assign({}, projects[actionPayload.project.id], actionPayload.project.changes);
+      }
+      break;
+
+    // No per-task payload here (just a projectId) - clear the flag for
+    // every task currently attributed to that project instead.
+    case '[Project] Move all backlog tasks to regular': {
+      var tasks = state.task;
+      Object.keys(tasks).forEach(function (id) {
+        if (tasks[id] && tasks[id].projectId === actionPayload.projectId) {
+          tasks[id].__inBacklog = false;
+        }
+      });
+      break;
+    }
+
+    default:
       break;
   }
 }
@@ -250,11 +307,15 @@ function applyOperation(entry, state, crypto) {
       applyTaskAction(op, payload && payload.actionPayload, state);
       return;
     }
+    if (entityType === 'project') {
+      applyProjectAction(op, payload && payload.actionPayload, state);
+      return;
+    }
 
     // Everything else (GLOBAL_CONFIG, TAG, PLUGIN_USER_DATA, ...) is
-    // unused by the watch's "today's tasks" view - kept as a best-effort
-    // flat CRUD merge (this project's original, unverified assumption)
-    // purely so unrelated entity types don't spam the "unhandled" log.
+    // unused by the watch's task list - kept as a best-effort flat CRUD
+    // merge (this project's original, unverified assumption) purely so
+    // unrelated entity types don't spam the "unhandled" log.
     switch (op.opType) {
       case 'CRT': {
         var created = ensureCollection(state, entityType);
@@ -282,12 +343,26 @@ function applyOperation(entry, state, crypto) {
       case 'REPAIR':
         // Confirmed against a live account: this carries a full NgRx
         // EntityState snapshot per feature slice, e.g.
-        // payload.task = { ids: [...], entities: { [id]: Task } }. Only
-        // task entities matter for the watch. This is a full replacement,
-        // not a merge - it fires once, at whatever point the local
-        // history begins.
+        // payload.task = { ids: [...], entities: { [id]: Task } },
+        // payload.project likewise. This is a full replacement, not a
+        // merge - it fires once, at whatever point the local history
+        // begins.
         if (payload && payload.task && payload.task.entities) {
           state.task = payload.task.entities;
+        }
+        if (payload && payload.project && payload.project.entities) {
+          state.project = payload.project.entities;
+          // Seed __inBacklog from each project's backlogTaskIds - this is
+          // the only place backlog membership is available as a
+          // ready-made list rather than an incremental move action.
+          Object.keys(state.project).forEach(function (projectId) {
+            var backlogIds = state.project[projectId].backlogTaskIds || [];
+            backlogIds.forEach(function (taskId) {
+              if (state.task[taskId]) {
+                state.task[taskId].__inBacklog = true;
+              }
+            });
+          });
         }
         break;
       default:
@@ -308,50 +383,86 @@ function isMainTask(t) {
   return !t.parentId;
 }
 
-// Returns up to `limit` rows: main tasks actually due today, each
-// immediately followed by its own subtasks (indented), regardless of the
-// subtask's own isDone/due-date - subtasks aren't independently filtered,
-// they just ride along with their parent.
-function getTodayTasks(state, limit) {
-  var today = todayStr();
+function projectTitleFor(state, task) {
+  var project = task.projectId && state.project && state.project[task.projectId];
+  return (project && project.title) || 'No Project';
+}
+
+function titleCompare(a, b) {
+  // Plain ordinal comparison, not localeCompare(): confirmed against the
+  // basalt emulator that its embedded JS engine throws "Internal error.
+  // Icu error." on locale-aware string ops with no ICU data loaded, and
+  // locale-aware sorting isn't needed for this anyway.
+  var at = String(a);
+  var bt = String(b);
+  return at < bt ? -1 : at > bt ? 1 : 0;
+}
+
+// Returns up to `limit` rows: main tasks that are not sitting in a
+// project's backlog (see the top-of-file comment - no date filtering),
+// each immediately followed by its own subtasks (indented), regardless of
+// the subtask's own isDone/backlog status.
+//
+// When groupByProject is true, rows are grouped by project title (not-
+// done-first, then title, within each group; groups themselves ordered by
+// title, "No Project" included as its own group); every row carries a
+// `project` field equal to its group's title, so a caller can detect
+// group boundaries as runs of equal `project` values. When false, every
+// row's `project` is '' - a single implicit group, matching the flat list
+// this had before grouping existed.
+function getActiveTasks(state, limit, groupByProject) {
   var allTasks = state.task || {};
   var mainTasks = Object.keys(allTasks)
     .map(function (id) { return allTasks[id]; })
-    .filter(function (t) { return t && isMainTask(t); });
+    .filter(function (t) { return t && isMainTask(t) && !t.__inBacklog; });
 
-  var selected = mainTasks.filter(function (t) { return taskDueDay(t) === today; });
-
-  selected.sort(function (a, b) {
+  function withinGroupSort(a, b) {
     if (!!a.isDone !== !!b.isDone) {
       return a.isDone ? 1 : -1;
     }
-    // Plain ordinal comparison, not localeCompare(): confirmed against the
-    // basalt emulator that its embedded JS engine throws "Internal error.
-    // Icu error." on locale-aware string ops with no ICU data loaded, and
-    // locale-aware sorting isn't needed for this anyway.
-    var at = String(a.title);
-    var bt = String(b.title);
-    return at < bt ? -1 : at > bt ? 1 : 0;
-  });
+    return titleCompare(a.title, b.title);
+  }
 
   var rows = [];
-  selected.forEach(function (t) {
-    rows.push({ id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone });
-    (t.subTaskIds || []).forEach(function (subId) {
-      var sub = allTasks[subId];
-      if (sub) {
-        rows.push({ id: sub.id, title: '  ' + (sub.title || '(untitled)'), isDone: !!sub.isDone });
+  if (groupByProject) {
+    var byProject = {};
+    mainTasks.forEach(function (t) {
+      var name = projectTitleFor(state, t);
+      if (!byProject[name]) {
+        byProject[name] = [];
       }
+      byProject[name].push(t);
     });
-  });
+    Object.keys(byProject).sort(titleCompare).forEach(function (name) {
+      byProject[name].sort(withinGroupSort);
+      byProject[name].forEach(function (t) {
+        pushTaskAndSubtasks(rows, allTasks, t, name);
+      });
+    });
+  } else {
+    mainTasks.sort(withinGroupSort);
+    mainTasks.forEach(function (t) {
+      pushTaskAndSubtasks(rows, allTasks, t, '');
+    });
+  }
 
   return rows.slice(0, limit);
+}
+
+function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
+  rows.push({ id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone, project: groupName });
+  (t.subTaskIds || []).forEach(function (subId) {
+    var sub = allTasks[subId];
+    if (sub) {
+      rows.push({ id: sub.id, title: '  ' + (sub.title || '(untitled)'), isDone: !!sub.isDone, project: groupName });
+    }
+  });
 }
 
 module.exports = {
   emptyState: emptyState,
   applyOperation: applyOperation,
   applyOperations: applyOperations,
-  getTodayTasks: getTodayTasks,
+  getActiveTasks: getActiveTasks,
   todayStr: todayStr,
 };

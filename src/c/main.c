@@ -11,6 +11,7 @@
 #define KEY_TASK_ID MESSAGE_KEY_TASK_ID
 #define KEY_TASK_TITLE MESSAGE_KEY_TASK_TITLE
 #define KEY_TASK_DONE MESSAGE_KEY_TASK_DONE
+#define KEY_TASK_PROJECT MESSAGE_KEY_TASK_PROJECT
 #define KEY_STATUS_CODE MESSAGE_KEY_STATUS_CODE
 #define KEY_STATUS_MSG MESSAGE_KEY_STATUS_MSG
 
@@ -35,12 +36,25 @@ enum {
 #define MAX_TASKS 30
 #define MAX_TITLE_LEN 64
 #define MAX_ID_LEN 40
+#define MAX_PROJECT_LEN 32
 
 typedef struct {
   char id[MAX_ID_LEN];
   char title[MAX_TITLE_LEN];
+  char project[MAX_PROJECT_LEN]; // '' when the phone isn't grouping by project
   bool done;
 } Task;
+
+// One entry per contiguous run of equal Task.project in s_tasks (the phone
+// pre-sorts by project when grouping is on, so a run IS a group). When
+// grouping is off the phone sends '' for every task, which always
+// collapses to exactly one group covering the whole list - indistinguishable
+// from the pre-grouping flat-list behavior, by construction.
+typedef struct {
+  char name[MAX_PROJECT_LEN];
+  int start; // index into s_tasks
+  int count;
+} TaskGroup;
 
 static Window *s_main_window;
 static MenuLayer *s_menu_layer;
@@ -54,6 +68,26 @@ static Task s_incoming[MAX_TASKS];
 static int s_status_code = STATUS_SYNCING;
 #define MAX_STATUS_MSG_LEN 64
 static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
+
+static TaskGroup s_groups[MAX_TASKS]; // worst case: every task its own group
+static int s_group_count = 0;
+
+static void recompute_groups(void) {
+  s_group_count = 0;
+  int i = 0;
+  while (i < s_task_count && s_group_count < MAX_TASKS) {
+    int j = i + 1;
+    while (j < s_task_count && strncmp(s_tasks[j].project, s_tasks[i].project, MAX_PROJECT_LEN) == 0) {
+      j++;
+    }
+    strncpy(s_groups[s_group_count].name, s_tasks[i].project, MAX_PROJECT_LEN - 1);
+    s_groups[s_group_count].name[MAX_PROJECT_LEN - 1] = '\0';
+    s_groups[s_group_count].start = i;
+    s_groups[s_group_count].count = j - i;
+    s_group_count++;
+    i = j;
+  }
+}
 
 static const uint32_t PERSIST_KEY_TASKS = 100;
 
@@ -85,24 +119,77 @@ static void request_sync(void);
 
 // ---------- menu layer callbacks ----------
 
-// When there are tasks, row 0 is always a "Resync" action, and task rows
-// shift down by one (cell_index->row - 1 into s_tasks). When the list is
-// empty, there are no task rows to shift, so row 0 keeps its existing job
-// as the empty/error screen's retry target.
+// Section 0 is always the "Resync" action (1 row, no header). When there
+// are tasks, sections 1..s_group_count are one per project group (see
+// recompute_groups()); when the list is empty, section 0 doubles as the
+// empty/error screen's retry target and there are no further sections.
+static uint16_t menu_get_num_sections(MenuLayer *menu_layer, void *context) {
+  return s_task_count > 0 ? (uint16_t)(1 + s_group_count) : 1;
+}
+
 static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
-  // The menu layer is hidden whenever s_task_count is 0 (see
-  // update_empty_layer), but it still owns the window's click config, so it
-  // needs at least one reportable row for SELECT to be dispatched at all -
-  // otherwise "Select to retry" on the error screen is dead text. Row 0 is
-  // never actually drawn in that state since the layer is hidden.
-  return s_task_count > 0 ? (uint16_t)(s_task_count + 1) : 1;
+  if (s_task_count == 0) {
+    // The menu layer is hidden whenever s_task_count is 0 (see
+    // update_empty_layer), but it still owns the window's click config, so
+    // it needs at least one reportable row for SELECT to be dispatched at
+    // all - otherwise "Select to retry" on the error screen is dead text.
+    // Never actually drawn in that state since the layer is hidden.
+    return 1;
+  }
+  if (section_index == 0) {
+    return 1; // Resync row
+  }
+  int group_idx = (int)section_index - 1;
+  if (group_idx >= s_group_count) {
+    return 0;
+  }
+  return (uint16_t)s_groups[group_idx].count;
+}
+
+static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+  if (s_task_count == 0 || section_index == 0) {
+    return 0;
+  }
+  int group_idx = (int)section_index - 1;
+  // An empty group name means grouping is off (every task collapsed into
+  // one '' group) - no header, so this looks exactly like the flat list
+  // this had before grouping existed.
+  if (group_idx >= s_group_count || s_groups[group_idx].name[0] == '\0') {
+    return 0;
+  }
+  return 30;
+}
+
+static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
+  if (s_task_count == 0 || section_index == 0) {
+    return;
+  }
+  int group_idx = (int)section_index - 1;
+  if (group_idx >= s_group_count || s_groups[group_idx].name[0] == '\0') {
+    return;
+  }
+  const char *name = s_groups[group_idx].name;
+  GRect bounds = layer_get_bounds(cell_layer);
+  GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+  GRect text_rect = GRect(6, 2, bounds.size.w - 12, bounds.size.h - 4);
+
+  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_draw_text(ctx, name, bold_font, text_rect,
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+  // Underline sized to the actual rendered text, not the full cell width.
+  GSize text_size = graphics_text_layout_get_content_size(
+      name, bold_font, text_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  int16_t underline_y = 2 + text_size.h;
+  graphics_context_set_stroke_color(ctx, GColorBlack);
+  graphics_draw_line(ctx, GPoint(6, underline_y), GPoint(6 + text_size.w, underline_y));
 }
 
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
   if (s_task_count == 0) {
     return;
   }
-  if (cell_index->row == 0) {
+  if (cell_index->section == 0) {
     // Reflects live sync status so a resync failure is visible even while
     // the previously-cached list is still showing, instead of being
     // silently swallowed (only the empty/error screen showed status
@@ -127,11 +214,15 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     menu_cell_basic_draw(ctx, cell_layer, "Resync", subtitle, NULL);
     return;
   }
-  uint16_t task_row = cell_index->row - 1;
-  if (task_row >= (uint16_t)s_task_count) {
+  int group_idx = (int)cell_index->section - 1;
+  if (group_idx >= s_group_count) {
     return;
   }
-  Task *task = &s_tasks[task_row];
+  int task_idx = s_groups[group_idx].start + (int)cell_index->row;
+  if (task_idx < 0 || task_idx >= s_task_count) {
+    return;
+  }
+  Task *task = &s_tasks[task_idx];
   menu_cell_basic_draw(ctx, cell_layer, task->title, task->done ? "Done" : NULL, NULL);
 }
 
@@ -153,16 +244,20 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     request_sync();
     return;
   }
-  if (cell_index->row == 0) {
+  if (cell_index->section == 0) {
     // The "Resync" row atop the populated list.
     request_sync();
     return;
   }
-  uint16_t task_row = cell_index->row - 1;
-  if (task_row >= (uint16_t)s_task_count) {
+  int group_idx = (int)cell_index->section - 1;
+  if (group_idx >= s_group_count) {
     return;
   }
-  Task *task = &s_tasks[task_row];
+  int task_idx = s_groups[group_idx].start + (int)cell_index->row;
+  if (task_idx < 0 || task_idx >= s_task_count) {
+    return;
+  }
+  Task *task = &s_tasks[task_idx];
   task->done = !task->done;
   save_tasks();
   menu_layer_reload_data(s_menu_layer);
@@ -235,6 +330,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *id_tuple = dict_find(iterator, KEY_TASK_ID);
       Tuple *title_tuple = dict_find(iterator, KEY_TASK_TITLE);
       Tuple *done_tuple = dict_find(iterator, KEY_TASK_DONE);
+      Tuple *project_tuple = dict_find(iterator, KEY_TASK_PROJECT);
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -246,6 +342,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_incoming[idx].id[MAX_ID_LEN - 1] = '\0';
       strncpy(s_incoming[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
       s_incoming[idx].title[MAX_TITLE_LEN - 1] = '\0';
+      strncpy(s_incoming[idx].project, project_tuple ? project_tuple->value->cstring : "", MAX_PROJECT_LEN - 1);
+      s_incoming[idx].project[MAX_PROJECT_LEN - 1] = '\0';
       s_incoming[idx].done = done_tuple && done_tuple->value->int32 != 0;
       break;
     }
@@ -254,6 +352,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       memcpy(s_tasks, s_incoming, sizeof(Task) * (size_t)count);
       s_task_count = count;
       s_status_code = STATUS_OK;
+      recompute_groups();
       save_tasks();
       menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
@@ -306,7 +405,10 @@ static void window_load(Window *window) {
 
   s_menu_layer = menu_layer_create(content_bounds);
   menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks) {
+    .get_num_sections = menu_get_num_sections,
     .get_num_rows = menu_get_num_rows,
+    .get_header_height = menu_get_header_height,
+    .draw_header = menu_draw_header,
     .draw_row = menu_draw_row,
     .select_click = menu_select_click,
   });
@@ -330,6 +432,7 @@ static void window_unload(Window *window) {
 
 static void init(void) {
   load_tasks();
+  recompute_groups();
 
   app_message_register_inbox_received(inbox_received_handler);
   app_message_register_inbox_dropped(inbox_dropped_handler);

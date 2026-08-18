@@ -1,9 +1,9 @@
 # Pebble Super Productivity
 
-A PebbleOS watchapp that shows today's tasks from [Super
-Productivity](https://super-productivity.com) and lets you mark them done
-from your wrist, synced through Super Productivity's own **SuperSync**
-server.
+A PebbleOS watchapp that shows your active tasks from [Super
+Productivity](https://super-productivity.com) - optionally grouped by
+project - and lets you mark them done from your wrist, synced through
+Super Productivity's own **SuperSync** server.
 
 ## Architecture
 
@@ -29,24 +29,30 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
 
 ### Components
 
-- **`src/c/main.c`** — the watchapp. A `MenuLayer` showing today's tasks,
-  with a "Resync" row pinned to the top (its subtitle reflects live sync
-  status, so a failed resync is visible even with a cached list still
-  showing) followed by the tasks themselves; select-click on a task toggles
-  done/not-done. Persists the last-synced list via the `Storage` API so the
-  list survives an app relaunch even offline.
+- **`src/c/main.c`** — the watchapp. A sectioned `MenuLayer`: a "Resync" row
+  pinned to section 0 (its subtitle reflects live sync status, so a failed
+  resync is visible even with a cached list still showing), followed by one
+  section per project group when "Group tasks by project" is on (bold,
+  underlined project-name header per section - drawn manually with
+  `graphics_draw_text`/`graphics_draw_line`, since Pebble has no built-in
+  bold+underline cell style) or a single unheaded section when it's off.
+  Select-click on a task toggles done/not-done. Persists the last-synced
+  list via the `Storage` API so the list survives an app relaunch even
+  offline.
 - **`src/pkjs/index.js`** — the sync engine. Downloads operations from
   SuperSync, replays them into a local task cache, decrypts payloads if
-  end-to-end encryption is on, sends the day's tasks to the watch, and
-  uploads a task-completion operation when you toggle one on the watch.
+  end-to-end encryption is on, sends the active task list to the watch
+  (grouped by project first if that setting is on), and uploads a
+  task-completion operation when you toggle one on the watch.
 - **`src/pkjs/lib/supersync-client.js`** — thin REST client for the
   SuperSync API (`/api/sync/ops`, `/api/sync/restore-points`,
   `/api/sync/restore/:serverSeq`) plus `createCrypto(password)`, which
   builds the real Argon2id/AES-GCM decrypt+encrypt pair (with a per-salt
   key cache, since Argon2id is multi-second at production parameters).
 - **`src/pkjs/lib/task-store.js`** — replays SuperSync's op log into an
-  entity cache and picks "today's" tasks out of it. This is a Redux
-  action-replay log, not a flat CRUD op log - see the file's top comment.
+  entity cache and picks the active (non-backlog) task list out of it,
+  optionally grouped by project. This is a Redux action-replay log, not a
+  flat CRUD op log - see the file's top comment.
 - **`src/pkjs/lib/blake2b.js`, `argon2id.js`** — dependency-free BLAKE2b and
   Argon2id (RFC 9106), specialized for `parallelism=1` (a hardcoded app
   constant). 64-bit words are `[hi, lo]` pairs of plain numbers, not
@@ -104,7 +110,7 @@ traffic. Since then, three things resolved almost everything that was
   legacy PBKDF2 fallback for short/old ciphertexts), confirmed by
   successfully decrypting real tasks - AES-GCM's authentication tag is a
   cryptographic pass/fail, not a guess that merely looks plausible.
-- The operation-replay/today-filter logic (`task-store.js`) is unit tested
+- The operation-replay/active-list logic (`task-store.js`) is unit tested
   in isolation, and was run against one real account's entire decrypted
   500-op history. Run `node scripts/test-task-store.js`.
 - The AppMessage protocol between `main.c` and `index.js` is internally
@@ -153,27 +159,41 @@ traffic. Since then, three things resolved almost everything that was
   `reScheduleTaskWithTime`, `planTasksForToday`, `unscheduleTask`,
   `deleteTask`, `deleteTasks`, `moveToArchive`, `restoreTask`,
   `restoreDeletedTask`, `applyShortSyntax` (typing scheduling info directly
-  into a task's title - a real gap in earlier versions, since this is a
-  common way tasks end up due today), `convertToMainTask`/`convertToSubTask`
-  (subtask promotion/demotion - `convertToMainTask` clearing `parentId` is
-  what makes a promoted subtask visible as a main task at all). Everything
-  else in that file (`moveToOtherProject`, `setDeadline`/deadline-related
-  actions, `addTagToTask`, ...) is a no-op - the task keeps whatever state
-  it had before that action, which is usually harmless (most of those
-  don't touch title/isDone/due-date) but not guaranteed to be.
-- The Today list is exactly `task.dueDay`/`task.dueWithTime === today`, no
-  broader fallback - confirmed from `tag.const.ts`'s own doc comment
-  ("membership is determined by task.dueDay") plus
-  `task-shared-scheduling.reducer.ts`. `TODAY_TAG.taskIds`, which the real
-  app also maintains, is purely display ordering and isn't tracked here -
-  irrelevant for a watch just listing titles. An account with genuinely
-  nothing due today will correctly show an empty list rather than a
-  backlog dump.
-- Subtasks (`task.parentId` set) are never selected independently - per
-  `task.model.ts`, only main tasks carry a due date, so Today membership
-  is a main-task-only concept. A subtask shows up only by riding along
-  with its own (visible-today) parent's `subTaskIds`, indented two spaces,
-  regardless of the subtask's own `isDone`/due-date.
+  into a task's title), `convertToMainTask`/`convertToSubTask` (subtask
+  promotion/demotion - `convertToMainTask` clearing `parentId` is what makes
+  a promoted subtask visible as a main task at all). Everything else in
+  that file (`moveToOtherProject`, `setDeadline`/deadline-related actions,
+  `addTagToTask`, ...) is a no-op - the task keeps whatever state it had
+  before that action, which is usually harmless (most of those don't touch
+  title/isDone/backlog-membership) but not guaranteed to be.
+- **The active-task filter is backlog membership, not a due date** - this
+  changed from "only tasks due today" in an earlier version, per explicit
+  direction, once it turned out "due today" and "not in the backlog" are
+  two genuinely different, independently-tracked concepts in the real app
+  (confirmed via `project.model.ts`: `backlogTaskIds` lives on the
+  **project** entity, separate from the task's own `dueDay`/`dueWithTime`).
+  `task.__inBacklog` is a synthetic flag this project maintains itself -
+  seeded from each project's `backlogTaskIds` at `SYNC_IMPORT`, and kept
+  current via `addTask`'s `isAddToBacklog`,
+  `scheduleTaskWithTime`/`applyShortSyntax`'s `isMoveToBacklog`, and the two
+  *membership*-changing actions in `project.actions.ts`'s "MOVE TASK
+  ACTIONS" section (`"[Project] ... Move Task from regular to backlog"` and
+  its inverse). The several backlog *reorder* actions there
+  (`moveProjectTask{Up,Down,ToTop,ToBottom,In}BacklogList`) only change
+  position within the backlog, not membership, and are deliberately
+  untouched.
+- Subtasks (`task.parentId` set) are never selected independently - a
+  subtask shows up only by riding along with its own (active) parent's
+  `subTaskIds`, indented two spaces, regardless of the subtask's own
+  `isDone`/backlog status.
+- **Grouping by project** (a Settings toggle on the pairing page) sorts
+  main tasks by project title before sending them to the watch, tagging
+  every row (including subtask rows, which inherit their parent's tag)
+  with the group name; tasks with no `projectId` land in a "No Project"
+  group. The watch (`main.c`) detects group boundaries as runs of equal
+  consecutive `TASK_PROJECT` values - when grouping is off, every row gets
+  `''`, which always collapses to one run covering the whole list, so the
+  off case is a special case of the same code path, not a separate one.
 
 None of this is guesswork about *how to write a Pebble watchapp* — the
 AppMessage/MenuLayer/Storage APIs and the phone-relay networking
@@ -211,7 +231,8 @@ node scripts/test-task-store.js
    ships.
 2. Enter your SuperSync server URL, email, and sync encryption password.
    Tap "Open SuperSync login", sign in there, copy the token it displays,
-   paste it into the "SuperSync access token" field, then Save.
+   paste it into the "SuperSync access token" field. Optionally check
+   "Group tasks by project" under Watch display. Then Save.
 3. The watch requests a sync automatically on next launch, or immediately
    if it's already open.
 
@@ -220,7 +241,7 @@ node scripts/test-task-store.js
 | Direction | `MSG_TYPE` | Purpose | Extra keys |
 |---|---|---|---|
 | phone→watch | `TASK_SYNC_START` | begin a task list push | `TASK_TOTAL` |
-| phone→watch | `TASK_ITEM` | one task | `TASK_INDEX`, `TASK_ID`, `TASK_TITLE`, `TASK_DONE` |
+| phone→watch | `TASK_ITEM` | one task | `TASK_INDEX`, `TASK_ID`, `TASK_TITLE`, `TASK_DONE`, `TASK_PROJECT` |
 | phone→watch | `TASK_SYNC_END` | list push finished, redraw | — |
 | phone→watch | `SYNC_STATUS` | syncing / ok / not-paired / error | `STATUS_CODE`, `STATUS_MSG` |
 | watch→phone | `REQUEST_SYNC` | ask phone to sync now | — |

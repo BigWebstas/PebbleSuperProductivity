@@ -7,8 +7,12 @@
 <style>
   body { font-family: -apple-system, Roboto, sans-serif; margin: 0; padding: 16px; background: #fff; color: #111; }
   h1 { font-size: 18px; }
+  h2 { font-size: 15px; margin-top: 24px; }
   label { display: block; margin-top: 14px; font-size: 13px; font-weight: 600; }
   input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .checkbox-row input { width: auto; margin: 0; }
+  .checkbox-row label { display: inline; margin: 0; font-weight: normal; }
   button { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; }
   button.secondary { background: #eee; color: #111; margin-top: 8px; }
   p.hint { font-size: 12px; color: #666; }
@@ -54,6 +58,16 @@
   <button id="openLoginBtn" class="secondary">Open SuperSync login</button>
   <p id="status"></p>
 
+  <h2>Watch display</h2>
+  <div class="checkbox-row">
+    <input id="groupByProject" type="checkbox">
+    <label for="groupByProject">Group tasks by project</label>
+  </div>
+  <p class="hint">
+    Shows a bold, underlined project name above each group of tasks on
+    the watch, instead of one flat list.
+  </p>
+
   <button id="saveBtn">Save &amp; sync</button>
   <button id="cancelBtn" class="secondary">Cancel</button>
 
@@ -96,7 +110,8 @@
       baseUrl: document.getElementById('baseUrl').value.replace(/\/+$/, ''),
       email: document.getElementById('email').value.trim(),
       password: document.getElementById('password').value,
-      jwt: jwt
+      jwt: jwt,
+      groupByProject: document.getElementById('groupByProject').checked
     });
   });
 
