@@ -184,7 +184,9 @@ traffic. Since then, three things resolved almost everything that was
   untouched.
 - Subtasks (`task.parentId` set) are never selected independently - a
   subtask shows up only by riding along with its own (active) parent's
-  `subTaskIds`, indented two spaces, regardless of the subtask's own
+  `subTaskIds`, prefixed with `    - ` (plain ASCII, not a Unicode arrow/
+  bullet - not guaranteed to exist in Pebble's system fonts on every
+  platform this targets), regardless of the subtask's own
   `isDone`/backlog status.
 - **Grouping by project** (a Settings toggle on the pairing page) sorts
   main tasks by project title before sending them to the watch, tagging

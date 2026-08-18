@@ -157,7 +157,7 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
   if (group_idx >= s_group_count || s_groups[group_idx].name[0] == '\0') {
     return 0;
   }
-  return 30;
+  return 32;
 }
 
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
@@ -177,12 +177,18 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   graphics_draw_text(ctx, name, bold_font, text_rect,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  // Underline sized to the actual rendered text, not the full cell width.
+  // Underline sized to the actual rendered text, directly beneath it.
   GSize text_size = graphics_text_layout_get_content_size(
       name, bold_font, text_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   int16_t underline_y = 2 + text_size.h;
   graphics_context_set_stroke_color(ctx, GColorBlack);
   graphics_draw_line(ctx, GPoint(6, underline_y), GPoint(6 + text_size.w, underline_y));
+
+  // A second, full-width divider along the bottom of the header cell -
+  // separates this group from its tasks more clearly than the text-width
+  // underline alone, especially once several groups are on screen at once.
+  int16_t divider_y = bounds.size.h - 2;
+  graphics_draw_line(ctx, GPoint(0, divider_y), GPoint(bounds.size.w, divider_y));
 }
 
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {

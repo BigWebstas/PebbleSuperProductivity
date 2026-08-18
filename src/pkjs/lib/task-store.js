@@ -449,12 +449,21 @@ function getActiveTasks(state, limit, groupByProject) {
   return rows.slice(0, limit);
 }
 
+// Pebble's MenuLayer has no per-row indent control, so nesting is baked
+// into the title string itself. Plain leading spaces alone read as barely
+// different from a regular row at this font size - a leading dash plus
+// wider indentation reads unambiguously as "sub-item of the row above",
+// and stays plain ASCII rather than a Unicode glyph (e.g. an arrow or
+// bullet) that isn't guaranteed to exist in Pebble's system fonts on every
+// platform this targets (aplite in particular).
+var SUBTASK_PREFIX = '    - ';
+
 function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
   rows.push({ id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone, project: groupName });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub) {
-      rows.push({ id: sub.id, title: '  ' + (sub.title || '(untitled)'), isDone: !!sub.isDone, project: groupName });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + (sub.title || '(untitled)'), isDone: !!sub.isDone, project: groupName });
     }
   });
 }
