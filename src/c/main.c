@@ -1,16 +1,18 @@
 #include <pebble.h>
 
-// Keep this in sync with the "messageKeys" list in package.json.
-enum {
-  KEY_MSG_TYPE = 0,
-  KEY_TASK_TOTAL,
-  KEY_TASK_INDEX,
-  KEY_TASK_ID,
-  KEY_TASK_TITLE,
-  KEY_TASK_DONE,
-  KEY_STATUS_CODE,
-  KEY_STATUS_MSG,
-};
+// Dictionary keys are the MESSAGE_KEY_* externs pebble.h pulls in from
+// message_keys.auto.h, generated from the "messageKeys" list in
+// package.json - NOT small hand-picked integers. AppMessage assigns each
+// key an ID starting at 10000, so a local 0-based enum silently never
+// matches what the phone sends/expects.
+#define KEY_MSG_TYPE MESSAGE_KEY_MSG_TYPE
+#define KEY_TASK_TOTAL MESSAGE_KEY_TASK_TOTAL
+#define KEY_TASK_INDEX MESSAGE_KEY_TASK_INDEX
+#define KEY_TASK_ID MESSAGE_KEY_TASK_ID
+#define KEY_TASK_TITLE MESSAGE_KEY_TASK_TITLE
+#define KEY_TASK_DONE MESSAGE_KEY_TASK_DONE
+#define KEY_STATUS_CODE MESSAGE_KEY_STATUS_CODE
+#define KEY_STATUS_MSG MESSAGE_KEY_STATUS_MSG
 
 // MSG_TYPE values, watch <-> phone.
 enum {
