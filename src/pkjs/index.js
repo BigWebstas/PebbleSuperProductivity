@@ -190,12 +190,12 @@ var syncInFlight = false;
 
 function doSync() {
   if (syncInFlight) {
-    return;
+    return Promise.resolve();
   }
   var config = loadConfig();
   if (!config || !config.jwt) {
     sendStatus(STATUS_NOT_PAIRED);
-    return;
+    return Promise.resolve();
   }
 
   syncInFlight = true;
@@ -264,7 +264,10 @@ function doSync() {
 
   var work = isFirstSync ? bootstrapFromSnapshot().then(pullPage) : pullPage();
 
-  work
+  // Returned so callers that trigger a sync as a side effect (e.g.
+  // handleTaskToggle's autoSyncOnComplete) can tell once it's actually
+  // finished, instead of it racing whatever status message they send next.
+  return work
     .then(function () {
       saveState(state);
       saveLastSeq(lastSeq);
@@ -330,20 +333,48 @@ function handleTaskToggle(taskId, done) {
     timestamp: Date.now(),
   };
 
+  var toggleFailureMsg = null;
   var client = new supersync.SuperSyncClient({ baseUrl: config.baseUrl, token: config.jwt });
   client
     .uploadOps([op], clientId, loadLastSeq())
     .then(function (res) {
+      // A rejected op still comes back as an HTTP 200 - the server reports
+      // per-op acceptance in res.results[].accepted, not the HTTP status
+      // (confirmed against sync.routes.ops-handler.ts /
+      // operation-upload.service.ts: a conflict, quota, or duplicate-op-id
+      // rejection still calls reply.send(...), never reply.status(4xx)).
+      // Only checking res.latestSeq here meant an accepted upload and a
+      // rejected one were indistinguishable from this code's point of view -
+      // this was very likely THE actual cause of "completed tasks aren't
+      // syncing to the desktop app": a real rejection (e.g. a vector-clock
+      // conflict against a newer desktop-side edit) was silently swallowed
+      // as success, forever, with nothing to ever retry it.
+      var result = res && res.results && res.results[0];
+      if (result && !result.accepted) {
+        var err = new Error((result.errorCode || 'REJECTED') + ': ' + (result.error || 'op rejected by server'));
+        err.rejectedResult = result;
+        throw err;
+      }
       if (res && res.latestSeq != null) {
         saveLastSeq(res.latestSeq);
       }
     })
     .catch(function (err) {
+      // On a conflict rejection, the server reports the entity's real
+      // current vector clock (existingClock) precisely so a client can
+      // build a dominating clock next time instead of colliding the same
+      // way again - merge it in now even though this attempt already
+      // failed, so the very next toggle of this task starts from a clock
+      // that beats what the server actually has.
+      if (err && err.rejectedResult && err.rejectedResult.existingClock) {
+        saveVectorClock(mergeVectorClocks(loadVectorClock(), err.rejectedResult.existingClock));
+      }
       // MVP: log and leave the local optimistic update in place; the next
       // full sync will reconcile. A persisted retry queue for offline use
       // is a known gap, called out in README.md.
-      console.log('[pkjs] failed to upload task toggle: ' + (err && err.message));
-      sendStatus(STATUS_ERROR, 'upload failed, will retry next sync');
+      toggleFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload task toggle: ' + toggleFailureMsg);
+      sendStatus(STATUS_ERROR, toggleFailureMsg);
     })
     .then(function () {
       // Uploading only pushes this one op - it doesn't pull whatever else
@@ -354,7 +385,17 @@ function handleTaskToggle(taskId, done) {
       // asked for; runs best-effort even after a failed upload so at least
       // the pull side stays current, matching doSync()'s own error handling.
       if (config.autoSyncOnComplete !== false) {
-        doSync();
+        var syncPromise = doSync();
+        if (toggleFailureMsg && syncPromise && typeof syncPromise.then === 'function') {
+          // doSync() ends by sending its own STATUS_OK/STATUS_ERROR - without
+          // this, a toggle that was actually rejected would show "Failed:
+          // ..." for a moment and then get silently overwritten by the
+          // follow-up sync's routine STATUS_OK, hiding the exact failure
+          // this whole change exists to surface.
+          syncPromise.then(function () {
+            sendStatus(STATUS_ERROR, toggleFailureMsg);
+          });
+        }
       }
     });
 }

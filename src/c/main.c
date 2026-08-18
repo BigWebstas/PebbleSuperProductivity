@@ -362,6 +362,14 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   // framebuffer content stays behind the text.
   GColor bg = is_selected ? GColorBlack : GColorWhite;
   GColor fg = is_selected ? GColorWhite : GColorBlack;
+  // Dim a done task's title relative to its own row background (light gray
+  // on the selected/black row, dark gray on a normal/white one) instead of
+  // full-strength text color - this SDK has no italic system font and no
+  // text-skew API to fake one, so a muted color is the achievable "done
+  // looks different" cue here.
+  if (task->done) {
+    fg = is_selected ? GColorLightGray : GColorDarkGray;
+  }
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_text_color(ctx, fg);
