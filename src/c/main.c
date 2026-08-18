@@ -60,6 +60,8 @@ static Window *s_main_window;
 static MenuLayer *s_menu_layer;
 static StatusBarLayer *s_status_bar;
 static TextLayer *s_empty_layer;
+static BitmapLayer *s_logo_layer;
+static GBitmap *s_logo_bitmap;
 
 static Task s_tasks[MAX_TASKS];
 static int s_task_count = 0;      // tasks currently shown (committed)
@@ -196,7 +198,14 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
   GRect text_rect = GRect(6, 2, bounds.size.w - 12, bounds.size.h - 4);
 
-  graphics_context_set_text_color(ctx, GColorBlue);
+  // MenuLayer headers, like rows, own their whole cell background - a
+  // header has no built-in fill of its own, so this has to happen before
+  // the text/lines below or they'd draw onto whatever was already in the
+  // framebuffer instead of a solid green cell.
+  graphics_context_set_fill_color(ctx, GColorGreen);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+  graphics_context_set_text_color(ctx, GColorBlack);
   graphics_draw_text(ctx, name, bold_font, text_rect,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
@@ -204,7 +213,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   GSize text_size = graphics_text_layout_get_content_size(
       name, bold_font, text_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   int16_t underline_y = 2 + text_size.h;
-  graphics_context_set_stroke_color(ctx, GColorBlue);
+  graphics_context_set_stroke_color(ctx, GColorBlack);
   graphics_draw_line(ctx, GPoint(6, underline_y), GPoint(6 + text_size.w, underline_y));
 
   // A second, full-width divider along the bottom of the header cell -
@@ -312,8 +321,8 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_context_set_fill_color(ctx, GColorRed);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorBlack);
-    GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 22);
-    graphics_draw_text(ctx, "Resync", fonts_get_system_font(TITLE_FONT_KEY), title_box,
+    GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
+    graphics_draw_text(ctx, "Resync", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
     graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
@@ -448,6 +457,7 @@ static void start_syncing_animation(void) {
 static void update_empty_layer(void) {
   bool show_empty = (s_task_count == 0);
   layer_set_hidden(text_layer_get_layer(s_empty_layer), !show_empty);
+  layer_set_hidden(bitmap_layer_get_layer(s_logo_layer), !show_empty);
   layer_set_hidden(menu_layer_get_layer(s_menu_layer), show_empty);
 
   // Only the empty screen (no cached list yet at all - i.e. the very first
@@ -608,10 +618,26 @@ static void window_load(Window *window) {
   // selection already needs to scroll, before any sync response arrives.
   refresh_scroll_state(true);
 
-  s_empty_layer = text_layer_create(content_bounds);
+  // Logo sits in a fixed-height strip at the bottom of the empty-state area;
+  // the text layer gets whatever's left above it, rather than the full
+  // content_bounds it used to own alone.
+  #define LOGO_SIZE 25
+  #define LOGO_STRIP_HEIGHT 34
+  GRect empty_text_bounds = GRect(content_bounds.origin.x, content_bounds.origin.y,
+                                   content_bounds.size.w, content_bounds.size.h - LOGO_STRIP_HEIGHT);
+  s_empty_layer = text_layer_create(empty_text_bounds);
   text_layer_set_text_alignment(s_empty_layer, GTextAlignmentCenter);
   text_layer_set_font(s_empty_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   layer_add_child(window_layer, text_layer_get_layer(s_empty_layer));
+
+  GRect logo_bounds = GRect(content_bounds.origin.x + (content_bounds.size.w - LOGO_SIZE) / 2,
+                             content_bounds.origin.y + content_bounds.size.h - LOGO_STRIP_HEIGHT,
+                             LOGO_SIZE, LOGO_SIZE);
+  s_logo_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_MENU_ICON);
+  s_logo_layer = bitmap_layer_create(logo_bounds);
+  bitmap_layer_set_bitmap(s_logo_layer, s_logo_bitmap);
+  bitmap_layer_set_compositing_mode(s_logo_layer, GCompOpSet);
+  layer_add_child(window_layer, bitmap_layer_get_layer(s_logo_layer));
 
   update_empty_layer();
   request_sync();
@@ -622,6 +648,8 @@ static void window_unload(Window *window) {
   stop_syncing_animation();
   menu_layer_destroy(s_menu_layer);
   text_layer_destroy(s_empty_layer);
+  bitmap_layer_destroy(s_logo_layer);
+  gbitmap_destroy(s_logo_bitmap);
   status_bar_layer_destroy(s_status_bar);
 }
 

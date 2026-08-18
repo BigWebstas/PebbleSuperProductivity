@@ -29,19 +29,20 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
 
 ### Components
 
-- **`src/c/main.c`** — the watchapp. A sectioned `MenuLayer`: a "Resync" row
-  pinned to section 0 with a red background and black text (a standing
-  call-to-action, not just another list item), its subtitle reflecting live
-  sync status so a failed resync is visible even with a cached list still
-  showing, followed by one section per project group when "Group tasks by
-  project" is on (large, bold, underlined, blue project-name header per
-  section - drawn manually with `graphics_draw_text`/`graphics_draw_line`,
-  since Pebble has no built-in bold+underline cell style) or a single
-  unheaded section when it's off. Every task row (not just the ones that
-  need to scroll or show "Done") is drawn through the same custom path
-  rather than `menu_cell_basic_draw`, so title size is consistent across the
-  whole list; select-click toggles done/not-done, and a done task's "Done"
-  status shows centered under its title (something `menu_cell_basic_draw`'s
+- **`src/c/main.c`** — the watchapp. A sectioned `MenuLayer`: a large-text
+  "Resync" row pinned to section 0 with a red background and black text (a
+  standing call-to-action, not just another list item), its subtitle
+  reflecting live sync status so a failed resync is visible even with a
+  cached list still showing, followed by one section per project group when
+  "Group tasks by project" is on (large, bold, black-on-green project-name
+  header per section - drawn manually with
+  `graphics_draw_text`/`graphics_fill_rect`/`graphics_draw_line`, since
+  Pebble has no built-in bold+underline cell style) or a single unheaded
+  section when it's off. Every task row (not just the ones that need to
+  scroll or show "Done") is drawn through the same custom path rather than
+  `menu_cell_basic_draw`, so title size is consistent across the whole
+  list; select-click toggles done/not-done, and a done task's "Done" status
+  shows centered under its title (something `menu_cell_basic_draw`'s
   subtitle can't do - it's always left-aligned). A selected title too wide
   for the screen scrolls as a looping marquee instead, black background/
   white text matching the platform's own invert-on-select style
@@ -49,9 +50,10 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
   check - see "Marquee title scrolling" below). The empty/status screen
   shown before any task list has ever loaded animates ("Syncing" ->
   "Syncing." -> ".." -> "...", another `AppTimer`) while that first sync is
-  in flight, instead of sitting on static text with no sign anything is
-  happening. Persists the last-synced list via the `Storage` API so the
-  list survives an app relaunch even offline.
+  in flight, with the app's own logo (the `IMAGE_MENU_ICON` resource,
+  reused rather than duplicated) fixed beneath the text throughout every
+  empty-screen state, not just that one. Persists the last-synced list via
+  the `Storage` API so the list survives an app relaunch even offline.
 - **`src/pkjs/index.js`** — the sync engine. Downloads operations from
   SuperSync, replays them into a local task cache, decrypts payloads if
   end-to-end encryption is on, sends the active task list to the watch
@@ -60,7 +62,12 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
   the same `{ actionType: "[Task Shared] updateTask", payload:
   { actionPayload: { task: { id, changes } } } }` shape the real op log
   uses - see "What is verified vs. assumed" below for why the flat shape
-  this used to send didn't actually round-trip.
+  this used to send didn't actually round-trip. Also tracks a simplified
+  vector clock (`sp_vector_clock`: merged from every downloaded op's own
+  clock, incremented for this client on every local upload), REQUIRED on
+  every uploaded op by the real server or the whole op is rejected before
+  storage - see "What is verified vs. assumed" for why this was missing
+  entirely until now.
 - **`src/pkjs/lib/supersync-client.js`** — thin REST client for the
   SuperSync API (`/api/sync/ops`, `/api/sync/restore-points`,
   `/api/sync/restore/:serverSeq`) plus `createCrypto(password)`, which
@@ -109,6 +116,12 @@ traffic. Since then, three things resolved almost everything that was
    encryption password, letting the full E2EE pipeline be checked against
    their actual encrypted tasks — not just spec compliance, but a real
    AES-GCM authentication-tag pass against production ciphertext.
+4. A full local clone of super-productivity/super-productivity, including
+   `packages/super-sync-server` - the sync server's actual source, not just
+   the client. This is what turned up the vector-clock bug below: reading
+   `validation.service.ts`'s `validateOp()` directly, rather than working
+   from client-side action types and a handful of previously-seen response
+   shapes alone.
 
 **Solid — actually verified:**
 - The crypto primitives (`aes-gcm.js`, `sha256.js`, `base64.js`) are checked
@@ -197,6 +210,33 @@ traffic. Since then, three things resolved almost everything that was
   `clientId`, via a plain `"[Task Shared] updateTask"` op the same as any
   other client would send, now reliably shows up as "Done" on the watch
   after a resync.
+- **Every uploaded op needs a `vectorClock` field, and this project's watch
+  toggle upload didn't send one at all until now - the real, confirmed
+  cause of watch-completed tasks never reaching the desktop client.**
+  Found by reading `validateOp()` in the actual server source
+  (`packages/super-sync-server/src/sync/services/validation.service.ts`):
+  it calls `sanitizeVectorClock(op.vectorClock)`, which returns
+  `{ valid: false }` for anything that isn't a plain object - `undefined`
+  included. A failed validation rejects the **entire op upload** before it
+  is ever stored, so it was never visible to any other client, watch's own
+  next sync included; `handleTaskToggle()`'s `.catch` just logged the
+  failure and left the watch's own optimistic local state in place, which
+  is why toggling looked like it worked from the watch's own point of
+  view. Fixed by tracking a simplified vector clock in `index.js`
+  (`sp_vector_clock`: merged from every downloaded op's own `vectorClock` -
+  present in the confirmed `GET /api/sync/ops` response shape all along,
+  just never read - plus incremented for this client on every local
+  upload), mirroring in simplified form what the real client's
+  `VectorClockService`/`incrementVectorClock()`
+  (`src/app/core/util/vector-clock.ts`) does. A perfectly complete/pruned
+  clock isn't required for the server to *accept* an op -
+  `sanitizeVectorClock` only checks shape and size, not completeness -
+  just a valid plain object, so this doesn't need to be a byte-perfect
+  reimplementation to fix the actual bug. Verified against a mock server
+  that reimplements the real `sanitizeVectorClock` check: the watch's
+  upload is now accepted (previously reproduced the exact rejection this
+  fixes), with a `vectorClock` correctly merging the remote component seen
+  on download with this client's own incremented one.
 
 **Known gaps, not "assumed" so much as "not yet built":**
 - Handled TASK action types, confirmed against
@@ -270,19 +310,27 @@ traffic. Since then, three things resolved almost everything that was
   left-aligned, with no way to override that, which is the other reason
   every row needs the shared custom draw path above.
 - **Resync row and project headers are colored** to read as distinct UI
-  elements rather than just more list rows: Resync is a standing red
-  banner with black text (background stays red regardless of selection, so
-  it can't be mistaken for a task), and project group headers are large,
-  bold, and blue (text and both underlines). Plain color constants
-  (`GColorRed`, `GColorBlue`) - Pebble's SDK degrades these automatically
-  on the B&W platforms this app also targets (aplite, diorite), no
-  per-platform branching needed.
-- **Syncing animation**: the empty/status screen cycles "Syncing" through 0-3
-  trailing dots (another `AppTimer`, 400ms) while `s_task_count == 0` and a
-  sync is in flight - i.e. only for the very first sync, before any task
-  list has ever loaded. A resync with an already-populated list has its own
-  live status via the Resync row's subtitle instead, so this doesn't apply
-  there.
+  elements rather than just more list rows: Resync is a large-text standing
+  red banner with black text (background stays red regardless of
+  selection, so it can't be mistaken for a task), and project group
+  headers are large, bold, black text on a green background (fill, text,
+  and both underlines). Plain color constants (`GColorRed`, `GColorGreen`)
+  - Pebble's SDK degrades these automatically on the B&W platforms this app
+  also targets (aplite, diorite), no per-platform branching needed. Like
+  the row-level custom draw path, a `MenuLayer` header owns its whole cell
+  background too - `graphics_fill_rect`ing it green has to happen before
+  the text/lines, or they'd draw onto whatever was already in the
+  framebuffer instead of a solid header.
+- **Syncing animation and logo**: the empty/status screen cycles "Syncing"
+  through 0-3 trailing dots (another `AppTimer`, 400ms) while
+  `s_task_count == 0` and a sync is in flight - i.e. only for the very
+  first sync, before any task list has ever loaded. A resync with an
+  already-populated list has its own live status via the Resync row's
+  subtitle instead, so this doesn't apply there. The app's own logo sits
+  in a fixed strip beneath whichever text is showing (syncing, not-paired,
+  error, or "no tasks") - reusing the `IMAGE_MENU_ICON` resource already
+  bundled for the launcher rather than adding a second, larger copy of the
+  same image.
 
 None of this is guesswork about *how to write a Pebble watchapp* — the
 AppMessage/MenuLayer/Storage APIs and the phone-relay networking

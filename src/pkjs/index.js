@@ -67,6 +67,51 @@ function getOrCreateClientId() {
   return id;
 }
 
+// A vector clock ({ clientId: counter, ... }) is REQUIRED on every uploaded
+// op - confirmed by reading the real server's source
+// (packages/super-sync-server/src/sync/services/validation.service.ts's
+// sanitizeVectorClock(), called from validateOp()): a missing/non-object
+// vectorClock fails validation outright (INVALID_VECTOR_CLOCK) and the
+// whole op upload is rejected, never stored, so no other client - including
+// the real desktop app - ever sees it. This project's watch-toggle upload
+// didn't send one at all until this was found; see handleTaskToggle().
+//
+// Tracked locally (not recomputed from scratch each time) so an upload's
+// clock reflects both our own prior increments and whatever other clients'
+// components we've observed in downloaded ops - mirroring (in simplified
+// form) VectorClockService.getCurrentVectorClock()/incrementVectorClock()
+// in the real client's src/app/core/util/vector-clock.ts. A perfectly
+// pruned/merged clock isn't required for the server to ACCEPT the op
+// (sanitizeVectorClock only checks shape/size, not completeness) - just a
+// valid plain object - but keeping ours reasonably accurate avoids
+// needlessly flagging every one of our uploads as CONCURRENT with
+// everything else during the server's conflict comparison.
+function loadVectorClock() {
+  try {
+    return JSON.parse(localStorage.getItem('sp_vector_clock') || 'null') || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveVectorClock(clock) {
+  localStorage.setItem('sp_vector_clock', JSON.stringify(clock));
+}
+
+function mergeVectorClocks(a, b) {
+  var merged = Object.assign({}, a);
+  Object.keys(b || {}).forEach(function (id) {
+    merged[id] = Math.max(merged[id] || 0, b[id] || 0);
+  });
+  return merged;
+}
+
+function incrementVectorClock(clock, clientId) {
+  var next = Object.assign({}, clock);
+  next[clientId] = (next[clientId] || 0) + 1;
+  return next;
+}
+
 // The Argon2id KDF is multi-second at production parameters (see
 // argon2id.js), and its own derived keys are cached per-salt inside the
 // crypto object - but that cache is worthless if we throw the whole object
@@ -160,6 +205,7 @@ function doSync() {
   var crypto = getCrypto();
   var state = loadState();
   var lastSeq = loadLastSeq();
+  var vectorClock = loadVectorClock();
   var isFirstSync = lastSeq === 0 && Object.keys(state.task).length === 0;
 
   var pullPage = function () {
@@ -176,6 +222,11 @@ function doSync() {
     // requesting them again in the first place.
     return client.downloadOps(lastSeq, null, 500).then(function (res) {
       store.applyOperations(res.ops || [], state, crypto);
+      (res.ops || []).forEach(function (entry) {
+        if (entry.op && entry.op.vectorClock) {
+          vectorClock = mergeVectorClocks(vectorClock, entry.op.vectorClock);
+        }
+      });
       lastSeq = res.latestSeq != null ? res.latestSeq : lastSeq;
       if (res.hasMore) {
         return pullPage();
@@ -217,6 +268,7 @@ function doSync() {
     .then(function () {
       saveState(state);
       saveLastSeq(lastSeq);
+      saveVectorClock(vectorClock);
       var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject);
       sendTaskListToWatch(tasks);
       sendStatus(STATUS_OK);
@@ -253,6 +305,18 @@ function handleTaskToggle(taskId, done) {
   // wasn't decodable by any real client's replay, including our own next
   // sync: sync only actually worked in the download direction.
   var payload = { actionPayload: { task: { id: taskId, changes: { isDone: done } } } };
+  var clientId = getOrCreateClientId();
+  // REQUIRED by the real server (confirmed by reading
+  // validation.service.ts's sanitizeVectorClock(), called from
+  // validateOp()): a missing/non-object vectorClock fails validation
+  // outright and the whole op is rejected before it's ever stored - this
+  // was the actual cause of watch-completed tasks never reaching any other
+  // client, desktop included. Saved immediately (not gated on upload
+  // success) since the local completion already causally happened whether
+  // or not this particular upload attempt succeeds - see loadVectorClock's
+  // comment.
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
   var op = {
     id: generateOpId(),
     opType: 'UPD',
@@ -261,13 +325,14 @@ function handleTaskToggle(taskId, done) {
     entityId: taskId,
     payload: crypto ? crypto.encrypt(payload) : payload,
     isPayloadEncrypted: !!crypto,
-    clientId: getOrCreateClientId(),
+    vectorClock: newVectorClock,
+    clientId: clientId,
     timestamp: Date.now(),
   };
 
   var client = new supersync.SuperSyncClient({ baseUrl: config.baseUrl, token: config.jwt });
   client
-    .uploadOps([op], getOrCreateClientId(), loadLastSeq())
+    .uploadOps([op], clientId, loadLastSeq())
     .then(function (res) {
       if (res && res.latestSeq != null) {
         saveLastSeq(res.latestSeq);
