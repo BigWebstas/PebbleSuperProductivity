@@ -188,7 +188,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
   GRect text_rect = GRect(6, 2, bounds.size.w - 12, bounds.size.h - 4);
 
-  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_context_set_text_color(ctx, GColorBlue);
   graphics_draw_text(ctx, name, bold_font, text_rect,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
@@ -196,7 +196,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   GSize text_size = graphics_text_layout_get_content_size(
       name, bold_font, text_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   int16_t underline_y = 2 + text_size.h;
-  graphics_context_set_stroke_color(ctx, GColorBlack);
+  graphics_context_set_stroke_color(ctx, GColorBlue);
   graphics_draw_line(ctx, GPoint(6, underline_y), GPoint(6 + text_size.w, underline_y));
 
   // A second, full-width divider along the bottom of the header cell -
@@ -297,7 +297,19 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       default:
         break;
     }
-    menu_cell_basic_draw(ctx, cell_layer, "Resync", subtitle, NULL);
+    // Bypasses menu_cell_basic_draw so this row reads as a standing
+    // call-to-action rather than just another list item - background stays
+    // red regardless of selection state, so it can't be mistaken for a task.
+    GRect bounds = layer_get_bounds(cell_layer);
+    graphics_context_set_fill_color(ctx, GColorRed);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    graphics_context_set_text_color(ctx, GColorWhite);
+    GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 22);
+    graphics_draw_text(ctx, "Resync", fonts_get_system_font(TITLE_FONT_KEY), title_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
+    graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     return;
   }
   int group_idx = (int)cell_index->section - 1;
@@ -315,44 +327,52 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   GRect bounds = layer_get_bounds(cell_layer);
   int16_t available = bounds.size.w - TITLE_BOX_X * 2;
   int16_t natural_width = title_natural_width(task->title);
+  bool needs_marquee = is_selected && natural_width > available;
 
-  if (!is_selected || natural_width <= available) {
-    menu_cell_basic_draw(ctx, cell_layer, task->title, task->done ? "Done" : NULL, NULL);
+  if (!needs_marquee && !task->done) {
+    menu_cell_basic_draw(ctx, cell_layer, task->title, NULL, NULL);
     return;
   }
 
-  // Selected, and too wide to fit: draw the title as a looping marquee
-  // instead of menu_cell_basic_draw's built-in truncation, so the full
-  // text is eventually readable rather than permanently cut off.
+  // Custom draw path, needed either because the title has to scroll, or
+  // because "Done" needs to be centered - menu_cell_basic_draw's subtitle
+  // is always left-aligned with no way to override that. Either way this
+  // bypasses that helper, so the row's own background has to be redrawn
+  // here too, using colors matching the platform's own default
+  // invert-on-select cell style (confirmed in the emulator: selected rows
+  // are black background/white text, not white/black like an unselected
+  // row) - otherwise leftover framebuffer content stays behind the text.
+  GColor bg = is_selected ? GColorBlack : GColorWhite;
+  GColor fg = is_selected ? GColorWhite : GColorBlack;
+  graphics_context_set_fill_color(ctx, bg);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_context_set_text_color(ctx, fg);
+
   GFont title_font = fonts_get_system_font(TITLE_FONT_KEY);
   GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, bounds.size.h - TITLE_BOX_Y);
-  int16_t period = natural_width + SCROLL_GAP_PX;
-  int16_t x = -(s_scroll_offset_px % period);
 
-  // menu_cell_basic_draw paints the row's (unselected-looking, white) background
-  // itself - confirmed in the emulator that this SDK's default menu style
-  // doesn't invert on selection, just bolds the text. Since this path bypasses
-  // that helper, the same white fill has to happen here too, or leftover
-  // framebuffer content (black) stays behind the text.
-  graphics_context_set_fill_color(ctx, GColorWhite);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-
-  // No app-level clip-rect API exists in this SDK; relying on cell_layer's
-  // own bounds to constrain rendering the way MenuLayer's own row drawing
-  // already does for every other row - confirmed visually in the
-  // emulator, not just assumed (see the commit this landed in).
-  graphics_context_set_text_color(ctx, GColorBlack);
-  graphics_draw_text(ctx, task->title, title_font,
-                      GRect(title_box.origin.x + x, title_box.origin.y, natural_width, title_box.size.h),
-                      GTextOverflowModeFill, GTextAlignmentLeft, NULL);
-  graphics_draw_text(ctx, task->title, title_font,
-                      GRect(title_box.origin.x + x + period, title_box.origin.y, natural_width, title_box.size.h),
-                      GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  if (needs_marquee) {
+    int16_t period = natural_width + SCROLL_GAP_PX;
+    int16_t x = -(s_scroll_offset_px % period);
+    // No app-level clip-rect API exists in this SDK; relying on cell_layer's
+    // own bounds to constrain rendering the way MenuLayer's own row drawing
+    // already does for every other row - confirmed visually in the
+    // emulator, not just assumed (see the commit this landed in).
+    graphics_draw_text(ctx, task->title, title_font,
+                        GRect(title_box.origin.x + x, title_box.origin.y, natural_width, title_box.size.h),
+                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, task->title, title_font,
+                        GRect(title_box.origin.x + x + period, title_box.origin.y, natural_width, title_box.size.h),
+                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  } else {
+    graphics_draw_text(ctx, task->title, title_font, title_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
 
   if (task->done) {
     GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
     graphics_draw_text(ctx, "Done", fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   }
 }
 
