@@ -119,7 +119,13 @@ function request(method, baseUrl, path, token, body) {
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(responseBody);
       } else {
-        var err = new Error('SuperSync request failed: ' + method + ' ' + path + ' -> ' + xhr.status);
+        // Prefer the server's own explanation (e.g. which field failed
+        // validation) over a bare status code - this is the only signal
+        // available for debugging the "assumed" wire-format details
+        // documented at the top of this file, short of a live account.
+        var detail = (responseBody && typeof responseBody === 'object' && responseBody.error) ?
+          responseBody.error : (method + ' ' + path);
+        var err = new Error(xhr.status + ' ' + detail);
         err.status = xhr.status;
         err.body = responseBody;
         reject(err);
