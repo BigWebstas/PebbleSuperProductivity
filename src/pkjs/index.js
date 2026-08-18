@@ -391,6 +391,11 @@ Pebble.addEventListener('showConfiguration', function () {
       // Undefined (never configured before) defaults to on - see the
       // matching comment in handleTaskToggle for why.
       autoSyncOnComplete: config.autoSyncOnComplete !== false,
+      // Lets the pairing page leave the password/token fields blank on a
+      // settings-only visit instead of demanding they be re-pasted - see
+      // webviewclosed below for the other half of this.
+      hasPassword: !!localStorage.getItem('sp_password'),
+      hasToken: !!config.jwt,
     }
   );
   Pebble.openURL(url);
@@ -411,10 +416,32 @@ Pebble.addEventListener('webviewclosed', function (e) {
     return;
   }
 
+  // The pairing page's own "Clear all data & resync" button, separate from
+  // Save & sync - wipes the local replay cache without touching credentials/
+  // options, then does a fresh full resync (isFirstSync in doSync() keys off
+  // exactly this state: lastSeq 0 and no cached tasks).
+  if (result.clearData) {
+    localStorage.removeItem('sp_entities');
+    localStorage.removeItem('sp_last_seq');
+    localStorage.removeItem('sp_vector_clock');
+    doSync();
+    return;
+  }
+
+  var existingConfig = loadConfig() || {};
+  var previousPassword = localStorage.getItem('sp_password');
+  // Blank jwt/password fields mean "keep what's already saved" (the
+  // pairing page only requires jwt on a first-ever pairing - see hasToken
+  // there), not "clear it" - so a settings-only visit doesn't force
+  // re-pasting either one.
+  var newJwt = result.jwt || existingConfig.jwt;
+  var jwtChanged = !!result.jwt && result.jwt !== existingConfig.jwt;
+  var passwordChanged = !!result.password && result.password !== previousPassword;
+
   saveConfig({
     baseUrl: result.baseUrl || supersync.DEFAULT_BASE_URL,
     email: result.email,
-    jwt: result.jwt,
+    jwt: newJwt,
     groupByProject: !!result.groupByProject,
     todayOnly: !!result.todayOnly,
     autoSyncOnComplete: !!result.autoSyncOnComplete,
@@ -430,10 +457,17 @@ Pebble.addEventListener('webviewclosed', function (e) {
   cachedCrypto = null;
   cachedPassword = null;
 
-  // A new pairing (or a changed account/password) invalidates whatever we
-  // had cached locally.
-  localStorage.removeItem('sp_entities');
-  localStorage.removeItem('sp_last_seq');
+  // Only an actual credential change (new account/token or changed
+  // password) invalidates what's cached locally - a settings-only save
+  // (e.g. toggling todayOnly) used to wipe and fully re-download the task
+  // list every time, which is exactly what the new clearData path above is
+  // for now; this path should be quiet unless something that changes what
+  // the replay log means actually changed.
+  if (jwtChanged || passwordChanged) {
+    localStorage.removeItem('sp_entities');
+    localStorage.removeItem('sp_last_seq');
+    localStorage.removeItem('sp_vector_clock');
+  }
 
   doSync();
 });

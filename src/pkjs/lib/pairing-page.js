@@ -19,6 +19,14 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var groupByProject = !!options.groupByProject;
   var todayOnly = !!options.todayOnly;
   var autoSyncOnComplete = !!options.autoSyncOnComplete;
+  var hasPassword = !!options.hasPassword;
+  var hasToken = !!options.hasToken;
+  var passwordPlaceholder = hasPassword
+    ? 'Already saved - leave blank to keep it'
+    : 'Only used to decrypt on this phone - never sent anywhere';
+  var jwtPlaceholder = hasToken
+    ? 'Already saved - leave blank to keep it'
+    : 'Paste the token shown after you log in below';
   var html = '<!doctype html>\n' +
 '<html lang="en">\n' +
 '<head>\n' +
@@ -36,6 +44,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  .checkbox-row label { display: inline; margin: 0; font-weight: normal; }\n' +
 '  button { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; }\n' +
 '  button.secondary { background: #eee; color: #111; margin-top: 8px; }\n' +
+'  button.danger { background: #fff; color: #c00; border: 1px solid #c00; }\n' +
 '  p.hint { font-size: 12px; color: #666; }\n' +
 '  p.error { font-size: 13px; color: #c00; }\n' +
 '  p.success { font-size: 13px; color: #0a0; }\n' +
@@ -56,16 +65,17 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  <input id="email" type="email" placeholder="you@example.com" value="' + escapeHtmlAttr(email) + '">\n' +
 '\n' +
 '  <label for="password">Sync encryption password</label>\n' +
-'  <input id="password" type="password" placeholder="Only used to decrypt on this phone - never sent anywhere">\n' +
+'  <input id="password" type="password" placeholder="' + escapeHtmlAttr(passwordPlaceholder) + '">\n' +
 '  <p class="hint">\n' +
 '    This is the end-to-end encryption password you set in Super\n' +
 '    Productivity\'s sync settings (not your login password, if those\n' +
 '    differ). It never leaves this device: it\'s used locally to derive the\n' +
-'    AES key that decrypts your tasks.\n' +
+'    AES key that decrypts your tasks.' + (hasPassword ? ' Already saved on this\n' +
+'    watch/phone - only re-enter it here if it changed.' : '') + '\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="jwt">SuperSync access token</label>\n' +
-'  <input id="jwt" type="text" placeholder="Paste the token shown after you log in below">\n' +
+'  <input id="jwt" type="text" placeholder="' + escapeHtmlAttr(jwtPlaceholder) + '">\n' +
 '  <p class="hint">\n' +
 '    SuperSync accounts are authenticated via an emailed magic link or a\n' +
 '    passkey, not a password, so there\'s no login form here. Tap "Open\n' +
@@ -73,7 +83,8 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    ("Connection Successful - copy this token and paste it in Super\n' +
 '    Productivity\'s sync settings"), then come back here and paste it above.\n' +
 '    It\'s the same token you\'d paste into Super Productivity\'s own\n' +
-'    Settings → Sync → SuperSync screen.\n' +
+'    Settings → Sync → SuperSync screen.' + (hasToken ? ' Already saved on this\n' +
+'    watch/phone - only re-enter it here if it changed or expired.' : '') + '\n' +
 '  </p>\n' +
 '\n' +
 '  <button id="openLoginBtn" class="secondary">Open SuperSync login</button>\n' +
@@ -109,11 +120,22 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    app launch. Uses a bit more battery/data per completed task.\n' +
 '  </p>\n' +
 '\n' +
+'  <h2>Danger zone</h2>\n' +
+'  <p class="hint">\n' +
+'    Wipes this watch/phone\'s locally cached task list and resync position,\n' +
+'    then re-downloads everything from the server from scratch. Your\n' +
+'    SuperSync account, saved token, and password are untouched - use this\n' +
+'    if the watch\'s list ever looks stuck or out of sync, not to unpair.\n' +
+'  </p>\n' +
+'  <button id="clearDataBtn" class="danger">Clear all data &amp; resync</button>\n' +
+'\n' +
 '  <button id="saveBtn">Save &amp; sync</button>\n' +
 '  <button id="cancelBtn" class="secondary">Cancel</button>\n' +
 '\n' +
 '<script>\n' +
 '(function () {\n' +
+'  var hasToken = ' + (hasToken ? 'true' : 'false') + ';\n' +
+'\n' +
 '  function setStatus(msg, isError) {\n' +
 '    var el = document.getElementById(\'status\');\n' +
 '    el.textContent = msg;\n' +
@@ -135,7 +157,11 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '\n' +
 '  document.getElementById(\'saveBtn\').addEventListener(\'click\', function () {\n' +
 '    var jwt = document.getElementById(\'jwt\').value.trim();\n' +
-'    if (!jwt) {\n' +
+'    // A never-paired watch has no saved token to fall back to, so a token\n' +
+'    // is required then; once one is saved, leaving this field blank just\n' +
+'    // means "keep the one already on the phone" (see webviewclosed in\n' +
+'    // index.js), so settings-only changes don\'t force re-pasting it.\n' +
+'    if (!jwt && !hasToken) {\n' +
 '      setStatus(\'Paste your SuperSync token first.\', true);\n' +
 '      return;\n' +
 '    }\n' +
@@ -148,6 +174,13 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
 '      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked\n' +
 '    });\n' +
+'  });\n' +
+'\n' +
+'  document.getElementById(\'clearDataBtn\').addEventListener(\'click\', function () {\n' +
+'    if (!window.confirm(\'Wipe the cached task list on this watch/phone and re-download everything from the server? This does not affect your account.\')) {\n' +
+'      return;\n' +
+'    }\n' +
+'    returnToWatchApp({ clearData: true });\n' +
 '  });\n' +
 '\n' +
 '  document.getElementById(\'cancelBtn\').addEventListener(\'click\', function () {\n' +
