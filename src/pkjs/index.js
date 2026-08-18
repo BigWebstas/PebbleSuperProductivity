@@ -175,6 +175,15 @@ function sendTaskAt(tasks, index) {
     TASK_DONE: t.isDone ? 1 : 0,
     TASK_PROJECT: String(t.project || '').slice(0, 31),
   };
+  if (t.dueWithTime) {
+    // Minutes since local midnight, not the raw ms timestamp or a
+    // pre-formatted string - the watch has its own 12h/24h clock
+    // preference (clock_is_24h_style()) and no reliable timezone info of
+    // its own, so formatting happens on the C side from this, using the
+    // phone's local time (matching todayStr()'s own local-day convention).
+    var dueDate = new Date(t.dueWithTime);
+    dict.TASK_DUE_MIN = dueDate.getHours() * 60 + dueDate.getMinutes();
+  }
   Pebble.sendAppMessage(dict, function () {
     sendTaskAt(tasks, index + 1);
   }, function (e) {

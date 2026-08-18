@@ -427,6 +427,24 @@ check('getActiveTasks(todayOnly=true) keeps only tasks due exactly today, drops 
   assert.deepStrictEqual(tasks.map((t) => t.id), ['a']);
 });
 
+check('getActiveTasks(todayOnly=true) also keeps a dueWithTime-only task scheduled for today', () => {
+  const state = store.emptyState();
+  const now = new Date();
+  const todayAt9am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 0, 0).getTime();
+  const tomorrowAt9am = todayAt9am + 24 * 60 * 60 * 1000;
+  store.applyOperations(
+    [
+      // No dueDay at all - only a specific-time schedule, still "today".
+      addTask({ id: 'a', title: 'Scheduled today', isDone: false, dueWithTime: todayAt9am }),
+      addTask({ id: 'b', title: 'Scheduled tomorrow', isDone: false, dueWithTime: tomorrowAt9am }),
+      addTask({ id: 'c', title: 'No schedule at all', isDone: false }),
+    ],
+    state
+  );
+  const tasks = active(state, null, false, true);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['a']);
+});
+
 check('getActiveTasks nests subtasks under their main task, indented', () => {
   const state = store.emptyState();
   store.applyOperations(
@@ -439,8 +457,8 @@ check('getActiveTasks nests subtasks under their main task, indented', () => {
   );
   const tasks = active(state);
   assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1', 'sub2']);
-  assert.strictEqual(tasks[1].title, '    - Book flights');
-  assert.strictEqual(tasks[2].title, '    - Book hotel');
+  assert.strictEqual(tasks[1].title, '    ~ Book flights');
+  assert.strictEqual(tasks[2].title, '    ~ Book hotel');
 });
 
 check('getActiveTasks never lists a subtask as a top-level row on its own', () => {

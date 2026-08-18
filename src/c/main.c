@@ -12,6 +12,7 @@
 #define KEY_TASK_TITLE MESSAGE_KEY_TASK_TITLE
 #define KEY_TASK_DONE MESSAGE_KEY_TASK_DONE
 #define KEY_TASK_PROJECT MESSAGE_KEY_TASK_PROJECT
+#define KEY_TASK_DUE_MIN MESSAGE_KEY_TASK_DUE_MIN
 #define KEY_STATUS_CODE MESSAGE_KEY_STATUS_CODE
 #define KEY_STATUS_MSG MESSAGE_KEY_STATUS_MSG
 
@@ -43,6 +44,7 @@ typedef struct {
   char title[MAX_TITLE_LEN];
   char project[MAX_PROJECT_LEN]; // '' when the phone isn't grouping by project
   bool done;
+  int due_min; // minutes since local midnight, or -1 when the task has no dueWithTime
 } Task;
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
@@ -86,6 +88,19 @@ static int s_group_count = 0;
 #define TITLE_FONT_KEY FONT_KEY_GOTHIC_18_BOLD
 #define TITLE_BOX_X 6
 #define TITLE_BOX_Y 2
+
+// MenuLayer's own default row height (measured in the emulator: no
+// get_cell_height callback existed before this, and every row - Resync,
+// task, whatever - rendered at exactly 44px). Kept explicit now that a
+// callback exists, rather than relying on "return the platform default"
+// (there's no public API to query it), so the Resync row and undone tasks
+// keep the exact height they've always had.
+#define DEFAULT_CELL_HEIGHT 44
+// Extra height for a done task's row: subtitle_box in menu_draw_row is
+// anchored to the bottom of the row's own bounds, so growing the row
+// pushes "Done" further from the title without needing to touch that
+// positioning code at all.
+#define DONE_CELL_EXTRA_HEIGHT 16
 static AppTimer *s_scroll_timer = NULL;
 static int s_scroll_offset_px = 0;
 
@@ -223,26 +238,30 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   graphics_draw_line(ctx, GPoint(0, divider_y), GPoint(bounds.size.w, divider_y));
 }
 
-// Resolves the row MenuLayer currently has highlighted to a Task, or NULL
-// if the selection isn't on a task row at all (the Resync row, or nothing
-// selectable yet).
-static Task *resolve_selected_task(void) {
-  if (s_task_count == 0) {
+// Resolves a MenuIndex to the Task it points at, or NULL if it isn't on a
+// task row at all (the Resync row, a group header, or nothing there once
+// s_group_count/s_task_count are taken into account - recompute_groups()
+// leaves s_group_count at 0 whenever s_task_count is 0, so an empty list is
+// handled by the same group_idx bounds check as any other out-of-range row).
+static Task *resolve_task_at(MenuIndex index) {
+  if (index.section == 0) {
     return NULL;
   }
-  MenuIndex sel = menu_layer_get_selected_index(s_menu_layer);
-  if (sel.section == 0) {
-    return NULL;
-  }
-  int group_idx = (int)sel.section - 1;
+  int group_idx = (int)index.section - 1;
   if (group_idx >= s_group_count) {
     return NULL;
   }
-  int task_idx = s_groups[group_idx].start + (int)sel.row;
+  int task_idx = s_groups[group_idx].start + (int)index.row;
   if (task_idx < 0 || task_idx >= s_task_count) {
     return NULL;
   }
   return &s_tasks[task_idx];
+}
+
+// Resolves the row MenuLayer currently has highlighted to a Task, or NULL
+// if the selection isn't on a task row at all.
+static Task *resolve_selected_task(void) {
+  return resolve_task_at(menu_layer_get_selected_index(s_menu_layer));
 }
 
 static int16_t title_natural_width(const char *title) {
@@ -250,6 +269,24 @@ static int16_t title_natural_width(const char *title) {
       title, fonts_get_system_font(TITLE_FONT_KEY), GRect(0, 0, 2000, 100),
       GTextOverflowModeFill, GTextAlignmentLeft);
   return size.w;
+}
+
+// Formats due_min (minutes since local midnight) as "@ 9:41 AM"/"@ 21:41" -
+// respecting the watch's own 12h/24h clock setting, since due_min itself is
+// timezone-less (the phone already converted to local time before sending
+// it - see sendTaskAt() in index.js).
+static void format_due_time(int due_min, char *out, size_t out_len) {
+  int h = due_min / 60;
+  int m = due_min % 60;
+  if (clock_is_24h_style()) {
+    snprintf(out, out_len, "@ %d:%02d", h, m);
+  } else {
+    int h12 = h % 12;
+    if (h12 == 0) {
+      h12 = 12;
+    }
+    snprintf(out, out_len, "@ %d:%02d %s", h12, m, h < 12 ? "AM" : "PM");
+  }
 }
 
 static void stop_scroll_timer(void) {
@@ -286,6 +323,14 @@ static void refresh_scroll_state(bool reset_offset) {
 
 static void menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, MenuIndex old_index, void *context) {
   refresh_scroll_state(true);
+}
+
+static int16_t menu_get_cell_height(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  Task *task = resolve_task_at(*cell_index);
+  if (task && task->done) {
+    return DEFAULT_CELL_HEIGHT + DONE_CELL_EXTRA_HEIGHT;
+  }
+  return DEFAULT_CELL_HEIGHT;
 }
 
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
@@ -333,15 +378,10 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     return;
   }
-  int group_idx = (int)cell_index->section - 1;
-  if (group_idx >= s_group_count) {
+  Task *task = resolve_task_at(*cell_index);
+  if (!task) {
     return;
   }
-  int task_idx = s_groups[group_idx].start + (int)cell_index->row;
-  if (task_idx < 0 || task_idx >= s_task_count) {
-    return;
-  }
-  Task *task = &s_tasks[task_idx];
 
   bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
                       menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
@@ -375,7 +415,15 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   graphics_context_set_text_color(ctx, fg);
 
   GFont title_font = fonts_get_system_font(TITLE_FONT_KEY);
-  GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, bounds.size.h - TITLE_BOX_Y);
+  // Constrained to exactly one line's height (measured, not the row's full
+  // remaining height) so GTextOverflowModeTrailingEllipsis ellipsizes at
+  // the end of line 1 instead of wrapping onto a second line - confirmed in
+  // the emulator that a taller box lets a long title wrap rather than
+  // truncate, which is what this app wants titles to never do.
+  GSize one_line_size = graphics_text_layout_get_content_size(
+      "Ag", title_font, GRect(0, 0, 200, 100), GTextOverflowModeFill, GTextAlignmentLeft);
+  int16_t title_box_h = one_line_size.h > 0 ? one_line_size.h : (bounds.size.h - TITLE_BOX_Y);
+  GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, title_box_h);
 
   if (needs_marquee) {
     int16_t period = natural_width + SCROLL_GAP_PX;
@@ -399,6 +447,12 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
     graphics_draw_text(ctx, "Done", fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  } else if (task->due_min >= 0) {
+    char due_text[16];
+    format_due_time(task->due_min, due_text, sizeof(due_text));
+    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
+    graphics_draw_text(ctx, due_text, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
 }
 
@@ -425,15 +479,10 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     request_sync();
     return;
   }
-  int group_idx = (int)cell_index->section - 1;
-  if (group_idx >= s_group_count) {
+  Task *task = resolve_task_at(*cell_index);
+  if (!task) {
     return;
   }
-  int task_idx = s_groups[group_idx].start + (int)cell_index->row;
-  if (task_idx < 0 || task_idx >= s_task_count) {
-    return;
-  }
-  Task *task = &s_tasks[task_idx];
   task->done = !task->done;
   save_tasks();
   menu_layer_reload_data(s_menu_layer);
@@ -539,6 +588,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *title_tuple = dict_find(iterator, KEY_TASK_TITLE);
       Tuple *done_tuple = dict_find(iterator, KEY_TASK_DONE);
       Tuple *project_tuple = dict_find(iterator, KEY_TASK_PROJECT);
+      Tuple *due_min_tuple = dict_find(iterator, KEY_TASK_DUE_MIN);
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -553,6 +603,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       strncpy(s_incoming[idx].project, project_tuple ? project_tuple->value->cstring : "", MAX_PROJECT_LEN - 1);
       s_incoming[idx].project[MAX_PROJECT_LEN - 1] = '\0';
       s_incoming[idx].done = done_tuple && done_tuple->value->int32 != 0;
+      // Absent (not just 0, which is a legitimate 12:00am) means "no
+      // dueWithTime" - the phone only includes this key at all when the
+      // task actually has one, see sendTaskAt() in index.js.
+      s_incoming[idx].due_min = due_min_tuple ? due_min_tuple->value->int32 : -1;
       break;
     }
     case MSG_TASK_SYNC_END: {
@@ -619,6 +673,7 @@ static void window_load(Window *window) {
     .get_num_sections = menu_get_num_sections,
     .get_num_rows = menu_get_num_rows,
     .get_header_height = menu_get_header_height,
+    .get_cell_height = menu_get_cell_height,
     .draw_header = menu_draw_header,
     .draw_row = menu_draw_row,
     .select_click = menu_select_click,

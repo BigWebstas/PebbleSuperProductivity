@@ -40,11 +40,24 @@
 // show whatever fields a later action happened to touch.
 'use strict';
 
-function todayStr() {
-  var d = new Date();
+function dateToDateStr(d) {
   var mm = ('0' + (d.getMonth() + 1)).slice(-2);
   var dd = ('0' + d.getDate()).slice(-2);
   return d.getFullYear() + '-' + mm + '-' + dd;
+}
+
+function todayStr() {
+  return dateToDateStr(new Date());
+}
+
+// dueWithTime is a ms timestamp (a task scheduled for a specific time of
+// day), separate from dueDay (a plain date) - the real app sets both
+// together when scheduling from its UI, but they're independent fields, so
+// a todayOnly filter keyed on dueDay alone would miss a dueWithTime-only
+// task. No custom "start of day" offset here (unlike the real app's
+// startOfNextDayDiffMs) - just the phone's local calendar day.
+function msIsToday(ms) {
+  return dateToDateStr(new Date(ms)) === todayStr();
 }
 
 // state: { task: { [id]: {id, title, isDone, parentId?, projectId?,
@@ -411,19 +424,25 @@ function titleCompare(a, b) {
 // row's `project` is '' - a single implicit group, matching the flat list
 // this had before grouping existed.
 //
-// When todayOnly is true, tasks are further restricted to dueDay === today -
-// only tasks actually planned/scheduled for today, not undated, overdue, or
-// future-dated ones. This is a simplification of the real app's
-// TODAY_TAG-based membership (which also considers dueWithTime/deadlineDay
-// and explicit tag assignment) - not a full port, just enough to give the
-// watch a "what's on my plate today" filter.
+// When todayOnly is true, tasks are further restricted to ones actually
+// planned for today: dueDay === today, OR dueWithTime falls on today's
+// calendar day (a task scheduled for a specific time can carry dueWithTime
+// without dueDay also being set) - not undated, overdue, or future-dated
+// ones. This mirrors the real app's virtual TODAY_TAG, whose membership is
+// likewise derived from dueDay/dueWithTime rather than a synced list
+// (boards.util.ts: "TODAY_TAG is virtual: membership derives from
+// dueDay/dueWithTime"). Doesn't consider deadlineDay/deadlineWithTime or
+// explicit tag assignment - not a full port, just enough to match what the
+// desktop's Today page actually shows for the common case.
 function getActiveTasks(state, limit, groupByProject, todayOnly) {
   var allTasks = state.task || {};
   var today = todayStr();
   var mainTasks = Object.keys(allTasks)
     .map(function (id) { return allTasks[id]; })
     .filter(function (t) { return t && isMainTask(t) && !t.__inBacklog; })
-    .filter(function (t) { return !todayOnly || t.dueDay === today; });
+    .filter(function (t) {
+      return !todayOnly || t.dueDay === today || (t.dueWithTime && msIsToday(t.dueWithTime));
+    });
 
   function withinGroupSort(a, b) {
     if (!!a.isDone !== !!b.isDone) {
@@ -460,19 +479,21 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
 
 // Pebble's MenuLayer has no per-row indent control, so nesting is baked
 // into the title string itself. Plain leading spaces alone read as barely
-// different from a regular row at this font size - a leading dash plus
-// wider indentation reads unambiguously as "sub-item of the row above",
-// and stays plain ASCII rather than a Unicode glyph (e.g. an arrow or
-// bullet) that isn't guaranteed to exist in Pebble's system fonts on every
-// platform this targets (aplite in particular).
-var SUBTASK_PREFIX = '    - ';
+// different from a regular row at this font size - a leading marker plus
+// wider indentation reads unambiguously as "sub-item of the row above".
+// Plain ASCII (~), not a Unicode glyph (e.g. the box-drawing corner
+// U+2514) that isn't guaranteed to exist in Pebble's system fonts on every
+// platform this targets - confirmed in the emulator that U+2514 renders as
+// an empty missing-glyph box on this app's system font, even on color
+// platforms.
+var SUBTASK_PREFIX = '    ~ ';
 
 function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
-  rows.push({ id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone, project: groupName });
+  rows.push({ id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + (sub.title || '(untitled)'), isDone: !!sub.isDone, project: groupName });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + (sub.title || '(untitled)'), isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined });
     }
   });
 }
