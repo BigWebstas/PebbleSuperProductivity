@@ -174,6 +174,70 @@ check('moveToArchive removes tasks from the active view even if dueDay still say
   assert.strictEqual(state.task.a, undefined);
 });
 
+check('applyShortSyntax sets dueDay from schedulingInfo.day (typing "today" in a task title)', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'X', isDone: false }),
+      entry('[Task Shared] applyShortSyntax', {
+        task: { id: 'a' },
+        taskChanges: { title: 'X today' },
+        schedulingInfo: { day: today },
+      }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueDay, today);
+  assert.strictEqual(state.task.a.title, 'X today');
+});
+
+check('applyShortSyntax sets dueWithTime from schedulingInfo.dueWithTime and clears dueDay', () => {
+  const state = store.emptyState();
+  const at3pm = Date.now();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'X', dueDay: today }),
+      entry('[Task Shared] applyShortSyntax', {
+        task: { id: 'a' },
+        taskChanges: {},
+        schedulingInfo: { dueWithTime: at3pm },
+      }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueWithTime, at3pm);
+  assert.strictEqual(state.task.a.dueDay, undefined);
+});
+
+check('convertToMainTask clears parentId so the task becomes eligible as a main task', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'parent', title: 'Parent', dueDay: today, subTaskIds: ['sub'] }),
+      addTask({ id: 'sub', title: 'Sub', parentId: 'parent' }),
+      entry('[Task Shared] convertToMainTask', { task: { id: 'sub', dueWithTime: undefined }, isPlanForToday: true, today }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.sub.parentId, undefined);
+  assert.strictEqual(state.task.sub.dueDay, today);
+  const tasks = store.getTodayTasks(state, 30);
+  assert(tasks.some((t) => t.id === 'sub'), 'promoted task should now be selectable as a main task');
+});
+
+check('convertToSubTask sets parentId so the task stops being eligible as a main task', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'A', dueDay: today }),
+      entry('[Task Shared] convertToSubTask', { taskId: 'a', targetParentId: 'parent' }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.parentId, 'parent');
+  assert.deepStrictEqual(store.getTodayTasks(state, 30), []);
+});
+
 check('unrecognized TASK actionType is ignored, not thrown', () => {
   const state = store.emptyState();
   assert.doesNotThrow(() => {

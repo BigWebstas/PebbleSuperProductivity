@@ -147,16 +147,20 @@ traffic. Since then, three things resolved almost everything that was
 
 **Known gaps, not "assumed" so much as "not yet built":**
 - Handled TASK action types, confirmed against
-  `root-store/meta/task-shared.actions.ts` and its scheduling meta-reducer
-  in the super-productivity GitHub repo: `addTask`, `updateTask`,
-  `updateTasks`, `scheduleTaskWithTime`, `reScheduleTaskWithTime`,
-  `planTasksForToday`, `unscheduleTask`, `deleteTask`, `deleteTasks`,
-  `moveToArchive`, `restoreTask`, `restoreDeletedTask`. Everything else in
-  that file (`convertToMainTask`, `convertToSubTask`, `moveToOtherProject`,
-  `setDeadline`/deadline-related actions, `applyShortSyntax`,
-  `addTagToTask`, ...) is a no-op - the task keeps whatever state it had
-  before that action, which is usually harmless (most of those don't touch
-  title/isDone/due-date) but not guaranteed to be.
+  `root-store/meta/task-shared.actions.ts` and its meta-reducers (scheduling,
+  short-syntax, crud) in the super-productivity GitHub repo: `addTask`,
+  `updateTask`, `updateTasks`, `scheduleTaskWithTime`,
+  `reScheduleTaskWithTime`, `planTasksForToday`, `unscheduleTask`,
+  `deleteTask`, `deleteTasks`, `moveToArchive`, `restoreTask`,
+  `restoreDeletedTask`, `applyShortSyntax` (typing scheduling info directly
+  into a task's title - a real gap in earlier versions, since this is a
+  common way tasks end up due today), `convertToMainTask`/`convertToSubTask`
+  (subtask promotion/demotion - `convertToMainTask` clearing `parentId` is
+  what makes a promoted subtask visible as a main task at all). Everything
+  else in that file (`moveToOtherProject`, `setDeadline`/deadline-related
+  actions, `addTagToTask`, ...) is a no-op - the task keeps whatever state
+  it had before that action, which is usually harmless (most of those
+  don't touch title/isDone/due-date) but not guaranteed to be.
 - The Today list is exactly `task.dueDay`/`task.dueWithTime === today`, no
   broader fallback - confirmed from `tag.const.ts`'s own doc comment
   ("membership is determined by task.dueDay") plus

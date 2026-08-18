@@ -169,6 +169,51 @@ function applyTaskAction(op, actionPayload, state) {
       deleteTasks(tasks, (actionPayload.tasks || []).map(function (t) { return t.id; }));
       break;
 
+    // Mirrors handleApplyShortSyntax in short-syntax-shared.reducer.ts: a
+    // task's title can itself carry scheduling ("do the thing today" or
+    // "at 3pm"), which this atomic action applies alongside plain field
+    // changes. A real gap without this - short syntax is a common way
+    // tasks end up due today, and it was silently a no-op before.
+    case '[Task Shared] applyShortSyntax': {
+      var scId = actionPayload.task && actionPayload.task.id;
+      if (scId) {
+        var scChanges = Object.assign({}, actionPayload.taskChanges);
+        var info = actionPayload.schedulingInfo;
+        if (info && info.dueWithTime) {
+          scChanges.dueWithTime = info.dueWithTime;
+          scChanges.dueDay = undefined;
+        } else if (info && info.day) {
+          scChanges.dueDay = info.day;
+          scChanges.dueWithTime = undefined;
+        }
+        mergeTaskChanges(tasks, scId, scChanges);
+      }
+      break;
+    }
+
+    // Mirrors handleConvertToMainTask in task-shared-crud.reducer.ts:
+    // promotes a subtask to a main task (clearing parentId, without which
+    // it stays invisible to isMainTask() forever), optionally planning it
+    // for today.
+    case '[Task Shared] convertToMainTask': {
+      var mainTask = actionPayload.task;
+      if (mainTask && mainTask.id) {
+        var mainChanges = { parentId: undefined };
+        if (actionPayload.isPlanForToday && !mainTask.dueWithTime) {
+          mainChanges.dueDay = actionPayload.today || todayStr();
+        }
+        mergeTaskChanges(tasks, mainTask.id, mainChanges);
+      }
+      break;
+    }
+
+    // The inverse of convertToMainTask: demotes a task to a subtask of
+    // targetParentId. Kept for symmetry, so a demoted task doesn't
+    // continue being (incorrectly) eligible as a main task.
+    case '[Task Shared] convertToSubTask':
+      mergeTaskChanges(tasks, actionPayload.taskId, { parentId: actionPayload.targetParentId });
+      break;
+
     default:
       // Time tracking, reminders, Today-tag *ordering* (as opposed to
       // membership - see the top-of-file comment), tags/projects/deadlines,
