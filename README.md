@@ -47,7 +47,9 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
   because the PebbleKit JS runtime does not reliably expose
   `window.crypto.subtle` across phone platforms/app versions. **Verified
   byte-for-byte against Node's native `crypto` module** — see Testing below.
-- **`config/pairing.html`** — the phone-side pairing page, opened from the
+- **`config/pairing.html`** — plain-HTML reference copy of the phone-side
+  pairing page. `src/pkjs/lib/pairing-page.js` mirrors this same markup and
+  is what actually ships, inlined as a `data:` URI and opened from the
   watchapp's Settings entry in the Pebble mobile app.
 
 ## ⚠️ What is verified vs. assumed
@@ -137,15 +139,18 @@ node scripts/test-task-store.js
 
 ## Pairing
 
-1. Host `config/pairing.html` somewhere reachable over HTTPS (e.g. GitHub
-   Pages) and point `CONFIG_PAGE_URL` in `src/pkjs/index.js` at it —
-   `pebble.openURL` needs a real hosted URL, it can't load a local file.
-2. Install the watchapp, open the Pebble mobile app, find "Super
-   Productivity" in your watchapps, and tap Settings.
-3. Enter your SuperSync server URL, email, and sync encryption password.
+1. Install the watchapp, open the Pebble mobile app, find "Super
+   Productivity" in your watchapps, and tap Settings. This opens the
+   pairing page built by `src/pkjs/lib/pairing-page.js` via a `data:` URI —
+   nothing to host, since `Pebble.openURL()` has no way to load a file
+   bundled inside the `.pbw` and this project has no server of its own.
+   `config/pairing.html` is kept as a plain-HTML mirror of the same page for
+   reference/local editing; `pairing-page.js` is the copy that actually
+   ships.
+2. Enter your SuperSync server URL, email, and sync encryption password.
    Tap "Open SuperSync login", sign in there, copy the token it displays,
    paste it into the "SuperSync access token" field, then Save.
-4. The watch requests a sync automatically on next launch, or immediately
+3. The watch requests a sync automatically on next launch, or immediately
    if it's already open.
 
 ## AppMessage protocol

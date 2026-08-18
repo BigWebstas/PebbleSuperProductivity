@@ -6,6 +6,7 @@
 
 var supersync = require('./lib/supersync-client.js');
 var store = require('./lib/task-store.js');
+var pairingPage = require('./lib/pairing-page.js');
 
 // Keep in sync with the enums at the top of src/c/main.c.
 var MSG_TASK_SYNC_START = 1;
@@ -21,7 +22,6 @@ var STATUS_NOT_PAIRED = 2;
 var STATUS_ERROR = 3;
 
 var MAX_TASKS = 30;
-var CONFIG_PAGE_URL = 'https://example.invalid/pebble-super-productivity/pairing.html';
 
 // ---------------- local storage helpers ----------------
 
@@ -258,9 +258,8 @@ Pebble.addEventListener('appmessage', function (e) {
 
 Pebble.addEventListener('showConfiguration', function () {
   var config = loadConfig() || {};
-  var query = '?baseUrl=' + encodeURIComponent(config.baseUrl || supersync.DEFAULT_BASE_URL) +
-    '&email=' + encodeURIComponent(config.email || '');
-  Pebble.openURL(CONFIG_PAGE_URL + query);
+  var url = pairingPage.buildPairingPageUrl(config.baseUrl || supersync.DEFAULT_BASE_URL, config.email || '');
+  Pebble.openURL(url);
 });
 
 Pebble.addEventListener('webviewclosed', function (e) {
