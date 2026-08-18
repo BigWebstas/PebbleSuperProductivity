@@ -165,6 +165,11 @@ traffic. Since then, three things resolved almost everything that was
   irrelevant for a watch just listing titles. An account with genuinely
   nothing due today will correctly show an empty list rather than a
   backlog dump.
+- Subtasks (`task.parentId` set) are never selected independently - per
+  `task.model.ts`, only main tasks carry a due date, so Today membership
+  is a main-task-only concept. A subtask shows up only by riding along
+  with its own (visible-today) parent's `subTaskIds`, indented two spaces,
+  regardless of the subtask's own `isDone`/due-date.
 
 None of this is guesswork about *how to write a Pebble watchapp* — the
 AppMessage/MenuLayer/Storage APIs and the phone-relay networking

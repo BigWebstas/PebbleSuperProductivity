@@ -22,6 +22,17 @@
 // `dueDay`/`dueWithTime` are mutually exclusive (setting one clears the
 // other) per the app's own "ARCHITECTURE-DECISIONS.md Decision #1".
 //
+// getTodayTasks() only returns tasks with dueDay/dueWithTime === today -
+// no backlog fallback. An account with genuinely nothing planned for today
+// shows an empty list, not a dump of the backlog.
+//
+// Subtasks (task.parentId set) never carry their own due date in the real
+// app - membership in Today is a main-task-only concept, and a subtask is
+// shown by being nested under its (visible) parent via parentId's
+// task.subTaskIds. getTodayTasks() mirrors that: it selects and sorts main
+// tasks only (by today-membership), then interleaves each one's subtasks
+// immediately after it, regardless of the subtask's own isDone/due-date.
+//
 // SYNC_IMPORT/BACKUP_IMPORT/REPAIR carry a full NgRx EntityState snapshot
 // per feature slice (payload.task = { ids: [...], entities: {...} }),
 // also confirmed against the same real account, whose op history starts
@@ -248,19 +259,24 @@ function applyOperations(entries, state, crypto) {
   });
 }
 
-// Returns up to `limit` tasks actually due today - i.e. exactly Super
-// Productivity's own Today section, per task.dueDay/dueWithTime (see the
-// top-of-file comment for why that's the real membership signal, not the
-// Today tag's ordering list). Deliberately no "everything not done"
-// fallback: an empty result means Today is actually empty, not "we
-// couldn't figure out what's due."
+function isMainTask(t) {
+  return !t.parentId;
+}
+
+// Returns up to `limit` rows: main tasks actually due today, each
+// immediately followed by its own subtasks (indented), regardless of the
+// subtask's own isDone/due-date - subtasks aren't independently filtered,
+// they just ride along with their parent.
 function getTodayTasks(state, limit) {
   var today = todayStr();
-  var todays = Object.keys(state.task || {})
-    .map(function (id) { return state.task[id]; })
-    .filter(function (t) { return t && taskDueDay(t) === today; });
+  var allTasks = state.task || {};
+  var mainTasks = Object.keys(allTasks)
+    .map(function (id) { return allTasks[id]; })
+    .filter(function (t) { return t && isMainTask(t); });
 
-  todays.sort(function (a, b) {
+  var selected = mainTasks.filter(function (t) { return taskDueDay(t) === today; });
+
+  selected.sort(function (a, b) {
     if (!!a.isDone !== !!b.isDone) {
       return a.isDone ? 1 : -1;
     }
@@ -273,9 +289,18 @@ function getTodayTasks(state, limit) {
     return at < bt ? -1 : at > bt ? 1 : 0;
   });
 
-  return todays.slice(0, limit).map(function (t) {
-    return { id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone };
+  var rows = [];
+  selected.forEach(function (t) {
+    rows.push({ id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone });
+    (t.subTaskIds || []).forEach(function (subId) {
+      var sub = allTasks[subId];
+      if (sub) {
+        rows.push({ id: sub.id, title: '  ' + (sub.title || '(untitled)'), isDone: !!sub.isDone });
+      }
+    });
   });
+
+  return rows.slice(0, limit);
 }
 
 module.exports = {

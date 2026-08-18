@@ -212,6 +212,49 @@ check('getTodayTasks returns nothing when nothing is due today (no fallback)', (
   assert.deepStrictEqual(store.getTodayTasks(state, 30), []);
 });
 
+check('getTodayTasks nests subtasks under their main task, indented', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'main', title: 'Plan trip', isDone: false, dueDay: today, subTaskIds: ['sub1', 'sub2'] }),
+      addTask({ id: 'sub1', title: 'Book flights', isDone: false, parentId: 'main' }),
+      addTask({ id: 'sub2', title: 'Book hotel', isDone: true, parentId: 'main' }),
+    ],
+    state
+  );
+  const tasks = store.getTodayTasks(state, 30);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1', 'sub2']);
+  assert.strictEqual(tasks[1].title, '  Book flights');
+  assert.strictEqual(tasks[2].title, '  Book hotel');
+});
+
+check('getTodayTasks omits subtasks whose main task is not due today', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'main', title: 'Someday project', isDone: false, subTaskIds: ['sub1'] }),
+      addTask({ id: 'sub1', title: 'Step one', isDone: false, parentId: 'main' }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(store.getTodayTasks(state, 30), []);
+});
+
+check('getTodayTasks never lists a subtask as a top-level row on its own', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'main', title: 'Parent', isDone: false, dueDay: '2099-01-01', subTaskIds: ['sub1'] }),
+      // The subtask itself happens to have a today due-date, but subtasks
+      // are never selected independently - only riding along with a
+      // visible parent, which this one doesn't have.
+      addTask({ id: 'sub1', title: 'Orphan-ish subtask', isDone: false, parentId: 'main', dueDay: today }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(store.getTodayTasks(state, 30), []);
+});
+
 check('getTodayTasks falls back to dueWithTime (calendar-imported tasks) when dueDay is absent', () => {
   const state = store.emptyState();
   const todayNoon = new Date();
