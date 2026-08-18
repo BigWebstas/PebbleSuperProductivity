@@ -411,20 +411,19 @@ function titleCompare(a, b) {
 // row's `project` is '' - a single implicit group, matching the flat list
 // this had before grouping existed.
 //
-// When todayOnly is true, tasks are further restricted to dueDay <= today -
-// due today or overdue, mirroring how the real app's Today list treats an
-// overdue dueDay (task.selectors.ts) rather than requiring an exact date
-// match. Undated and future-dated tasks are excluded. This is a
-// simplification of the real app's TODAY_TAG-based membership (which also
-// considers dueWithTime/deadlineDay and explicit tag assignment) - not a
-// full port, just enough to give the watch a "what's due" filter.
+// When todayOnly is true, tasks are further restricted to dueDay === today -
+// only tasks actually planned/scheduled for today, not undated, overdue, or
+// future-dated ones. This is a simplification of the real app's
+// TODAY_TAG-based membership (which also considers dueWithTime/deadlineDay
+// and explicit tag assignment) - not a full port, just enough to give the
+// watch a "what's on my plate today" filter.
 function getActiveTasks(state, limit, groupByProject, todayOnly) {
   var allTasks = state.task || {};
   var today = todayStr();
   var mainTasks = Object.keys(allTasks)
     .map(function (id) { return allTasks[id]; })
     .filter(function (t) { return t && isMainTask(t) && !t.__inBacklog; })
-    .filter(function (t) { return !todayOnly || (t.dueDay && t.dueDay <= today); });
+    .filter(function (t) { return !todayOnly || t.dueDay === today; });
 
   function withinGroupSort(a, b) {
     if (!!a.isDone !== !!b.isDone) {

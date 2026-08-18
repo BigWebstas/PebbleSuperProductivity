@@ -105,8 +105,8 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    <label for="todayOnly">Only show today\'s tasks</label>\n' +
 '  </div>\n' +
 '  <p class="hint">\n' +
-'    Hides tasks with no due date or a due date in the future - only tasks\n' +
-'    due today or overdue show on the watch.\n' +
+'    Only shows tasks planned for today - hides undated, overdue, and\n' +
+'    future-dated tasks.\n' +
 '  </p>\n' +
 '\n' +
 '  <h2>Sync</h2>\n' +

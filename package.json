@@ -1,6 +1,6 @@
 {
   "name": "pebble-super-productivity",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Pebble/PebbleOS watchapp that syncs tasks with Super Productivity's SuperSync server",
   "author": "BW",
   "private": true,

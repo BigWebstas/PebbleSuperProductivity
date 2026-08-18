@@ -412,7 +412,7 @@ check('getActiveTasks excludes backlog tasks but includes everything else, any d
   assert.deepStrictEqual(tasks.map((t) => t.id), ['c', 'a', 'b']);
 });
 
-check('getActiveTasks(todayOnly=true) keeps due-today and overdue, drops undated and future', () => {
+check('getActiveTasks(todayOnly=true) keeps only tasks due exactly today, drops undated, overdue, and future', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
@@ -424,7 +424,7 @@ check('getActiveTasks(todayOnly=true) keeps due-today and overdue, drops undated
     state
   );
   const tasks = active(state, null, false, true);
-  assert.deepStrictEqual(tasks.map((t) => t.id).sort(), ['a', 'b']);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['a']);
 });
 
 check('getActiveTasks nests subtasks under their main task, indented', () => {
