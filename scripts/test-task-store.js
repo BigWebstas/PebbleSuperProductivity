@@ -20,18 +20,37 @@ function check(name, fn) {
 const today = store.todayStr();
 
 // GET /api/sync/ops entries, confirmed against a live account, are shaped
-// { serverSeq, op: {...}, receivedAt } with an uppercase entityType and an
-// opType field (not type) - entry() below builds that real shape.
-function entry(opType, entityType, entityId, payload) {
-  return { serverSeq: 1, op: { opType, entityType, entityId, payload }, receivedAt: 1 };
+// { serverSeq, op: {...}, receivedAt }, and for TASK entities op.payload is
+// a Redux-action envelope { actionPayload: {...} } whose shape depends on
+// op.actionType - NOT a flat entity record. entry() below builds that real
+// shape for the TASK action types actually observed in a live account's
+// full op history.
+function entry(actionType, actionPayload) {
+  return {
+    serverSeq: 1,
+    op: { opType: 'UPD', entityType: 'TASK', actionType: actionType, payload: { actionPayload: actionPayload } },
+    receivedAt: 1,
+  };
 }
 
-check('CRT then UPD builds a merged task', () => {
+function addTask(task) {
+  return entry('[Task Shared] addTask', { task: task });
+}
+
+function updateTask(id, changes) {
+  return entry('[Task Shared] updateTask', { task: { id: id, changes: changes } });
+}
+
+function planTasksForToday(date, taskIds) {
+  return entry('[Task Shared] planTasksForToday', { today: date, taskIds: taskIds });
+}
+
+check('addTask then updateTask builds a merged task', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
-      entry('CRT', 'TASK', 't1', { id: 't1', title: 'Buy milk', isDone: false, dueDay: today }),
-      entry('UPD', 'TASK', 't1', { isDone: true }),
+      addTask({ id: 't1', title: 'Buy milk', isDone: false, dueDay: today }),
+      updateTask('t1', { isDone: true }),
     ],
     state
   );
@@ -39,60 +58,102 @@ check('CRT then UPD builds a merged task', () => {
   assert.strictEqual(state.task.t1.isDone, true);
 });
 
-check('DEL removes an entity', () => {
+check('SYNC_IMPORT replaces state.task with the imported EntityState snapshot', () => {
   const state = store.emptyState();
-  store.applyOperations(
-    [
-      entry('CRT', 'TASK', 't1', { id: 't1', title: 'X', dueDay: today }),
-      entry('DEL', 'TASK', 't1', undefined),
-    ],
-    state
-  );
-  assert.strictEqual(state.task.t1, undefined);
+  const importEntry = {
+    serverSeq: 1,
+    op: {
+      opType: 'SYNC_IMPORT',
+      entityType: 'ALL',
+      payload: {
+        task: {
+          ids: ['a', 'b'],
+          entities: {
+            a: { id: 'a', title: 'Pre-existing task', isDone: false, dueDay: today },
+            b: { id: 'b', title: 'Another pre-existing task', isDone: true },
+          },
+        },
+      },
+    },
+    receivedAt: 1,
+  };
+  store.applyOperations([importEntry, updateTask('a', { isDone: true })], state);
+  assert.strictEqual(state.task.a.title, 'Pre-existing task');
+  assert.strictEqual(state.task.a.isDone, true); // updateTask after the import still applies
+  assert.strictEqual(state.task.b.title, 'Another pre-existing task');
 });
 
-check('DEL with batch ids removes multiple', () => {
+check('updateTask on an unknown id creates a bare record rather than throwing', () => {
   const state = store.emptyState();
-  store.applyOperations(
-    [
-      entry('CRT', 'TASK', 't1', { id: 't1', title: 'X', dueDay: today }),
-      entry('CRT', 'TASK', 't2', { id: 't2', title: 'Y', dueDay: today }),
-      entry('DEL', 'TASK', undefined, { ids: ['t1', 't2'] }),
-    ],
-    state
-  );
-  assert.strictEqual(Object.keys(state.task).length, 0);
+  assert.doesNotThrow(() => {
+    store.applyOperations([updateTask('ghost', { isDone: true })], state);
+  });
+  assert.strictEqual(state.task.ghost.isDone, true);
+});
+
+check('unrecognized TASK actionType is ignored, not thrown', () => {
+  const state = store.emptyState();
+  assert.doesNotThrow(() => {
+    store.applyOperations([entry('[Task Shared] dismissReminderOnly', { id: 't1' })], state);
+    store.applyOperations([entry('[TimeTracking] Sync time spent', { taskId: 't1', date: today, duration: 100 })], state);
+  });
+  assert.deepStrictEqual(state.task, {});
 });
 
 check('malformed op does not throw', () => {
   const state = store.emptyState();
   assert.doesNotThrow(() => {
-    store.applyOperations([entry('UPD', 'TASK', 't1', null)], state);
-    store.applyOperations([entry('WEIRD_FUTURE_TYPE', 'TASK', 't1', undefined)], state);
     store.applyOperations([{ serverSeq: 1, receivedAt: 1 }], state); // missing op entirely
+    store.applyOperations([{ serverSeq: 1, op: { opType: 'UPD', entityType: 'TASK', actionType: '[Task Shared] updateTask', payload: null }, receivedAt: 1 }], state);
   });
 });
 
-check('getTodayTasks prefers dueDay===today, not-done first, respects limit', () => {
+check('getTodayTasks prefers planTasksForToday when it matches today', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
-      entry('CRT', 'TASK', 'a', { id: 'a', title: 'Zebra', isDone: false, dueDay: today }),
-      entry('CRT', 'TASK', 'b', { id: 'b', title: 'Apple', isDone: true, dueDay: today }),
-      entry('CRT', 'TASK', 'c', { id: 'c', title: 'Later task', isDone: false, dueDay: '2099-01-01' }),
+      addTask({ id: 'a', title: 'Zebra', isDone: false, dueDay: '2099-01-01' }), // due date says NOT today
+      addTask({ id: 'b', title: 'Apple', isDone: true }),
+      planTasksForToday(today, ['a', 'b']), // but the app says both are planned for today
     ],
     state
   );
   const tasks = store.getTodayTasks(state, 30);
-  assert.deepStrictEqual(tasks.map((t) => t.id), ['a', 'b']); // 'c' excluded, not-done ('a') before done ('b')
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['a', 'b']); // not-done ('a') before done ('b')
 });
 
-check('getTodayTasks falls back to not-done tasks when nothing matches dueDay', () => {
+check('getTodayTasks ignores a stale planTasksForToday for a different day', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
-      entry('CRT', 'TASK', 'a', { id: 'a', title: 'No due date', isDone: false }),
-      entry('CRT', 'TASK', 'b', { id: 'b', title: 'Done already', isDone: true }),
+      addTask({ id: 'a', title: 'Today via dueDay', isDone: false, dueDay: today }),
+      addTask({ id: 'b', title: 'Planned yesterday', isDone: false }),
+      planTasksForToday('2099-01-01', ['b']), // stale/future plan, not for today
+    ],
+    state
+  );
+  const tasks = store.getTodayTasks(state, 30);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['a']);
+});
+
+check('getTodayTasks falls back to dueWithTime (calendar-imported tasks) when dueDay is absent', () => {
+  const state = store.emptyState();
+  const todayNoon = new Date();
+  todayNoon.setHours(12, 0, 0, 0);
+  store.applyOperations(
+    [addTask({ id: 'a', title: 'Calendar event', isDone: false, dueWithTime: todayNoon.getTime() })],
+    state
+  );
+  const tasks = store.getTodayTasks(state, 30);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['a']);
+});
+
+check('getTodayTasks falls back to not-done tasks when nothing matches today', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'No due date', isDone: false }),
+      addTask({ id: 'b', title: 'Done already', isDone: true }),
     ],
     state
   );
@@ -104,7 +165,7 @@ check('getTodayTasks respects limit', () => {
   const state = store.emptyState();
   const ops = [];
   for (let i = 0; i < 50; i++) {
-    ops.push(entry('CRT', 'TASK', 't' + i, { id: 't' + i, title: 'Task ' + i, isDone: false, dueDay: today }));
+    ops.push(addTask({ id: 't' + i, title: 'Task ' + i, isDone: false, dueDay: today }));
   }
   store.applyOperations(ops, state);
   assert.strictEqual(store.getTodayTasks(state, 30).length, 30);

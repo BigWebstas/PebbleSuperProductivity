@@ -1,24 +1,30 @@
 // Thin client for the SuperSync REST API (packages/super-sync-server in the
 // super-productivity repo), plus the E2EE payload encrypt/decrypt helpers.
 //
-// Routes, auth scheme, and GET /api/sync/ops's response shape are confirmed
-// against a live account's real traffic (see README.md's "What is verified
-// vs. assumed" section) - see task-store.js for the confirmed Operation
-// field names (opType/entityType/isPayloadEncrypted, not
+// Routes, auth scheme, GET /api/sync/ops's response shape, and the E2EE wire
+// format/KDF below are all confirmed against
+// packages/sync-core/src/encryption.ts and encryption/argon2.ts in the
+// super-productivity/super-productivity GitHub repo (see README.md's "What
+// is verified vs. assumed" section) - see task-store.js for the confirmed
+// Operation field names (opType/entityType/isPayloadEncrypted, not
 // type/entityType/encrypted, and entries are wrapped as
 // { serverSeq, op, receivedAt }).
 //
-// STILL UNCONFIRMED
-// -------------------------------------------------------------------------
-//   1. The E2EE key derivation (this uses PBKDF2-HMAC-SHA256, 210000
-//      iterations, salt = utf8("supersync:" + email) - unverified, would
-//      produce a different key and fail to decrypt existing data even with
-//      the right password if wrong).
-//   2. The exact byte layout inside an encrypted `op.payload`. Confirmed to
-//      be a single base64 string (not a `{iv, ciphertext, tag}` JSON
-//      envelope as originally assumed), but the IV/ciphertext/tag split
-//      within those bytes is still unknown - decryptPayload() below will
-//      throw on real data until this is pinned down.
+// Wire format (base64-encoded on the wire):
+//   Argon2id ciphertext : [16-byte salt][12-byte IV][AES-GCM ciphertext+tag]
+//   Legacy PBKDF2        : [12-byte IV][AES-GCM ciphertext+tag]
+// Format is picked by length: < 28 bytes invalid, < 44 bytes legacy,
+// otherwise Argon2id (matches encryption/web-crypto.ts's detectFormat()).
+// All new encryptions use Argon2id; legacy only matters for old data.
+//
+// KDF parameters (packages/sync-core/src/encryption/argon2.ts
+// DEFAULT_ARGON2_PARAMS / legacy.ts's PBKDF2 call):
+//   Argon2id: parallelism=1 (a hardcoded app constant - argon2id.js is
+//             specialized for this), iterations=3, memorySize=65536 KiB,
+//             32-byte key.
+//   Legacy:   PBKDF2-HMAC-SHA256, salt = utf8(password) itself (not the
+//             email - insecure, kept only for backward compatibility),
+//             1000 iterations, 32-byte key.
 // GET /api/sync/restore/:serverSeq is confirmed to reject E2EE accounts
 // outright (400 ENCRYPTED_OPS_NOT_SUPPORTED) - index.js no longer treats
 // that as a sync failure, it falls through to a full ops replay instead.
@@ -27,42 +33,101 @@
 var aesGcm = require('./aes-gcm.js');
 var sha256lib = require('./sha256.js');
 var base64 = require('./base64.js');
+var argon2Lib = require('./argon2id.js');
 
 var DEFAULT_BASE_URL = 'https://sync.super-productivity.com';
-var KDF_ITERATIONS = 210000;
-var KDF_KEY_LEN = 32; // AES-256
 
-function deriveEncryptionKey(password, email) {
-  var salt = sha256lib.utf8ToBytes('supersync:' + email);
-  return sha256lib.pbkdf2(sha256lib.utf8ToBytes(password), salt, KDF_ITERATIONS, KDF_KEY_LEN);
-}
+var SALT_LENGTH = 16;
+var IV_LENGTH = 12;
+var TAG_LENGTH = 16;
+var MIN_ARGON2_SIZE = SALT_LENGTH + IV_LENGTH + TAG_LENGTH;
+var MIN_LEGACY_SIZE = IV_LENGTH + TAG_LENGTH;
+var ARGON2_PARAMS = { parallelism: 1, iterations: 3, memorySize: 65536, hashLength: 32 };
+var LEGACY_PBKDF2_ITERATIONS = 1000;
+var LEGACY_KEY_LEN = 32;
 
-function randomIv() {
-  var iv = new Array(12);
-  for (var i = 0; i < 12; i++) {
-    iv[i] = Math.floor(Math.random() * 256);
+function randomBytes(n) {
+  var out = new Array(n);
+  for (var i = 0; i < n; i++) {
+    out[i] = Math.floor(Math.random() * 256);
   }
-  return iv;
+  return out;
 }
 
-function encryptPayload(obj, key) {
-  var plaintext = sha256lib.utf8ToBytes(JSON.stringify(obj));
-  var iv = randomIv();
-  var result = aesGcm.aesGcmEncrypt(key, iv, plaintext, []);
-  return {
-    iv: base64.bytesToBase64(iv),
-    ciphertext: base64.bytesToBase64(result.ciphertext),
-    tag: base64.bytesToBase64(result.tag),
-  };
+function deriveArgon2Key(password, salt) {
+  return argon2Lib.argon2id(sha256lib.utf8ToBytes(password), salt, ARGON2_PARAMS);
 }
 
-function decryptPayload(envelope, key) {
-  var iv = base64.base64ToBytes(envelope.iv);
-  var ciphertext = base64.base64ToBytes(envelope.ciphertext);
-  var tag = base64.base64ToBytes(envelope.tag);
-  var plaintextBytes = aesGcm.aesGcmDecrypt(key, iv, ciphertext, tag, []);
-  var str = bytesToUtf8(plaintextBytes);
-  return JSON.parse(str);
+function deriveLegacyKey(password) {
+  var salt = sha256lib.utf8ToBytes(password);
+  return sha256lib.pbkdf2(sha256lib.utf8ToBytes(password), salt, LEGACY_PBKDF2_ITERATIONS, LEGACY_KEY_LEN);
+}
+
+// Argon2id is expensive (multi-second on real hardware at these params), so
+// derived keys are cached per (password, salt) for the lifetime of this
+// object - mirrors encryption/session-cache.ts's rationale. One crypto
+// instance is created per pairing/password in index.js and reused across an
+// entire sync session.
+function createCrypto(password) {
+  var decryptKeyCache = {}; // base64(salt) -> derived key bytes
+  var legacyKey = null;
+  var encryptSalt = null;
+  var encryptKey = null;
+
+  function getArgon2KeyForSalt(salt) {
+    var cacheKey = base64.bytesToBase64(salt);
+    if (!decryptKeyCache[cacheKey]) {
+      decryptKeyCache[cacheKey] = deriveArgon2Key(password, salt);
+    }
+    return decryptKeyCache[cacheKey];
+  }
+
+  function getLegacyKey() {
+    if (!legacyKey) {
+      legacyKey = deriveLegacyKey(password);
+    }
+    return legacyKey;
+  }
+
+  function decrypt(payloadBase64) {
+    var bytes = base64.base64ToBytes(payloadBase64);
+    var iv, ciphertext, tag, key;
+    if (bytes.length >= MIN_ARGON2_SIZE) {
+      var salt = bytes.slice(0, SALT_LENGTH);
+      iv = bytes.slice(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
+      var rest = bytes.slice(SALT_LENGTH + IV_LENGTH);
+      ciphertext = rest.slice(0, rest.length - TAG_LENGTH);
+      tag = rest.slice(rest.length - TAG_LENGTH);
+      key = getArgon2KeyForSalt(salt);
+    } else if (bytes.length >= MIN_LEGACY_SIZE) {
+      iv = bytes.slice(0, IV_LENGTH);
+      var rest2 = bytes.slice(IV_LENGTH);
+      ciphertext = rest2.slice(0, rest2.length - TAG_LENGTH);
+      tag = rest2.slice(rest2.length - TAG_LENGTH);
+      key = getLegacyKey();
+    } else {
+      throw new Error('encrypted payload too short (' + bytes.length + ' bytes)');
+    }
+    var plaintextBytes = aesGcm.aesGcmDecrypt(key, iv, ciphertext, tag, []);
+    return JSON.parse(bytesToUtf8(plaintextBytes));
+  }
+
+  function encrypt(obj) {
+    if (!encryptKey) {
+      encryptSalt = randomBytes(SALT_LENGTH);
+      encryptKey = deriveArgon2Key(password, encryptSalt);
+      // Seed the decrypt cache too, so decrypting this same op back down
+      // (e.g. on the next sync, after uploading a task toggle) doesn't
+      // blindly re-run Argon2id for a salt we already paid to derive.
+      decryptKeyCache[base64.bytesToBase64(encryptSalt)] = encryptKey;
+    }
+    var plaintext = sha256lib.utf8ToBytes(JSON.stringify(obj));
+    var iv = randomBytes(IV_LENGTH);
+    var result = aesGcm.aesGcmEncrypt(encryptKey, iv, plaintext, []);
+    return base64.bytesToBase64(encryptSalt.concat(iv).concat(result.ciphertext).concat(result.tag));
+  }
+
+  return { decrypt: decrypt, encrypt: encrypt };
 }
 
 function bytesToUtf8(bytes) {
@@ -177,8 +242,6 @@ SuperSyncClient.prototype.getStatus = function () {
 
 module.exports = {
   SuperSyncClient: SuperSyncClient,
-  deriveEncryptionKey: deriveEncryptionKey,
-  encryptPayload: encryptPayload,
-  decryptPayload: decryptPayload,
+  createCrypto: createCrypto,
   DEFAULT_BASE_URL: DEFAULT_BASE_URL,
 };

@@ -67,13 +67,26 @@ function getOrCreateClientId() {
   return id;
 }
 
-function getEncryptionKey() {
-  var b64 = localStorage.getItem('sp_enc_key_b64');
-  if (!b64) {
+// The Argon2id KDF is multi-second at production parameters (see
+// argon2id.js), and its own derived keys are cached per-salt inside the
+// crypto object - but that cache is worthless if we throw the whole object
+// away and rebuild it on every doSync() call, re-deriving the same salt's
+// key every sync. Cache the crypto object itself at module scope instead,
+// for the lifetime of this pkjs session, invalidating only when the
+// password actually changes (re-pairing).
+var cachedCrypto = null;
+var cachedPassword = null;
+
+function getCrypto() {
+  var password = localStorage.getItem('sp_password');
+  if (!password) {
     return null;
   }
-  var base64 = require('./lib/base64.js');
-  return base64.base64ToBytes(b64);
+  if (!cachedCrypto || cachedPassword !== password) {
+    cachedCrypto = supersync.createCrypto(password);
+    cachedPassword = password;
+  }
+  return cachedCrypto;
 }
 
 function generateOpId() {
@@ -143,7 +156,7 @@ function doSync() {
   sendStatus(STATUS_SYNCING);
 
   var client = new supersync.SuperSyncClient({ baseUrl: config.baseUrl, token: config.jwt });
-  var key = getEncryptionKey();
+  var crypto = getCrypto();
   var clientId = getOrCreateClientId();
   var state = loadState();
   var lastSeq = loadLastSeq();
@@ -151,7 +164,7 @@ function doSync() {
 
   var pullPage = function () {
     return client.downloadOps(lastSeq, clientId, 500).then(function (res) {
-      store.applyOperations(res.ops || [], state, key);
+      store.applyOperations(res.ops || [], state, crypto);
       lastSeq = res.latestSeq != null ? res.latestSeq : lastSeq;
       if (res.hasMore) {
         return pullPage();
@@ -166,7 +179,7 @@ function doSync() {
         return; // Brand-new account with nothing synced yet - not an error.
       }
       return client.restoreSnapshot(points[0].serverSeq).then(function (snapshot) {
-        var payload = snapshot && snapshot.encrypted && key ? supersync.decryptPayload(snapshot.payload, key) : snapshot;
+        var payload = snapshot && snapshot.encrypted && crypto ? crypto.decrypt(snapshot.payload) : snapshot;
         if (payload && payload.task) {
           state.task = payload.task.entities || payload.task;
         }
@@ -217,15 +230,15 @@ function handleTaskToggle(taskId, done) {
   state.task[taskId] = Object.assign({}, state.task[taskId], { isDone: done });
   saveState(state);
 
-  var key = getEncryptionKey();
+  var crypto = getCrypto();
   var payload = { isDone: done };
   var op = {
     id: generateOpId(),
-    type: 'UPD',
-    entityType: 'task',
+    opType: 'UPD',
+    entityType: 'TASK',
     entityId: taskId,
-    payload: key ? supersync.encryptPayload(payload, key) : payload,
-    encrypted: !!key,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
     clientId: getOrCreateClientId(),
     timestamp: Date.now(),
   };
@@ -291,11 +304,15 @@ Pebble.addEventListener('webviewclosed', function (e) {
 
   saveConfig({ baseUrl: result.baseUrl || supersync.DEFAULT_BASE_URL, email: result.email, jwt: result.jwt });
 
-  if (result.password && result.email) {
-    var base64 = require('./lib/base64.js');
-    var key = supersync.deriveEncryptionKey(result.password, result.email);
-    localStorage.setItem('sp_enc_key_b64', base64.bytesToBase64(key));
+  if (result.password) {
+    localStorage.setItem('sp_password', result.password);
   }
+  // The Argon2id derived-key cache in getCrypto() is keyed off this same
+  // password, but comparing by value there isn't enough on its own to
+  // notice "same password string, different account" - clearing it here
+  // whenever pairing completes is cheap insurance either way.
+  cachedCrypto = null;
+  cachedPassword = null;
 
   // A new pairing (or a changed account/password) invalidates whatever we
   // had cached locally.

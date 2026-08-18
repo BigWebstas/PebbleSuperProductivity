@@ -37,11 +37,20 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
   end-to-end encryption is on, sends the day's tasks to the watch, and
   uploads a task-completion operation when you toggle one on the watch.
 - **`src/pkjs/lib/supersync-client.js`** — thin REST client for the
-  SuperSync API (`/api/sync/ops`, `/api/sync/snapshot`,
-  `/api/sync/restore-points`, `/api/sync/restore/:serverSeq`) plus the E2EE
-  encrypt/decrypt helpers.
-- **`src/pkjs/lib/task-store.js`** — replays `CRT`/`UPD`/`DEL`/`MOV`
-  operations into an entity cache and picks "today's" tasks out of it.
+  SuperSync API (`/api/sync/ops`, `/api/sync/restore-points`,
+  `/api/sync/restore/:serverSeq`) plus `createCrypto(password)`, which
+  builds the real Argon2id/AES-GCM decrypt+encrypt pair (with a per-salt
+  key cache, since Argon2id is multi-second at production parameters).
+- **`src/pkjs/lib/task-store.js`** — replays SuperSync's op log into an
+  entity cache and picks "today's" tasks out of it. This is a Redux
+  action-replay log, not a flat CRUD op log - see the file's top comment.
+- **`src/pkjs/lib/blake2b.js`, `argon2id.js`** — dependency-free BLAKE2b and
+  Argon2id (RFC 9106), specialized for `parallelism=1` (a hardcoded app
+  constant). 64-bit words are `[hi, lo]` pairs of plain numbers, not
+  BigInt: the Pebble build toolchain's bundler can't parse BigInt literal
+  syntax. **Verified against `hash-wasm`'s output** (the same library the
+  real client uses), including full production parameters and a real
+  account's actual ciphertext — see Testing below.
 - **`src/pkjs/lib/aes-gcm.js`, `sha256.js`, `base64.js`** — dependency-free
   AES-128/256-GCM, SHA-256/HMAC/PBKDF2, and base64, written from scratch
   because the PebbleKit JS runtime does not reliably expose
@@ -54,23 +63,43 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
 
 ## ⚠️ What is verified vs. assumed
 
-I could not create a real SuperSync account in this environment (it
-requires clicking an emailed magic link or a WebAuthn ceremony — both need
-a live email inbox / browser interaction I don't have here), so this was
-built against the SuperSync server's public route list and architecture
-docs, not a captured live request/response. Two layers of this project have
-very different confidence levels as a result:
+This started with no way to create a real SuperSync account (registration
+needs a live email inbox / WebAuthn ceremony), so the wire format was
+originally built from route lists and architecture prose, not captured
+traffic. Since then, three things resolved almost everything that was
+"assumed" down to "verified":
 
-**Solid — actually verified**, the crypto primitives against Node's
-`crypto` module and the rest against a live SuperSync account's real
-authenticated traffic (`GET /api/sync/ops`, `/api/sync/restore-points`,
-`/api/sync/restore/:serverSeq`) on 2026-08-18:
+1. Reading the actual super-productivity/super-productivity GitHub repo's
+   source (`packages/sync-core/src/encryption.ts`, `encryption/argon2.ts`,
+   and the sync server's own `app.js`) instead of guessing.
+2. A user sharing a real (temporary, since-rotated) SuperSync API token,
+   letting the actual API routes and `GET /api/sync/ops` response shape be
+   checked against live traffic.
+3. The same user sharing their real (temporary, since-rotated) sync
+   encryption password, letting the full E2EE pipeline be checked against
+   their actual encrypted tasks — not just spec compliance, but a real
+   AES-GCM authentication-tag pass against production ciphertext.
+
+**Solid — actually verified:**
 - The crypto primitives (`aes-gcm.js`, `sha256.js`, `base64.js`) are checked
   against Node's built-in `crypto` module for AES-128/256-GCM
   encrypt/decrypt/tag-verification, HMAC-SHA256, PBKDF2, and SHA-256, plus
   base64 round-tripping. Run `node scripts/test-crypto.js`.
+- `blake2b.js`/`argon2id.js` are checked against `hash-wasm` (the library
+  Super Productivity's real client uses) across RFC 7693 BLAKE2b vectors
+  and ~20 Argon2id cases spanning tiny-to-production memory/iteration
+  parameters, hash lengths, and passwords. Run `node scripts/test-argon2.js`
+  (the production-parameters case takes ~15s - Argon2id is a memory-hard
+  KDF by design).
+- The E2EE pipeline end-to-end against a real account: the exact wire
+  format (`[16-byte salt][12-byte IV][AES-GCM ciphertext+tag]`, base64,
+  Argon2id with `parallelism=1, iterations=3, memorySize=65536 KiB`, a
+  legacy PBKDF2 fallback for short/old ciphertexts), confirmed by
+  successfully decrypting real tasks - AES-GCM's authentication tag is a
+  cryptographic pass/fail, not a guess that merely looks plausible.
 - The operation-replay/today-filter logic (`task-store.js`) is unit tested
-  in isolation. Run `node scripts/test-task-store.js`.
+  in isolation, and was run against one real account's entire decrypted
+  500-op history. Run `node scripts/test-task-store.js`.
 - The AppMessage protocol between `main.c` and `index.js` is internally
   consistent (same key/enum values on both sides).
 - The pairing flow, end to end: `sync.super-productivity.com`'s root page
@@ -78,49 +107,57 @@ authenticated traffic (`GET /api/sync/ops`, `/api/sync/restore-points`,
   SuperSync → Access Token field, and `Authorization: Bearer <token>` is
   confirmed to be the real auth scheme (matches the server's own `app.js`).
 - The API routes: `/api/sync/ops`, `/api/sync/restore-points`,
-  `/api/sync/status` all confirmed live (structured 401s when
-  unauthenticated, real data when authenticated).
+  `/api/sync/status` all confirmed live.
 - `GET /api/sync/ops`'s response shape: `{ ops: [...], hasMore, latestSeq,
   ... }`, where each entry is `{ serverSeq, op: {...}, receivedAt }` - **not**
-  a flat Operation object as originally assumed. `op` itself has `opType`
-  (not `type`), `entityType` **uppercase** (`"TASK"`, `"GLOBAL_CONFIG"`,
-  `"TAG"`, `"TIME_TRACKING"`, `"PLUGIN_USER_DATA"`, `"SIMPLE_COUNTER"`,
-  `"ALL"` for the initial `SYNC_IMPORT`), `entityId`, `clientId`,
-  `actionType`, `timestamp`, `schemaVersion`, `vectorClock`, and
-  `isPayloadEncrypted` (not `encrypted`). `task-store.js` and `index.js`
-  now match this.
+  a flat Operation object as originally assumed. `op` has `opType` (not
+  `type`), `entityType` **uppercase** (`"TASK"`, `"GLOBAL_CONFIG"`, `"TAG"`,
+  `"TIME_TRACKING"`, `"PLUGIN_USER_DATA"`, `"SIMPLE_COUNTER"`, `"ALL"` for
+  `SYNC_IMPORT`), `entityId`, `clientId`, `actionType`, `timestamp`,
+  `schemaVersion`, `vectorClock`, and `isPayloadEncrypted` (not
+  `encrypted`).
+- **The sync log is a Redux action-replay log, not a flat CRUD op log** -
+  this was the biggest surprise. For `entityType: "TASK"`, `op.opType`
+  (CRT/UPD) doesn't tell you how to interpret the payload; `op.actionType`
+  does, and each action type has its own payload shape mirroring the real
+  app's NgRx actions (`"[Task Shared] addTask"` → a full task object,
+  `"[Task Shared] updateTask"` → `{id, changes}`, `"[Task Shared]
+  planTasksForToday"` → `{taskIds, today}`, and so on). `task-store.js`
+  handles the action types observed across one real account's *entire*
+  history; anything else is a documented no-op, not a crash.
+- `SYNC_IMPORT`/`BACKUP_IMPORT`/`REPAIR` carry a full NgRx `EntityState`
+  snapshot per feature slice (`payload.task = { ids: [...], entities: {}
+  }`) - this is what fills in tasks created before the visible op history
+  begins.
 - `GET /api/sync/restore/:serverSeq` (the snapshot-bootstrap optimization
   for a fresh watch): confirmed to **always fail with 400
   `ENCRYPTED_OPS_NOT_SUPPORTED`** for E2EE accounts - "Server-side snapshot
   is unavailable because operations are end-to-end encrypted. Use the
   client app's 'Sync Now' button to decrypt and restore locally." Since
-  SuperSync is built around E2EE, `doSync()` now treats this specific error
-  as expected and falls straight through to a full `GET /api/sync/ops`
-  replay from `sinceSeq=0` instead of failing the sync - which is exactly
-  what the server's own error message says to do.
+  SuperSync is built around E2EE, `doSync()` treats this specific error as
+  expected and falls straight through to a full `GET /api/sync/ops` replay
+  from `sinceSeq=0` instead - exactly what the server's error says to do.
 
-**Still assumed — the one open item:**
-- The exact byte layout of `op.payload` when `isPayloadEncrypted` is true.
-  Confirmed to be a single base64 string (not the `{ iv, ciphertext, tag }`
-  envelope object originally assumed), but the split between IV/ciphertext/
-  tag within those bytes, and the real KDF parameters (this uses
-  PBKDF2-HMAC-SHA256, 210,000 iterations, salt = `"supersync:" + email`),
-  are still unconfirmed. Until this is nailed down, `decryptPayload()`
-  throws on real encrypted payloads - caught per-operation in
-  `task-store.js`, so a sync still completes and shows whatever entities
-  *did* apply, just not any encrypted `TASK` content. Pinning this down
-  needs either the real client source for the encryption code, or testing
-  candidate byte layouts/KDF params against real ciphertext until AES-GCM's
-  tag check passes.
-- The `Task` entity's field names (`title`, `isDone`, `dueDay`) once
-  decrypted - the `dueDay === today` "today" filter is a reasonable guess
-  based on how Super Productivity's UI groups tasks, with a fallback to
-  "everything not done" if nothing matches.
+**Known gaps, not "assumed" so much as "not yet built":**
+- Only the TASK action types actually observed in one real (fairly
+  calendar/JIRA-integration-heavy) account are handled: `addTask`,
+  `updateTask`, `scheduleTaskWithTime`, `planTasksForToday`. Notably
+  **absent: deletion/archival** (`deleteTask`, `moveToArchive`,
+  `restoreTask`, or similar) - a task deleted on another device won't
+  disappear from the watch's view, since nothing currently removes it from
+  the local cache. A heavier or longer-lived account almost certainly uses
+  more action types than this one did.
+- The "today" list prefers the app's own `planTasksForToday` action when
+  it's fresh (dated today); otherwise it falls back to a
+  `dueDay`/`dueWithTime` guess, and finally to "everything not done" if
+  neither matches anything - which can mean a full backlog rather than a
+  curated list, on an account whose last sync predates that day's planning.
 
 None of this is guesswork about *how to write a Pebble watchapp* — the
 AppMessage/MenuLayer/Storage APIs and the phone-relay networking
 architecture are well documented and used exactly as documented. The
-uncertainty is narrowly about SuperSync's private wire format.
+uncertainty that's left is narrowly about less-common Super Productivity
+action types this session's one test account never happened to exercise.
 
 ## Building
 
@@ -142,6 +179,7 @@ plain CommonJS:
 
 ```bash
 node scripts/test-crypto.js
+node scripts/test-argon2.js   # includes one ~15s production-parameters case
 node scripts/test-task-store.js
 ```
 
