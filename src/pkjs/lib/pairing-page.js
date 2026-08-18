@@ -14,7 +14,11 @@ function escapeHtmlAttr(s) {
     .replace(/>/g, '&gt;');
 }
 
-function buildPairingPageUrl(baseUrl, email, groupByProject) {
+function buildPairingPageUrl(baseUrl, email, options) {
+  options = options || {};
+  var groupByProject = !!options.groupByProject;
+  var todayOnly = !!options.todayOnly;
+  var autoSyncOnComplete = !!options.autoSyncOnComplete;
   var html = '<!doctype html>\n' +
 '<html lang="en">\n' +
 '<head>\n' +
@@ -85,6 +89,26 @@ function buildPairingPageUrl(baseUrl, email, groupByProject) {
 '    the watch, instead of one flat list.\n' +
 '  </p>\n' +
 '\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="todayOnly" type="checkbox"' + (todayOnly ? ' checked' : '') + '>\n' +
+'    <label for="todayOnly">Only show today\'s tasks</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Hides tasks with no due date or a due date in the future - only tasks\n' +
+'    due today or overdue show on the watch.\n' +
+'  </p>\n' +
+'\n' +
+'  <h2>Sync</h2>\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="autoSyncOnComplete" type="checkbox"' + (autoSyncOnComplete ? ' checked' : '') + '>\n' +
+'    <label for="autoSyncOnComplete">Sync automatically when completing a task</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Pulls the latest changes from the server right after you check off a\n' +
+'    task on the watch, instead of waiting for the next manual Resync or\n' +
+'    app launch. Uses a bit more battery/data per completed task.\n' +
+'  </p>\n' +
+'\n' +
 '  <button id="saveBtn">Save &amp; sync</button>\n' +
 '  <button id="cancelBtn" class="secondary">Cancel</button>\n' +
 '\n' +
@@ -120,7 +144,9 @@ function buildPairingPageUrl(baseUrl, email, groupByProject) {
 '      email: document.getElementById(\'email\').value.trim(),\n' +
 '      password: document.getElementById(\'password\').value,\n' +
 '      jwt: jwt,\n' +
-'      groupByProject: document.getElementById(\'groupByProject\').checked\n' +
+'      groupByProject: document.getElementById(\'groupByProject\').checked,\n' +
+'      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
+'      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked\n' +
 '    });\n' +
 '  });\n' +
 '\n' +

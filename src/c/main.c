@@ -317,10 +317,14 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     // Bypasses menu_cell_basic_draw so this row reads as a standing
     // call-to-action rather than just another list item - background stays
     // red regardless of selection state, so it can't be mistaken for a task.
+    // Text itself still inverts to white on select, matching every other
+    // row's selection feedback instead of looking inert when highlighted.
+    bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
+                        menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
     GRect bounds = layer_get_bounds(cell_layer);
     graphics_context_set_fill_color(ctx, GColorRed);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-    graphics_context_set_text_color(ctx, GColorBlack);
+    graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
     GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
     graphics_draw_text(ctx, "Resync", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
@@ -621,8 +625,8 @@ static void window_load(Window *window) {
   // Logo sits in a fixed-height strip at the bottom of the empty-state area;
   // the text layer gets whatever's left above it, rather than the full
   // content_bounds it used to own alone.
-  #define LOGO_SIZE 25
-  #define LOGO_STRIP_HEIGHT 34
+  #define LOGO_SIZE 50
+  #define LOGO_STRIP_HEIGHT 58
   GRect empty_text_bounds = GRect(content_bounds.origin.x, content_bounds.origin.y,
                                    content_bounds.size.w, content_bounds.size.h - LOGO_STRIP_HEIGHT);
   s_empty_layer = text_layer_create(empty_text_bounds);
@@ -633,7 +637,7 @@ static void window_load(Window *window) {
   GRect logo_bounds = GRect(content_bounds.origin.x + (content_bounds.size.w - LOGO_SIZE) / 2,
                              content_bounds.origin.y + content_bounds.size.h - LOGO_STRIP_HEIGHT,
                              LOGO_SIZE, LOGO_SIZE);
-  s_logo_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_MENU_ICON);
+  s_logo_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_LOGO_LARGE);
   s_logo_layer = bitmap_layer_create(logo_bounds);
   bitmap_layer_set_bitmap(s_logo_layer, s_logo_bitmap);
   bitmap_layer_set_compositing_mode(s_logo_layer, GCompOpSet);

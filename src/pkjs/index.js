@@ -269,7 +269,7 @@ function doSync() {
       saveState(state);
       saveLastSeq(lastSeq);
       saveVectorClock(vectorClock);
-      var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject);
+      var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly);
       sendTaskListToWatch(tasks);
       sendStatus(STATUS_OK);
     })
@@ -344,6 +344,18 @@ function handleTaskToggle(taskId, done) {
       // is a known gap, called out in README.md.
       console.log('[pkjs] failed to upload task toggle: ' + (err && err.message));
       sendStatus(STATUS_ERROR, 'upload failed, will retry next sync');
+    })
+    .then(function () {
+      // Uploading only pushes this one op - it doesn't pull whatever else
+      // has changed server-side, nor re-derive/re-send the watch's own task
+      // list (which matters once todayOnly or backlog membership makes a
+      // just-toggled task's visibility change). Defaults on since "toggle
+      // on the watch reaches the desktop" is the behavior actually being
+      // asked for; runs best-effort even after a failed upload so at least
+      // the pull side stays current, matching doSync()'s own error handling.
+      if (config.autoSyncOnComplete !== false) {
+        doSync();
+      }
     });
 }
 
@@ -373,7 +385,13 @@ Pebble.addEventListener('showConfiguration', function () {
   var url = pairingPage.buildPairingPageUrl(
     config.baseUrl || supersync.DEFAULT_BASE_URL,
     config.email || '',
-    !!config.groupByProject
+    {
+      groupByProject: !!config.groupByProject,
+      todayOnly: !!config.todayOnly,
+      // Undefined (never configured before) defaults to on - see the
+      // matching comment in handleTaskToggle for why.
+      autoSyncOnComplete: config.autoSyncOnComplete !== false,
+    }
   );
   Pebble.openURL(url);
 });
@@ -398,6 +416,8 @@ Pebble.addEventListener('webviewclosed', function (e) {
     email: result.email,
     jwt: result.jwt,
     groupByProject: !!result.groupByProject,
+    todayOnly: !!result.todayOnly,
+    autoSyncOnComplete: !!result.autoSyncOnComplete,
   });
 
   if (result.password) {

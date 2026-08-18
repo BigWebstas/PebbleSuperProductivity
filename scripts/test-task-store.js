@@ -50,8 +50,8 @@ function planTasksForToday(date, taskIds) {
   return taskEntry('[Task Shared] planTasksForToday', { today: date, taskIds: taskIds });
 }
 
-function active(state, limit, groupByProject) {
-  return store.getActiveTasks(state, limit == null ? 30 : limit, !!groupByProject);
+function active(state, limit, groupByProject, todayOnly) {
+  return store.getActiveTasks(state, limit == null ? 30 : limit, !!groupByProject, !!todayOnly);
 }
 
 check('addTask then updateTask builds a merged task', () => {
@@ -410,6 +410,21 @@ check('getActiveTasks excludes backlog tasks but includes everything else, any d
   const tasks = active(state);
   // not-done first (sorted by title: "Someday" < "Zebra"), then done ('b')
   assert.deepStrictEqual(tasks.map((t) => t.id), ['c', 'a', 'b']);
+});
+
+check('getActiveTasks(todayOnly=true) keeps due-today and overdue, drops undated and future', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Due today', isDone: false, dueDay: today }),
+      addTask({ id: 'b', title: 'Overdue', isDone: false, dueDay: '2000-01-01' }),
+      addTask({ id: 'c', title: 'No due date', isDone: false }),
+      addTask({ id: 'd', title: 'Future', isDone: false, dueDay: '2099-01-01' }),
+    ],
+    state
+  );
+  const tasks = active(state, null, false, true);
+  assert.deepStrictEqual(tasks.map((t) => t.id).sort(), ['a', 'b']);
 });
 
 check('getActiveTasks nests subtasks under their main task, indented', () => {
