@@ -67,6 +67,33 @@ check('addTask then updateTask builds a merged task', () => {
   assert.strictEqual(state.task.t1.isDone, true);
 });
 
+check('a watch task-toggle upload (index.js\'s handleTaskToggle shape) round-trips through replay', () => {
+  // Regression test for a real bug: handleTaskToggle in index.js used to
+  // upload a flat { isDone } payload with no actionType, which
+  // task-store.js's applyTaskAction (keyed entirely on actionType) simply
+  // couldn't decode - a watch toggle uploaded fine but was silently inert
+  // on replay, by any client including this one's own next sync. This
+  // mirrors the exact op shape index.js now constructs and confirmed
+  // it's genuinely decodable, not just written to look plausible.
+  const state = store.emptyState();
+  store.applyOperations([addTask({ id: 't1', title: 'Buy milk', isDone: false })], state);
+  const uploadedOp = {
+    id: 'op-1',
+    op: {
+      opType: 'UPD',
+      actionType: '[Task Shared] updateTask',
+      entityType: 'TASK',
+      entityId: 't1',
+      payload: { actionPayload: { task: { id: 't1', changes: { isDone: true } } } },
+      isPayloadEncrypted: false,
+    },
+    serverSeq: 2,
+    receivedAt: 1,
+  };
+  store.applyOperations([uploadedOp], state);
+  assert.strictEqual(state.task.t1.isDone, true);
+});
+
 check('SYNC_IMPORT replaces state.task with the imported EntityState snapshot', () => {
   const state = store.emptyState();
   const importEntry = {

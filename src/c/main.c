@@ -72,6 +72,21 @@ static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
 static TaskGroup s_groups[MAX_TASKS]; // worst case: every task its own group
 static int s_group_count = 0;
 
+// Marquee-scrolls the title of whichever task row is currently selected,
+// if (and only if) it's too wide to fit - MenuLayer has no built-in
+// scrolling-text cell, and truncating with an ellipsis was the only
+// alternative. Only the selected row ever scrolls (not every long row at
+// once): cheaper to redraw, and it's the row the user is actually looking
+// at.
+#define SCROLL_INTERVAL_MS 300
+#define SCROLL_STEP_PX 6
+#define SCROLL_GAP_PX 24
+#define TITLE_FONT_KEY FONT_KEY_GOTHIC_18_BOLD
+#define TITLE_BOX_X 6
+#define TITLE_BOX_Y 2
+static AppTimer *s_scroll_timer = NULL;
+static int s_scroll_offset_px = 0;
+
 static void recompute_groups(void) {
   s_group_count = 0;
   int i = 0;
@@ -191,6 +206,71 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   graphics_draw_line(ctx, GPoint(0, divider_y), GPoint(bounds.size.w, divider_y));
 }
 
+// Resolves the row MenuLayer currently has highlighted to a Task, or NULL
+// if the selection isn't on a task row at all (the Resync row, or nothing
+// selectable yet).
+static Task *resolve_selected_task(void) {
+  if (s_task_count == 0) {
+    return NULL;
+  }
+  MenuIndex sel = menu_layer_get_selected_index(s_menu_layer);
+  if (sel.section == 0) {
+    return NULL;
+  }
+  int group_idx = (int)sel.section - 1;
+  if (group_idx >= s_group_count) {
+    return NULL;
+  }
+  int task_idx = s_groups[group_idx].start + (int)sel.row;
+  if (task_idx < 0 || task_idx >= s_task_count) {
+    return NULL;
+  }
+  return &s_tasks[task_idx];
+}
+
+static int16_t title_natural_width(const char *title) {
+  GSize size = graphics_text_layout_get_content_size(
+      title, fonts_get_system_font(TITLE_FONT_KEY), GRect(0, 0, 2000, 100),
+      GTextOverflowModeFill, GTextAlignmentLeft);
+  return size.w;
+}
+
+static void stop_scroll_timer(void) {
+  if (s_scroll_timer) {
+    app_timer_cancel(s_scroll_timer);
+    s_scroll_timer = NULL;
+  }
+}
+
+static void scroll_timer_callback(void *data) {
+  s_scroll_offset_px += SCROLL_STEP_PX;
+  layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
+  s_scroll_timer = app_timer_register(SCROLL_INTERVAL_MS, scroll_timer_callback, NULL);
+}
+
+// Starts/stops the marquee timer to match whether the currently-selected
+// row actually needs it, and (optionally) resets the scroll position -
+// called whenever the selection moves or the task list is reloaded, since
+// either can change which title (if any) needs to scroll.
+static void refresh_scroll_state(bool reset_offset) {
+  if (reset_offset) {
+    s_scroll_offset_px = 0;
+  }
+  Task *selected = resolve_selected_task();
+  GRect menu_bounds = layer_get_bounds(menu_layer_get_layer(s_menu_layer));
+  int16_t available = menu_bounds.size.w - TITLE_BOX_X * 2;
+  bool needs_scroll = selected && title_natural_width(selected->title) > available;
+  if (needs_scroll && !s_scroll_timer) {
+    s_scroll_timer = app_timer_register(SCROLL_INTERVAL_MS, scroll_timer_callback, NULL);
+  } else if (!needs_scroll) {
+    stop_scroll_timer();
+  }
+}
+
+static void menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, MenuIndex old_index, void *context) {
+  refresh_scroll_state(true);
+}
+
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
   if (s_task_count == 0) {
     return;
@@ -229,7 +309,51 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     return;
   }
   Task *task = &s_tasks[task_idx];
-  menu_cell_basic_draw(ctx, cell_layer, task->title, task->done ? "Done" : NULL, NULL);
+
+  bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
+                      menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
+  GRect bounds = layer_get_bounds(cell_layer);
+  int16_t available = bounds.size.w - TITLE_BOX_X * 2;
+  int16_t natural_width = title_natural_width(task->title);
+
+  if (!is_selected || natural_width <= available) {
+    menu_cell_basic_draw(ctx, cell_layer, task->title, task->done ? "Done" : NULL, NULL);
+    return;
+  }
+
+  // Selected, and too wide to fit: draw the title as a looping marquee
+  // instead of menu_cell_basic_draw's built-in truncation, so the full
+  // text is eventually readable rather than permanently cut off.
+  GFont title_font = fonts_get_system_font(TITLE_FONT_KEY);
+  GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, bounds.size.h - TITLE_BOX_Y);
+  int16_t period = natural_width + SCROLL_GAP_PX;
+  int16_t x = -(s_scroll_offset_px % period);
+
+  // menu_cell_basic_draw paints the row's (unselected-looking, white) background
+  // itself - confirmed in the emulator that this SDK's default menu style
+  // doesn't invert on selection, just bolds the text. Since this path bypasses
+  // that helper, the same white fill has to happen here too, or leftover
+  // framebuffer content (black) stays behind the text.
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+  // No app-level clip-rect API exists in this SDK; relying on cell_layer's
+  // own bounds to constrain rendering the way MenuLayer's own row drawing
+  // already does for every other row - confirmed visually in the
+  // emulator, not just assumed (see the commit this landed in).
+  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_draw_text(ctx, task->title, title_font,
+                      GRect(title_box.origin.x + x, title_box.origin.y, natural_width, title_box.size.h),
+                      GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, task->title, title_font,
+                      GRect(title_box.origin.x + x + period, title_box.origin.y, natural_width, title_box.size.h),
+                      GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+
+  if (task->done) {
+    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
+    graphics_draw_text(ctx, "Done", fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
 }
 
 static void send_task_toggle(Task *task) {
@@ -362,6 +486,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       save_tasks();
       menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
+      // A refreshed list can change whether the (possibly now-different)
+      // selected row needs to scroll at all.
+      refresh_scroll_state(true);
       break;
     }
     case MSG_SYNC_STATUS: {
@@ -417,9 +544,13 @@ static void window_load(Window *window) {
     .draw_header = menu_draw_header,
     .draw_row = menu_draw_row,
     .select_click = menu_select_click,
+    .selection_changed = menu_selection_changed,
   });
   menu_layer_set_click_config_onto_window(s_menu_layer, window);
   layer_add_child(window_layer, menu_layer_get_layer(s_menu_layer));
+  // Covers a persisted (previously cached) task list whose initial
+  // selection already needs to scroll, before any sync response arrives.
+  refresh_scroll_state(true);
 
   s_empty_layer = text_layer_create(content_bounds);
   text_layer_set_text_alignment(s_empty_layer, GTextAlignmentCenter);
@@ -431,6 +562,7 @@ static void window_load(Window *window) {
 }
 
 static void window_unload(Window *window) {
+  stop_scroll_timer();
   menu_layer_destroy(s_menu_layer);
   text_layer_destroy(s_empty_layer);
   status_bar_layer_destroy(s_status_bar);

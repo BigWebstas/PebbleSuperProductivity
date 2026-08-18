@@ -36,14 +36,21 @@ SuperSync. If PebbleOS ever ships a watch-native networking API, only
   underlined project-name header per section - drawn manually with
   `graphics_draw_text`/`graphics_draw_line`, since Pebble has no built-in
   bold+underline cell style) or a single unheaded section when it's off.
-  Select-click on a task toggles done/not-done. Persists the last-synced
-  list via the `Storage` API so the list survives an app relaunch even
-  offline.
+  Select-click on a task toggles done/not-done. A selected title too wide
+  for the screen scrolls as a looping marquee (`AppTimer`-driven, redrawn via
+  `menu_draw_row`'s own selection-state check - see "Marquee title
+  scrolling" below); other rows keep `menu_cell_basic_draw`'s normal
+  truncation. Persists the last-synced list via the `Storage` API so the
+  list survives an app relaunch even offline.
 - **`src/pkjs/index.js`** — the sync engine. Downloads operations from
   SuperSync, replays them into a local task cache, decrypts payloads if
   end-to-end encryption is on, sends the active task list to the watch
   (grouped by project first if that setting is on), and uploads a
-  task-completion operation when you toggle one on the watch.
+  task-completion operation when you toggle one on the watch, wrapped in
+  the same `{ actionType: "[Task Shared] updateTask", payload:
+  { actionPayload: { task: { id, changes } } } }` shape the real op log
+  uses - see "What is verified vs. assumed" below for why the flat shape
+  this used to send didn't actually round-trip.
 - **`src/pkjs/lib/supersync-client.js`** — thin REST client for the
   SuperSync API (`/api/sync/ops`, `/api/sync/restore-points`,
   `/api/sync/restore/:serverSeq`) plus `createCrypto(password)`, which
@@ -150,6 +157,20 @@ traffic. Since then, three things resolved almost everything that was
   SuperSync is built around E2EE, `doSync()` treats this specific error as
   expected and falls straight through to a full `GET /api/sync/ops` replay
   from `sinceSeq=0` instead - exactly what the server's error says to do.
+- **The upload direction needed the same action-replay shape as the
+  download direction, and originally didn't have it.** `index.js`'s
+  watch→phone toggle handler used to upload a flat `{ isDone }` payload -
+  a leftover from before the op log was known to be a Redux action-replay
+  log rather than flat CRUD. That payload isn't decodable by
+  `applyTaskAction()`'s `"[Task Shared] updateTask"` handler (which reads
+  `actionPayload.task` as an `{ id, changes }` `Update<Task>`, matching
+  `task-shared.actions.ts`), so a watch-originated toggle silently failed to
+  round-trip on the next sync - sync only actually worked downloadward.
+  Fixed to upload the same `{ actionPayload: { task: { id, changes } } }`
+  shape the server sends back down; covered by a
+  `scripts/test-task-store.js` case that round-trips this exact upload
+  shape through `applyOperations()`, plus a manual encrypt/decrypt check
+  through `createCrypto()`.
 
 **Known gaps, not "assumed" so much as "not yet built":**
 - Handled TASK action types, confirmed against
@@ -196,6 +217,19 @@ traffic. Since then, three things resolved almost everything that was
   consecutive `TASK_PROJECT` values - when grouping is off, every row gets
   `''`, which always collapses to one run covering the whole list, so the
   off case is a special case of the same code path, not a separate one.
+- **Marquee title scrolling**: when the selected row's title is wider than
+  the screen, `main.c` draws it twice back-to-back at a scrolling x-offset
+  (an `AppTimer` ticking every 300ms) so the full title is eventually
+  readable instead of permanently ellipsis-truncated; `selection_changed`
+  resets the offset and starts/stops the timer as selection moves on/off a
+  too-wide row. This path bypasses `menu_cell_basic_draw` (which can't do
+  looping text), so it has to redraw that row's own white background and
+  black text itself - confirmed in the emulator that skipping this fill
+  leaves stale (black) framebuffer content behind the text, since Pebble
+  SDK 4.33.1 has no public `graphics_context_set_clip_rect`-style API;
+  the "don't bleed into neighboring rows" guarantee here comes entirely
+  from `menu_draw_row`'s own `cell_layer` bounds, the same as every other
+  row, not from any manual clip call.
 
 None of this is guesswork about *how to write a Pebble watchapp* — the
 AppMessage/MenuLayer/Storage APIs and the phone-relay networking

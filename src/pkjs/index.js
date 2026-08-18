@@ -232,10 +232,21 @@ function handleTaskToggle(taskId, done) {
   saveState(state);
 
   var crypto = getCrypto();
-  var payload = { isDone: done };
+  // Matches the real wire shape confirmed by decrypting live ops: the
+  // decrypted payload is { actionPayload: {...} }, and for
+  // "[Task Shared] updateTask" specifically, actionPayload is
+  // { task: Update<Task> } i.e. { id, changes } (task-shared.actions.ts) -
+  // task-store.js's applyTaskAction() reads exactly this nesting on the
+  // way back down. Uploading the old flat { isDone } payload (this
+  // project's original, unverified assumption, same category of bug
+  // already fixed on the read side - see README) meant a watch toggle
+  // wasn't decodable by any real client's replay, including our own next
+  // sync: sync only actually worked in the download direction.
+  var payload = { actionPayload: { task: { id: taskId, changes: { isDone: done } } } };
   var op = {
     id: generateOpId(),
     opType: 'UPD',
+    actionType: '[Task Shared] updateTask',
     entityType: 'TASK',
     entityId: taskId,
     payload: crypto ? crypto.encrypt(payload) : payload,
