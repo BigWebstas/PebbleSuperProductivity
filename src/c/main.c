@@ -52,6 +52,8 @@ static int s_task_count = 0;      // tasks currently shown (committed)
 static int s_incoming_total = 0;  // total announced by the current sync batch
 static Task s_incoming[MAX_TASKS];
 static int s_status_code = STATUS_SYNCING;
+#define MAX_STATUS_MSG_LEN 64
+static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
 
 static const uint32_t PERSIST_KEY_TASKS = 100;
 
@@ -79,10 +81,17 @@ static void load_tasks(void) {
   }
 }
 
+static void request_sync(void);
+
 // ---------- menu layer callbacks ----------
 
 static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
-  return (uint16_t)s_task_count;
+  // The menu layer is hidden whenever s_task_count is 0 (see
+  // update_empty_layer), but it still owns the window's click config, so it
+  // needs at least one reportable row for SELECT to be dispatched at all -
+  // otherwise "Select to retry" on the error screen is dead text. Row 0 is
+  // never actually drawn in that state since the layer is hidden.
+  return s_task_count > 0 ? (uint16_t)s_task_count : 1;
 }
 
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
@@ -105,6 +114,12 @@ static void send_task_toggle(Task *task) {
 }
 
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  if (s_task_count == 0) {
+    // The empty/error screen's phantom row 0 (see menu_get_num_rows) lands
+    // here - this is what makes "Select to retry" actually retry.
+    request_sync();
+    return;
+  }
   if (cell_index->row >= (uint16_t)s_task_count) {
     return;
   }
@@ -126,12 +141,19 @@ static void update_empty_layer(void) {
     return;
   }
 
+  static char s_empty_text[MAX_STATUS_MSG_LEN + 32];
+
   switch (s_status_code) {
     case STATUS_NOT_PAIRED:
       text_layer_set_text(s_empty_layer, "Open the app on\nyour phone to pair\nwith SuperSync.");
       break;
     case STATUS_ERROR:
-      text_layer_set_text(s_empty_layer, "Sync error.\nSelect to retry.");
+      if (s_status_msg[0] != '\0') {
+        snprintf(s_empty_text, sizeof(s_empty_text), "Sync error:\n%s\nSelect to retry.", s_status_msg);
+        text_layer_set_text(s_empty_layer, s_empty_text);
+      } else {
+        text_layer_set_text(s_empty_layer, "Sync error.\nSelect to retry.");
+      }
       break;
     case STATUS_SYNCING:
       text_layer_set_text(s_empty_layer, "Syncing...");
@@ -202,6 +224,13 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *status_tuple = dict_find(iterator, KEY_STATUS_CODE);
       if (status_tuple) {
         s_status_code = status_tuple->value->int32;
+      }
+      Tuple *msg_tuple = dict_find(iterator, KEY_STATUS_MSG);
+      if (msg_tuple) {
+        strncpy(s_status_msg, msg_tuple->value->cstring, MAX_STATUS_MSG_LEN - 1);
+        s_status_msg[MAX_STATUS_MSG_LEN - 1] = '\0';
+      } else {
+        s_status_msg[0] = '\0';
       }
       update_empty_layer();
       break;
