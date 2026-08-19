@@ -50,6 +50,22 @@ function planTasksForToday(date, taskIds) {
   return taskEntry('[Task Shared] planTasksForToday', { today: date, taskIds: taskIds });
 }
 
+function plannerEntry(actionType, actionPayload) {
+  return entry('PLANNER', actionType, actionPayload);
+}
+
+function planTaskForDay(taskId, day) {
+  return plannerEntry('[Planner] Plan Task for Day', { task: { id: taskId }, day: day });
+}
+
+function transferTask(taskId, prevDay, newDay) {
+  return plannerEntry('[Planner] Transfer Task', {
+    task: { id: taskId },
+    prevDay: prevDay,
+    newDay: newDay,
+  });
+}
+
 function active(state, limit, groupByProject, todayOnly) {
   return store.getActiveTasks(state, limit == null ? 30 : limit, !!groupByProject, !!todayOnly);
 }
@@ -187,6 +203,51 @@ check('planTasksForToday ignores ids that do not exist yet (matches the real red
   const state = store.emptyState();
   store.applyOperations([planTasksForToday(today, ['ghost'])], state);
   assert.strictEqual(state.task.ghost, undefined);
+});
+
+check('[Planner] Plan Task for Day sets dueDay and clears dueWithTime/remindAt (Schedule dialog\'s date-only picker / its "Today" quick-access button)', () => {
+  // Regression test for a real bug: scheduling a task via the desktop's
+  // Schedule dialog with no specific time (including its "Today"
+  // quick-access button) dispatches PlannerActions.planTaskForDay, synced
+  // as an entityType 'PLANNER' op - NOT entityType 'TASK'. This used to
+  // fall into applyOperation's generic flat-merge fallback (writing into
+  // state.planner, which taskIsPlannedForToday never reads) instead of
+  // updating task.dueDay, so a task showing "Planned for: Today" on
+  // desktop never appeared on the watch under Today Only.
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Spray roses with insecticide', isDone: false, dueWithTime: 1234, remindAt: 999 }),
+      planTaskForDay('a', today),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueDay, today);
+  assert.strictEqual(state.task.a.dueWithTime, undefined);
+  assert.strictEqual(state.task.a.remindAt, undefined);
+  assert.deepStrictEqual(active(state, 30, false, true).map((t) => t.id), ['a']);
+});
+
+check('[Planner] Transfer Task (drag reschedule in the Planner week view) sets dueDay and clears dueWithTime', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Mess with Claude', isDone: false, dueWithTime: 1234 }),
+      transferTask('a', '2099-01-01', today),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueDay, today);
+  assert.strictEqual(state.task.a.dueWithTime, undefined);
+  assert.deepStrictEqual(active(state, 30, false, true).map((t) => t.id), ['a']);
+});
+
+check('[Planner] Plan Task for Day on an unknown id creates a bare record rather than throwing (same ghost pattern as updateTask)', () => {
+  const state = store.emptyState();
+  assert.doesNotThrow(() => {
+    store.applyOperations([planTaskForDay('ghost', today)], state);
+  });
+  assert.strictEqual(state.task.ghost.dueDay, today);
 });
 
 check('unscheduleTask clears dueDay/dueWithTime/remindAt', () => {

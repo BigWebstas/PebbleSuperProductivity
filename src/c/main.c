@@ -545,7 +545,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     // silently swallowed (only the empty/error screen showed status
     // before this row existed).
     static char s_resync_subtitle[MAX_STATUS_MSG_LEN + 16];
-    const char *subtitle = "Get latest tasks";
+    const char *subtitle = "Synced";
     switch (s_status_code) {
       case STATUS_SYNCING:
         subtitle = "Syncing...";

@@ -14,6 +14,14 @@
 // (root-store/meta/task-shared-meta-reducers/*) in the super-productivity
 // GitHub repo.
 //
+// A task's dueDay/dueWithTime doesn't only change via TASK-entity ops.
+// Scheduling a task through the desktop's Schedule dialog with no specific
+// time (including its "Today" quick-access button - dialog-schedule-task.
+// component.ts) dispatches PlannerActions.planTaskForDay/transferTask,
+// synced under entityType 'PLANNER' (planner.actions.ts), even though the
+// real task.reducer.ts's own `on(PlannerActions.planTaskForDay, ...)`
+// handler sets task.dueDay directly - see applyPlannerAction below.
+//
 // getActiveTasks() returns every main task that is NOT sitting in a
 // project's backlog - no date filtering. Confirmed against
 // project.model.ts: backlog membership lives on the PROJECT entity
@@ -326,6 +334,58 @@ function applyTaskAction(op, actionPayload, state) {
   }
 }
 
+// PLANNER-entity ops (planner.actions.ts) - separate from TASK-entity ops
+// even though the desktop's own task.reducer.ts reacts to these by setting
+// dueDay directly on the task. Confirmed live: a task scheduled via the
+// Schedule dialog's plain date picker (or its "Today" quick-access button -
+// dialog-schedule-task.component.ts's onQuickAccessClick/_planForDay, taken
+// whenever no specific time is set) never appeared on the watch under
+// Today Only despite showing "Planned for: Today" on desktop - the op is
+// captured with entityType 'PLANNER'/actionType '[Planner] Plan Task for
+// Day', which used to fall into applyOperation's generic flat-merge
+// fallback (writing into state.planner, never touched by
+// taskIsPlannedForToday) instead of updating task.dueDay the way the real
+// task.reducer.ts's own `on(PlannerActions.planTaskForDay, ...)` does.
+function applyPlannerAction(op, actionPayload, state) {
+  var tasks = state.task;
+  if (!actionPayload) {
+    return;
+  }
+  switch (op.actionType) {
+    // Mirrors task.reducer.ts's on(PlannerActions.planTaskForDay, ...).
+    case '[Planner] Plan Task for Day': {
+      var pId = actionPayload.task && actionPayload.task.id;
+      if (pId) {
+        mergeTaskChanges(tasks, pId, {
+          dueDay: actionPayload.day,
+          dueWithTime: undefined,
+          remindAt: undefined,
+        });
+      }
+      break;
+    }
+
+    // Mirrors handleTransferTask in planner-shared.reducer.ts (the drag-
+    // and-drop reschedule in the Schedule/Planner week view) - same
+    // dueDay-setting effect as Plan Task for Day, different trigger.
+    case '[Planner] Transfer Task': {
+      var trId = actionPayload.task && actionPayload.task.id;
+      if (trId) {
+        mergeTaskChanges(tasks, trId, {
+          dueDay: actionPayload.newDay,
+          dueWithTime: undefined,
+        });
+      }
+      break;
+    }
+
+    default:
+      // Upsert Planner Day/Move In List/Move Before Task only reorder -
+      // no dueDay/membership effect to mirror.
+      break;
+  }
+}
+
 function applyProjectAction(op, actionPayload, state) {
   var projects = ensureCollection(state, 'project');
   if (!actionPayload) {
@@ -473,6 +533,10 @@ function applyOperation(entry, state, crypto) {
     }
     if (entityType === 'simple_counter') {
       applySimpleCounterAction(op, payload && payload.actionPayload, state);
+      return;
+    }
+    if (entityType === 'planner') {
+      applyPlannerAction(op, payload && payload.actionPayload, state);
       return;
     }
 
