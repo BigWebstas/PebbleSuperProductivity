@@ -15,6 +15,7 @@ var MSG_TASK_SYNC_END = 3;
 var MSG_SYNC_STATUS = 4;
 var MSG_REQUEST_SYNC = 5;
 var MSG_TASK_TOGGLE = 6;
+var MSG_TRACK_TIME_STOP = 7;
 
 var STATUS_OK = 0;
 var STATUS_SYNCING = 1;
@@ -184,6 +185,12 @@ function sendTaskAt(tasks, index) {
     var dueDate = new Date(t.dueWithTime);
     dict.TASK_DUE_MIN = dueDate.getHours() * 60 + dueDate.getMinutes();
   }
+  if (t.timeSpent) {
+    // AppMessage ints are 32-bit signed - cap well under the ~24.8 days
+    // that would overflow, rather than let a very-long-lived task's total
+    // wrap into a negative/garbage duration on the watch.
+    dict.TASK_TIME_SPENT_MS = Math.min(t.timeSpent, 2000000000);
+  }
   Pebble.sendAppMessage(dict, function () {
     sendTaskAt(tasks, index + 1);
   }, function (e) {
@@ -294,6 +301,72 @@ function doSync() {
     });
 }
 
+// Uploads exactly one op and normalizes success/failure regardless of HTTP
+// status. A rejected op still comes back as an HTTP 200 - the server
+// reports per-op acceptance in res.results[].accepted, not the HTTP status
+// (confirmed against sync.routes.ops-handler.ts / operation-upload.service.ts:
+// a conflict, quota, or duplicate-op-id rejection still calls
+// reply.send(...), never reply.status(4xx)). Only checking res.latestSeq
+// used to mean an accepted upload and a rejected one were indistinguishable
+// from this code's point of view - this was very likely THE actual cause of
+// "completed tasks aren't syncing to the desktop app": a real rejection
+// (e.g. a vector-clock conflict against a newer desktop-side edit) was
+// silently swallowed as success, forever, with nothing to ever retry it.
+// Resolves on acceptance (after saving lastSeq); rejects with an Error
+// otherwise. On a conflict rejection specifically, the server reports the
+// entity's real current vector clock (existingClock) precisely so a client
+// can build a dominating clock next time instead of colliding the same way
+// again - merged in here even on failure, before rejecting, so the very
+// next op against this entity starts from a clock that beats what the
+// server actually has.
+function uploadSingleOp(op, config, clientId) {
+  var client = new supersync.SuperSyncClient({ baseUrl: config.baseUrl, token: config.jwt });
+  return client
+    .uploadOps([op], clientId, loadLastSeq())
+    .then(function (res) {
+      var result = res && res.results && res.results[0];
+      if (result && !result.accepted) {
+        var err = new Error((result.errorCode || 'REJECTED') + ': ' + (result.error || 'op rejected by server'));
+        err.rejectedResult = result;
+        throw err;
+      }
+      if (res && res.latestSeq != null) {
+        saveLastSeq(res.latestSeq);
+      }
+    })
+    .catch(function (err) {
+      if (err && err.rejectedResult && err.rejectedResult.existingClock) {
+        saveVectorClock(mergeVectorClocks(loadVectorClock(), err.rejectedResult.existingClock));
+      }
+      throw err;
+    });
+}
+
+// Runs after a single-op upload (success or failure) when the setting is
+// on. Uploading only pushes that one op - it doesn't pull whatever else has
+// changed server-side, nor re-derive/re-send the watch's own task list
+// (which matters once todayOnly or backlog membership makes a just-changed
+// task's visibility change). Defaults on since "the watch's change reaches
+// the desktop" is the behavior actually being asked for; runs best-effort
+// even after a failed upload so at least the pull side stays current,
+// matching doSync()'s own error handling.
+function runAutoSyncAfterOp(config, failureMsg) {
+  if (config.autoSyncOnComplete === false) {
+    return;
+  }
+  var syncPromise = doSync();
+  if (failureMsg && syncPromise && typeof syncPromise.then === 'function') {
+    // doSync() ends by sending its own STATUS_OK/STATUS_ERROR - without
+    // this, an op that was actually rejected would show "Failed: ..." for
+    // a moment and then get silently overwritten by the follow-up sync's
+    // routine STATUS_OK, hiding the exact failure this whole mechanism
+    // exists to surface.
+    syncPromise.then(function () {
+      sendStatus(STATUS_ERROR, failureMsg);
+    });
+  }
+}
+
 function handleTaskToggle(taskId, done) {
   var config = loadConfig();
   if (!config || !config.jwt) {
@@ -343,41 +416,8 @@ function handleTaskToggle(taskId, done) {
   };
 
   var toggleFailureMsg = null;
-  var client = new supersync.SuperSyncClient({ baseUrl: config.baseUrl, token: config.jwt });
-  client
-    .uploadOps([op], clientId, loadLastSeq())
-    .then(function (res) {
-      // A rejected op still comes back as an HTTP 200 - the server reports
-      // per-op acceptance in res.results[].accepted, not the HTTP status
-      // (confirmed against sync.routes.ops-handler.ts /
-      // operation-upload.service.ts: a conflict, quota, or duplicate-op-id
-      // rejection still calls reply.send(...), never reply.status(4xx)).
-      // Only checking res.latestSeq here meant an accepted upload and a
-      // rejected one were indistinguishable from this code's point of view -
-      // this was very likely THE actual cause of "completed tasks aren't
-      // syncing to the desktop app": a real rejection (e.g. a vector-clock
-      // conflict against a newer desktop-side edit) was silently swallowed
-      // as success, forever, with nothing to ever retry it.
-      var result = res && res.results && res.results[0];
-      if (result && !result.accepted) {
-        var err = new Error((result.errorCode || 'REJECTED') + ': ' + (result.error || 'op rejected by server'));
-        err.rejectedResult = result;
-        throw err;
-      }
-      if (res && res.latestSeq != null) {
-        saveLastSeq(res.latestSeq);
-      }
-    })
+  uploadSingleOp(op, config, clientId)
     .catch(function (err) {
-      // On a conflict rejection, the server reports the entity's real
-      // current vector clock (existingClock) precisely so a client can
-      // build a dominating clock next time instead of colliding the same
-      // way again - merge it in now even though this attempt already
-      // failed, so the very next toggle of this task starts from a clock
-      // that beats what the server actually has.
-      if (err && err.rejectedResult && err.rejectedResult.existingClock) {
-        saveVectorClock(mergeVectorClocks(loadVectorClock(), err.rejectedResult.existingClock));
-      }
       // MVP: log and leave the local optimistic update in place; the next
       // full sync will reconcile. A persisted retry queue for offline use
       // is a known gap, called out in README.md.
@@ -386,26 +426,69 @@ function handleTaskToggle(taskId, done) {
       sendStatus(STATUS_ERROR, toggleFailureMsg);
     })
     .then(function () {
-      // Uploading only pushes this one op - it doesn't pull whatever else
-      // has changed server-side, nor re-derive/re-send the watch's own task
-      // list (which matters once todayOnly or backlog membership makes a
-      // just-toggled task's visibility change). Defaults on since "toggle
-      // on the watch reaches the desktop" is the behavior actually being
-      // asked for; runs best-effort even after a failed upload so at least
-      // the pull side stays current, matching doSync()'s own error handling.
-      if (config.autoSyncOnComplete !== false) {
-        var syncPromise = doSync();
-        if (toggleFailureMsg && syncPromise && typeof syncPromise.then === 'function') {
-          // doSync() ends by sending its own STATUS_OK/STATUS_ERROR - without
-          // this, a toggle that was actually rejected would show "Failed:
-          // ..." for a moment and then get silently overwritten by the
-          // follow-up sync's routine STATUS_OK, hiding the exact failure
-          // this whole change exists to surface.
-          syncPromise.then(function () {
-            sendStatus(STATUS_ERROR, toggleFailureMsg);
-          });
-        }
-      }
+      runAutoSyncAfterOp(config, toggleFailureMsg);
+    });
+}
+
+function handleTrackTimeStop(taskId, trackedMs) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (!taskId || !trackedMs || trackedMs <= 0) {
+    return;
+  }
+
+  var today = store.todayStr();
+  var state = loadState();
+  var task = state.task[taskId];
+  if (task) {
+    // Mirrors the real reducer's own additive merge (task.reducer.ts) -
+    // see the matching comment on task-store.js's
+    // '[TimeTracking] Sync time spent' replay case for why this has to be
+    // additive rather than a replace.
+    var timeSpentOnDay = Object.assign({}, task.timeSpentOnDay);
+    timeSpentOnDay[today] = (timeSpentOnDay[today] || 0) + trackedMs;
+    var timeSpent = 0;
+    Object.keys(timeSpentOnDay).forEach(function (d) { timeSpent += timeSpentOnDay[d]; });
+    state.task[taskId] = Object.assign({}, task, { timeSpentOnDay: timeSpentOnDay, timeSpent: timeSpent });
+    saveState(state);
+  }
+
+  var crypto = getCrypto();
+  // Confirmed against time-tracking.actions.ts's syncTimeSpent action
+  // creator: the payload is exactly { taskId, date, duration } - duration
+  // is the DELTA in ms for that calendar day, not a cumulative total and
+  // not the full timeSpentOnDay map (see validation.service.ts's
+  // TASK_TIME_DELTA_ACTION_TYPE check, which validates precisely this
+  // shape for the unencrypted case).
+  var payload = { actionPayload: { taskId: taskId, date: today, duration: trackedMs } };
+  var clientId = getOrCreateClientId();
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  var op = {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[TimeTracking] Sync time spent',
+    entityType: 'TASK',
+    entityId: taskId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+  };
+
+  var trackFailureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      trackFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload tracked time: ' + trackFailureMsg);
+      sendStatus(STATUS_ERROR, trackFailureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, trackFailureMsg);
     });
 }
 
@@ -424,6 +507,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_TOGGLE:
       handleTaskToggle(payload.TASK_ID, payload.TASK_DONE === 1);
+      break;
+    case MSG_TRACK_TIME_STOP:
+      handleTrackTimeStop(payload.TASK_ID, payload.TRACKED_MS);
       break;
     default:
       break;

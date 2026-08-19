@@ -428,7 +428,33 @@ check('unrecognized TASK actionType is ignored, not thrown', () => {
   const state = store.emptyState();
   assert.doesNotThrow(() => {
     store.applyOperations([taskEntry('[Task Shared] dismissReminderOnly', { id: 't1' })], state);
-    store.applyOperations([taskEntry('[TimeTracking] Sync time spent', { taskId: 't1', date: today, duration: 100 })], state);
+  });
+  assert.deepStrictEqual(state.task, {});
+});
+
+check('[TimeTracking] Sync time spent applies additively to timeSpentOnDay, recomputes timeSpent', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'X', isDone: false }),
+      taskEntry('[TimeTracking] Sync time spent', { taskId: 'a', date: today, duration: 60000 }),
+      // A second delta for the same day, e.g. a later 5-minute flush -
+      // must ADD, not replace (this is how the real reducer merges
+      // concurrent contributions from other clients too).
+      taskEntry('[TimeTracking] Sync time spent', { taskId: 'a', date: today, duration: 30000 }),
+      taskEntry('[TimeTracking] Sync time spent', { taskId: 'a', date: '2020-01-01', duration: 5000 }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.timeSpentOnDay[today], 90000);
+  assert.strictEqual(state.task.a.timeSpentOnDay['2020-01-01'], 5000);
+  assert.strictEqual(state.task.a.timeSpent, 95000); // sum across every day
+});
+
+check('[TimeTracking] Sync time spent on an unknown task is a no-op', () => {
+  const state = store.emptyState();
+  assert.doesNotThrow(() => {
+    store.applyOperations([taskEntry('[TimeTracking] Sync time spent', { taskId: 'ghost', date: today, duration: 100 })], state);
   });
   assert.deepStrictEqual(state.task, {});
 });

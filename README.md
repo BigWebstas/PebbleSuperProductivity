@@ -259,6 +259,25 @@ traffic. Since then, three things resolved almost everything that was
   `{ dueWithTime, dueDay: undefined, remindAt }` from the action's own
   top-level fields, matching `handleScheduleTaskWithTime` exactly instead
   of trusting an assumption about what the `task` payload contains.
+- **Time tracking** (long-select a task to start/stop): the wire format is
+  confirmed against `time-tracking.actions.ts`'s `syncTimeSpent` action
+  creator and its reducer handler in `task.reducer.ts`. The op is
+  `actionType: "[TimeTracking] Sync time spent"`, `entityType: "TASK"`,
+  payload `{ taskId, date, duration }` - `duration` is a **delta in
+  milliseconds for that calendar day**, never a cumulative total and never
+  the full `timeSpentOnDay` map, and the real reducer applies it
+  **additively** (`timeSpentOnDay[date] = (existing || 0) + duration`) so
+  concurrent contributions from other clients merge rather than clobber -
+  `task-store.js`'s replay does the same. Only one task tracks at a time
+  (the real app's single global `currentTaskId` - `task.service.ts`), and
+  the watch mirrors that: starting a long-select on a different task first
+  stops-and-flushes whichever one was running. The watch persists the
+  tracking session (task id + start timestamp) across an app close/relaunch
+  rather than tying it to the window's lifetime, matching how the real
+  app's "current task" isn't a UI-session concept either - elapsed time is
+  always derived from the persisted start timestamp, not accumulated tick
+  by tick, so nothing is lost if the watchapp is closed and reopened
+  mid-session.
 
 **Known gaps, not "assumed" so much as "not yet built":**
 - Handled TASK action types, confirmed against
@@ -406,11 +425,12 @@ node scripts/test-task-store.js
 | Direction | `MSG_TYPE` | Purpose | Extra keys |
 |---|---|---|---|
 | phone→watch | `TASK_SYNC_START` | begin a task list push | `TASK_TOTAL` |
-| phone→watch | `TASK_ITEM` | one task | `TASK_INDEX`, `TASK_ID`, `TASK_TITLE`, `TASK_DONE`, `TASK_PROJECT` |
+| phone→watch | `TASK_ITEM` | one task | `TASK_INDEX`, `TASK_ID`, `TASK_TITLE`, `TASK_DONE`, `TASK_PROJECT`, `TASK_DUE_MIN` (minutes since local midnight, omitted if no `dueWithTime`), `TASK_TIME_SPENT_MS` (omitted if no tracked time) |
 | phone→watch | `TASK_SYNC_END` | list push finished, redraw | — |
 | phone→watch | `SYNC_STATUS` | syncing / ok / not-paired / error | `STATUS_CODE`, `STATUS_MSG` |
 | watch→phone | `REQUEST_SYNC` | ask phone to sync now | — |
 | watch→phone | `TASK_TOGGLE` | user marked a task done/undone | `TASK_ID`, `TASK_DONE` |
+| watch→phone | `TRACK_TIME_STOP` | long-select stopped tracking a task | `TASK_ID`, `TRACKED_MS` (this session's elapsed ms) |
 
 ## Known gaps for a v1
 

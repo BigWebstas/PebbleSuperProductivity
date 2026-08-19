@@ -1,6 +1,6 @@
 {
   "name": "pebble-super-productivity",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Pebble/PebbleOS watchapp that syncs tasks with Super Productivity's SuperSync server",
   "author": "BW",
   "private": true,
@@ -52,6 +52,8 @@
       "TASK_DONE",
       "TASK_PROJECT",
       "TASK_DUE_MIN",
+      "TASK_TIME_SPENT_MS",
+      "TRACKED_MS",
       "STATUS_CODE",
       "STATUS_MSG"
     ]

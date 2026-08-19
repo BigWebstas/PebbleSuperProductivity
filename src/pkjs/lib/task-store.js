@@ -292,10 +292,34 @@ function applyTaskAction(op, actionPayload, state) {
       setInBacklog(tasks, actionPayload.taskId, false);
       break;
 
+    // Confirmed against time-tracking.actions.ts/task.reducer.ts: the
+    // payload is only { taskId, date, duration } - a DELTA in ms for that
+    // calendar day, never the full timeSpentOnDay map - and the real
+    // reducer applies it ADDITIVELY (tasks[id].timeSpentOnDay[date] =
+    // (existing || 0) + duration) so concurrent contributions from other
+    // clients aren't clobbered. timeSpent is just the sum across every day
+    // in that map - recomputed here rather than tracked separately so it
+    // can never drift from timeSpentOnDay. No-ops on a task we don't know
+    // about yet, matching the real reducer's own no-op when the entity
+    // isn't loaded (task.reducer.ts).
+    case '[TimeTracking] Sync time spent': {
+      var ttId = actionPayload.taskId;
+      var ttDate = actionPayload.date;
+      var ttDuration = actionPayload.duration;
+      if (ttId && ttDate && typeof ttDuration === 'number' && tasks[ttId]) {
+        var timeSpentOnDay = Object.assign({}, tasks[ttId].timeSpentOnDay);
+        timeSpentOnDay[ttDate] = (timeSpentOnDay[ttDate] || 0) + ttDuration;
+        var timeSpent = 0;
+        Object.keys(timeSpentOnDay).forEach(function (d) { timeSpent += timeSpentOnDay[d]; });
+        mergeTaskChanges(tasks, ttId, { timeSpentOnDay: timeSpentOnDay, timeSpent: timeSpent });
+      }
+      break;
+    }
+
     default:
-      // Time tracking, reminders, Today-tag ordering, tags, deadlines, and
-      // other TASK-entity actions don't affect
-      // title/isDone/backlog-membership - nothing to do.
+      // Reminders, Today-tag ordering, tags, deadlines, and other
+      // TASK-entity actions don't affect
+      // title/isDone/backlog-membership/timeSpent - nothing to do.
       break;
   }
 }
@@ -552,19 +576,19 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
 // into the title string itself. Plain leading spaces alone read as barely
 // different from a regular row at this font size - a leading marker plus
 // wider indentation reads unambiguously as "sub-item of the row above".
-// Plain ASCII (~), not a Unicode glyph (e.g. the box-drawing corner
-// U+2514) that isn't guaranteed to exist in Pebble's system fonts on every
-// platform this targets - confirmed in the emulator that U+2514 renders as
-// an empty missing-glyph box on this app's system font, even on color
-// platforms.
+// Plain ASCII (~), not a Unicode glyph. Tried, in order: the literal
+// letter L; U+2514 (BOX DRAWINGS LIGHT UP AND RIGHT, "└") and U+00C0 ('À'),
+// of which only À actually rendered - U+2514 renders as an empty
+// missing-glyph box on this app's system font on every platform, including
+// color ones (confirmed in the emulator, twice). Settled on ~ regardless.
 var SUBTASK_PREFIX = '    ~ ';
 
 function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
-  rows.push({ id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined });
+  rows.push({ id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + (sub.title || '(untitled)'), isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + (sub.title || '(untitled)'), isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined });
     }
   });
 }

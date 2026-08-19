@@ -13,17 +13,20 @@
 #define KEY_TASK_DONE MESSAGE_KEY_TASK_DONE
 #define KEY_TASK_PROJECT MESSAGE_KEY_TASK_PROJECT
 #define KEY_TASK_DUE_MIN MESSAGE_KEY_TASK_DUE_MIN
+#define KEY_TASK_TIME_SPENT_MS MESSAGE_KEY_TASK_TIME_SPENT_MS
+#define KEY_TRACKED_MS MESSAGE_KEY_TRACKED_MS
 #define KEY_STATUS_CODE MESSAGE_KEY_STATUS_CODE
 #define KEY_STATUS_MSG MESSAGE_KEY_STATUS_MSG
 
 // MSG_TYPE values, watch <-> phone.
 enum {
-  MSG_TASK_SYNC_START = 1, // phone -> watch: TASK_TOTAL follows
-  MSG_TASK_ITEM = 2,       // phone -> watch: one task (TASK_INDEX/ID/TITLE/DONE)
-  MSG_TASK_SYNC_END = 3,   // phone -> watch: list is complete, redraw
-  MSG_SYNC_STATUS = 4,     // phone -> watch: STATUS_CODE (+ optional STATUS_MSG)
-  MSG_REQUEST_SYNC = 5,    // watch -> phone: please refresh
-  MSG_TASK_TOGGLE = 6,     // watch -> phone: TASK_ID + TASK_DONE (new state)
+  MSG_TASK_SYNC_START = 1,  // phone -> watch: TASK_TOTAL follows
+  MSG_TASK_ITEM = 2,        // phone -> watch: one task (TASK_INDEX/ID/TITLE/DONE)
+  MSG_TASK_SYNC_END = 3,    // phone -> watch: list is complete, redraw
+  MSG_SYNC_STATUS = 4,      // phone -> watch: STATUS_CODE (+ optional STATUS_MSG)
+  MSG_REQUEST_SYNC = 5,     // watch -> phone: please refresh
+  MSG_TASK_TOGGLE = 6,      // watch -> phone: TASK_ID + TASK_DONE (new state)
+  MSG_TRACK_TIME_STOP = 7,  // watch -> phone: TASK_ID + TRACKED_MS (this session's tracked ms)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -44,7 +47,8 @@ typedef struct {
   char title[MAX_TITLE_LEN];
   char project[MAX_PROJECT_LEN]; // '' when the phone isn't grouping by project
   bool done;
-  int due_min; // minutes since local midnight, or -1 when the task has no dueWithTime
+  int due_min;       // minutes since local midnight, or -1 when the task has no dueWithTime
+  int time_spent_ms; // total tracked time (all days, all devices), 0 if none
 } Task;
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
@@ -74,6 +78,19 @@ static GBitmap *s_logo_bitmap;
 // been read. Only an explicit Select dismisses it (see menu_select_click).
 static TextLayer *s_error_layer;
 static bool s_error_overlay_active = false;
+
+// Time tracking: long-select on a task starts/stops tracking it (only one
+// task at a time, mirroring the real app's single global currentTaskId -
+// see task.service.ts). s_tracking_task_id is '\0' when nothing is being
+// tracked. Persisted across an app close/relaunch (see save_tracking()/
+// load_tracking()) rather than tied to this window's lifetime - the real
+// app's "current task" isn't a UI-session concept either, and losing an
+// in-progress tracked session just because the watchapp was closed for a
+// minute would defeat the point of long-running tracking.
+static char s_tracking_task_id[MAX_ID_LEN] = "";
+static time_t s_tracking_start_epoch = 0;
+static AppTimer *s_tracking_tick_timer = NULL;
+#define TRACKING_TICK_INTERVAL_MS 1000
 
 static Task s_tasks[MAX_TASKS];
 static int s_task_count = 0;      // tasks currently shown (committed)
@@ -150,6 +167,29 @@ static void load_tasks(void) {
         s_task_count = count;
       }
     }
+  }
+}
+
+static const uint32_t PERSIST_KEY_TRACKING_ID = 110;
+static const uint32_t PERSIST_KEY_TRACKING_START = 111;
+
+// Saved/loaded as its own pair of keys, independent of save_tasks()/
+// load_tasks(), so a tracked session survives even across a resync that
+// replaces s_tasks wholesale (MSG_TASK_SYNC_END).
+static void save_tracking(void) {
+  if (s_tracking_task_id[0] != '\0') {
+    persist_write_string(PERSIST_KEY_TRACKING_ID, s_tracking_task_id);
+    persist_write_int(PERSIST_KEY_TRACKING_START, (int)s_tracking_start_epoch);
+  } else {
+    persist_delete(PERSIST_KEY_TRACKING_ID);
+    persist_delete(PERSIST_KEY_TRACKING_START);
+  }
+}
+
+static void load_tracking(void) {
+  if (persist_exists(PERSIST_KEY_TRACKING_ID)) {
+    persist_read_string(PERSIST_KEY_TRACKING_ID, s_tracking_task_id, sizeof(s_tracking_task_id));
+    s_tracking_start_epoch = (time_t)persist_read_int(PERSIST_KEY_TRACKING_START);
   }
 }
 
@@ -237,6 +277,19 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   graphics_draw_line(ctx, GPoint(0, divider_y), GPoint(bounds.size.w, divider_y));
 }
 
+// Looks up a task by id (e.g. to re-find whatever's being tracked, since
+// s_tracking_task_id survives across a resync that reallocates s_tasks
+// wholesale, so any Task* captured at start_tracking() time can't be
+// trusted to still be valid).
+static Task *find_task_by_id(const char *id) {
+  for (int i = 0; i < s_task_count; i++) {
+    if (strncmp(s_tasks[i].id, id, MAX_ID_LEN) == 0) {
+      return &s_tasks[i];
+    }
+  }
+  return NULL;
+}
+
 // Resolves a MenuIndex to the Task it points at, or NULL if it isn't on a
 // task row at all (the Resync row, a group header, or nothing there once
 // s_group_count/s_task_count are taken into account - recompute_groups()
@@ -285,6 +338,28 @@ static void format_due_time(int due_min, char *out, size_t out_len) {
       h12 = 12;
     }
     snprintf(out, out_len, "@ %d:%02d %s", h12, m, h < 12 ? "AM" : "PM");
+  }
+}
+
+// Formats elapsed tracked time as "1h 23m" (>= 1 hour, seconds dropped to
+// keep it compact - this ticks every second while tracking, but a second
+// digit isn't useful once the total is measured in hours), "5m 09s"
+// (>= 1 minute), or "42s". is_tracking prefixes a plain ASCII "> " marker
+// (not a Unicode glyph - see the subtask marker's own comment on why this
+// codebase avoids those) so a live-ticking number reads unambiguously as
+// "currently running" versus a static previously-accumulated total.
+static void format_duration_ms(int ms, bool is_tracking, char *out, size_t out_len) {
+  int total_s = ms / 1000;
+  int h = total_s / 3600;
+  int m = (total_s % 3600) / 60;
+  int s = total_s % 60;
+  const char *prefix = is_tracking ? "> " : "";
+  if (h > 0) {
+    snprintf(out, out_len, "%s%dh %02dm", prefix, h, m);
+  } else if (m > 0) {
+    snprintf(out, out_len, "%s%dm %02ds", prefix, m, s);
+  } else {
+    snprintf(out, out_len, "%s%ds", prefix, s);
   }
 }
 
@@ -438,12 +513,47 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
     graphics_draw_text(ctx, "Done", fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
-  } else if (task->due_min >= 0) {
-    char due_text[16];
-    format_due_time(task->due_min, due_text, sizeof(due_text));
-    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
-    graphics_draw_text(ctx, due_text, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  } else {
+    // Tracked time is shown BEHIND (after) the due time when the task has
+    // one, both sharing the single subtitle line - not its own row, since
+    // every other subtitle here already lives in that same 18px strip.
+    bool is_tracking_this = s_tracking_task_id[0] != '\0' &&
+                             strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
+    int effective_ms = task->time_spent_ms;
+    if (is_tracking_this) {
+      time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
+      if (elapsed_s > 0) {
+        effective_ms += (int)elapsed_s * 1000;
+      }
+    }
+
+    char subtitle[40] = "";
+    if (task->due_min >= 0) {
+      format_due_time(task->due_min, subtitle, sizeof(subtitle));
+    }
+    if (effective_ms > 0 || is_tracking_this) {
+      char time_text[20];
+      format_duration_ms(effective_ms, is_tracking_this, time_text, sizeof(time_text));
+      size_t existing_len = strlen(subtitle);
+      if (existing_len > 0) {
+        // A dash reads as "these are two separate, settled facts about this
+        // task" (due time - time already spent). While actively tracking,
+        // the ticking "> ..." number is visibly still in motion, not a
+        // settled fact yet, so it keeps the plainer double-space instead -
+        // the dash is reserved for the not-currently-tracking case.
+        const char *separator = is_tracking_this ? "  " : " - ";
+        snprintf(subtitle + existing_len, sizeof(subtitle) - existing_len, "%s%s", separator, time_text);
+      } else {
+        strncpy(subtitle, time_text, sizeof(subtitle) - 1);
+        subtitle[sizeof(subtitle) - 1] = '\0';
+      }
+    }
+
+    if (subtitle[0] != '\0') {
+      GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
+      graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    }
   }
 }
 
@@ -456,6 +566,78 @@ static void send_task_toggle(Task *task) {
   dict_write_cstring(iter, KEY_TASK_ID, task->id);
   dict_write_int32(iter, KEY_TASK_DONE, task->done ? 1 : 0);
   app_message_outbox_send();
+}
+
+static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+    return;
+  }
+  dict_write_int32(iter, KEY_MSG_TYPE, MSG_TRACK_TIME_STOP);
+  dict_write_cstring(iter, KEY_TASK_ID, task_id);
+  dict_write_int32(iter, KEY_TRACKED_MS, tracked_ms);
+  app_message_outbox_send();
+}
+
+static void tracking_tick_callback(void *data) {
+  // Only the elapsed-time text changes each tick, not the row data itself -
+  // mark_dirty (a repaint) rather than reload_data (which also re-asks for
+  // section/row counts etc.) is the same lighter-weight choice
+  // scroll_timer_callback already makes for the marquee tick.
+  layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
+  s_tracking_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, tracking_tick_callback, NULL);
+}
+
+static void start_tracking_tick(void) {
+  if (!s_tracking_tick_timer) {
+    s_tracking_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, tracking_tick_callback, NULL);
+  }
+}
+
+static void stop_tracking_tick(void) {
+  if (s_tracking_tick_timer) {
+    app_timer_cancel(s_tracking_tick_timer);
+    s_tracking_tick_timer = NULL;
+  }
+}
+
+static void start_tracking(Task *task) {
+  strncpy(s_tracking_task_id, task->id, MAX_ID_LEN - 1);
+  s_tracking_task_id[MAX_ID_LEN - 1] = '\0';
+  s_tracking_start_epoch = time(NULL);
+  save_tracking();
+  start_tracking_tick();
+}
+
+// Stops whatever's currently being tracked (a no-op if nothing is). When
+// send_to_phone is true, reports the elapsed session for upload (see
+// handleTrackTimeStop in index.js) - false is used when switching tracking
+// to a different task, where the elapsed session on the PREVIOUS task
+// still needs reporting first, which the caller does itself before calling
+// start_tracking() on the new one (see menu_select_long_click).
+static void stop_tracking_and_report(void) {
+  if (s_tracking_task_id[0] == '\0') {
+    return;
+  }
+  time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
+  if (elapsed_s > 0) {
+    int32_t elapsed_ms = (int32_t)elapsed_s * 1000;
+    send_track_time_stop(s_tracking_task_id, elapsed_ms);
+    // Optimistic local bump, same idea as menu_select_click's optimistic
+    // task->done flip: the phone will report back the real synced total
+    // (merged with whatever other clients tracked in the meantime) on the
+    // next full sync, but this avoids the subtitle reverting to the stale
+    // pre-session total in the meantime.
+    Task *tracked_task = find_task_by_id(s_tracking_task_id);
+    if (tracked_task) {
+      tracked_task->time_spent_ms += elapsed_ms;
+      save_tasks();
+    }
+  }
+  s_tracking_task_id[0] = '\0';
+  s_tracking_start_epoch = 0;
+  save_tracking();
+  stop_tracking_tick();
 }
 
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
@@ -486,6 +668,31 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
   save_tasks();
   menu_layer_reload_data(s_menu_layer);
   send_task_toggle(task);
+}
+
+// Long-select toggles time tracking on the highlighted task: starts it if
+// nothing (or a different task) is being tracked, stops it if this task is
+// the one already being tracked. Only one task tracks at a time, so
+// starting a new one first stops-and-reports whatever was running before -
+// mirrors the real app's single global "current task", not a per-task
+// independent timer each.
+static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  if (s_error_overlay_active || s_task_count == 0 || cell_index->section == 0) {
+    return;
+  }
+  Task *task = resolve_task_at(*cell_index);
+  if (!task || task->done) {
+    // Tracking a completed task isn't a real scenario - not worth a
+    // separate error/feedback path, just ignore the long-press.
+    return;
+  }
+  bool already_tracking_this = s_tracking_task_id[0] != '\0' &&
+                                strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
+  stop_tracking_and_report();
+  if (!already_tracking_this) {
+    start_tracking(task);
+  }
+  menu_layer_reload_data(s_menu_layer);
 }
 
 // ---------- empty / status placeholder ----------
@@ -630,6 +837,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *done_tuple = dict_find(iterator, KEY_TASK_DONE);
       Tuple *project_tuple = dict_find(iterator, KEY_TASK_PROJECT);
       Tuple *due_min_tuple = dict_find(iterator, KEY_TASK_DUE_MIN);
+      Tuple *time_spent_tuple = dict_find(iterator, KEY_TASK_TIME_SPENT_MS);
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -648,6 +856,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       // dueWithTime" - the phone only includes this key at all when the
       // task actually has one, see sendTaskAt() in index.js.
       s_incoming[idx].due_min = due_min_tuple ? due_min_tuple->value->int32 : -1;
+      // Absent means "phone has no tracked time for this task" - see
+      // sendTaskAt() in index.js, same convention as due_min above.
+      s_incoming[idx].time_spent_ms = time_spent_tuple ? time_spent_tuple->value->int32 : 0;
       break;
     }
     case MSG_TASK_SYNC_END: {
@@ -723,6 +934,7 @@ static void window_load(Window *window) {
     .draw_header = menu_draw_header,
     .draw_row = menu_draw_row,
     .select_click = menu_select_click,
+    .select_long_click = menu_select_long_click,
     .selection_changed = menu_selection_changed,
   });
   menu_layer_set_click_config_onto_window(s_menu_layer, window);
@@ -768,10 +980,23 @@ static void window_load(Window *window) {
 
   update_empty_layer();
   request_sync();
+
+  // Resumes a tracking session that was already running when the watchapp
+  // was last closed (see load_tracking() in init()) - the elapsed time is
+  // derived from the persisted start timestamp either way, so this is just
+  // about getting the live-ticking redraw going again, not about the
+  // elapsed total itself.
+  if (s_tracking_task_id[0] != '\0') {
+    start_tracking_tick();
+  }
 }
 
 static void window_unload(Window *window) {
   stop_scroll_timer();
+  // Deliberately NOT stopping tracking here (see s_tracking_task_id's own
+  // comment) - only cancels this window's own redraw timer, since
+  // s_menu_layer (what it redraws) is about to be destroyed too.
+  stop_tracking_tick();
   stop_syncing_animation();
   menu_layer_destroy(s_menu_layer);
   text_layer_destroy(s_empty_layer);
@@ -783,6 +1008,7 @@ static void window_unload(Window *window) {
 
 static void init(void) {
   load_tasks();
+  load_tracking();
   recompute_groups();
 
   app_message_register_inbox_received(inbox_received_handler);
