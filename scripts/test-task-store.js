@@ -548,6 +548,32 @@ check('getActiveTasks(todayOnly=true) keeps only tasks due exactly today, drops 
   assert.deepStrictEqual(tasks.map((t) => t.id), ['a']);
 });
 
+check('getActiveTasks(todayOnly=true) includes a task created into the backlog but later planned for today', () => {
+  // Confirmed against the real handlePlanTasksForToday reducer
+  // (task-shared-scheduling.reducer.ts): planning a task for today never
+  // touches project.backlogTaskIds, so a task can be BOTH still-listed in
+  // the backlog AND due today - the real Today selector
+  // (computeOrderedTaskIdsForToday) has no concept of backlog at all, so
+  // todayOnly must not exclude it just because __inBacklog is (correctly)
+  // still true. Reproduces a real account's data exactly: a GitHub-issue
+  // task added straight into the backlog, later pulled into today.
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Backlog task planned for today', isDone: false }, { isAddToBacklog: true }),
+      planTasksForToday(today, ['a']),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.__inBacklog, true);
+  const todayTasks = active(state, null, false, true);
+  assert.deepStrictEqual(todayTasks.map((t) => t.id), ['a']);
+  // The non-today-filtered view is a different, project-scoped concept
+  // (project.taskIds vs backlogTaskIds) - it should still exclude it.
+  const allActiveTasks = active(state, null, false, false);
+  assert.deepStrictEqual(allActiveTasks.map((t) => t.id), []);
+});
+
 check('getActiveTasks(todayOnly=true) also keeps a dueWithTime-only task scheduled for today', () => {
   const state = store.emptyState();
   const now = new Date();

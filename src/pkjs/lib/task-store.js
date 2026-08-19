@@ -622,11 +622,29 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
     // never got a title fallback - filtered here instead of leaving them to
     // surface as a literal "(untitled)" row in "No Project" (see
     // pushTaskAndSubtasks, which no longer substitutes placeholder text).
-    .filter(function (t) { return t && t.title && isMainTask(t) && !t.__inBacklog; })
+    .filter(function (t) { return t && t.title && isMainTask(t); })
     .filter(function (t) {
       if (!todayOnly) {
-        return true;
+        // Mirrors project.taskIds vs project.backlogTaskIds
+        // (project.model.ts): with no date filter, this is "this project's
+        // regular list", which excludes backlog by definition.
+        return !t.__inBacklog;
       }
+      // The real Today selector (computeOrderedTaskIdsForToday in
+      // work-context.selectors.ts) has NO concept of backlog membership at
+      // all - it's driven purely by dueDay/dueWithTime. A task can be BOTH
+      // still-listed in its project's backlogTaskIds AND explicitly pulled
+      // into today: planTasksForToday never touches backlogTaskIds
+      // (confirmed against handlePlanTasksForToday in
+      // task-shared-scheduling.reducer.ts - it only updates dueDay/
+      // remindAt/dueWithTime and the TODAY tag's own taskIds). Excluding it
+      // here just because __inBacklog is still (correctly, per the real
+      // data model) true would hide a task the real Today page shows -
+      // confirmed live: a GitHub-issue task created straight into the
+      // backlog, later planned for today, stayed excluded from this list
+      // forever even though the desktop's own Today view showed it
+      // normally. todayOnly intentionally ignores __inBacklog entirely,
+      // matching the real selector's own total independence from it.
       if (taskIsPlannedForToday(t, today)) {
         return true;
       }
