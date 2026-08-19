@@ -54,6 +54,18 @@ function active(state, limit, groupByProject, todayOnly) {
   return store.getActiveTasks(state, limit == null ? 30 : limit, !!groupByProject, !!todayOnly);
 }
 
+function counterEntry(actionType, actionPayload) {
+  return entry('SIMPLE_COUNTER', actionType, actionPayload);
+}
+
+function addCounter(simpleCounter) {
+  return counterEntry('[SimpleCounter] Add SimpleCounter', { simpleCounter: simpleCounter });
+}
+
+function habits(state, limit) {
+  return store.getActiveHabits(state, limit == null ? 30 : limit);
+}
+
 check('addTask then updateTask builds a merged task', () => {
   const state = store.emptyState();
   store.applyOperations(
@@ -737,6 +749,98 @@ check('moveToOtherProject on an undated, no-project task fixes it away from "No 
   );
   const tasks = active(state, 30, true);
   assert.deepStrictEqual(tasks.map((t) => t.project), ['Errands']);
+});
+
+check('getActiveHabits includes an enabled click-counter, marked interactive, not done below goal', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Drink water', isEnabled: true, type: 'ClickCounter', streakMinValue: 3, countOnDay: { [today]: 1 } }),
+    ],
+    state
+  );
+  const rows = habits(state);
+  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, interactive: true }]);
+});
+
+check('getActiveHabits marks done once today\'s count reaches goal', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Read', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: { [today]: 1 } }),
+    ],
+    state
+  );
+  assert.strictEqual(habits(state)[0].done, true);
+});
+
+check('getActiveHabits defaults goal to 1 when streakMinValue is unset', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Meditate', isEnabled: true, type: 'ClickCounter', countOnDay: {} })],
+    state
+  );
+  const row = habits(state)[0];
+  assert.strictEqual(row.goal, 1);
+  assert.strictEqual(row.done, false);
+});
+
+check('getActiveHabits excludes a disabled counter', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Old habit', isEnabled: false, type: 'ClickCounter', countOnDay: {} })],
+    state
+  );
+  assert.deepStrictEqual(habits(state), []);
+});
+
+check('getActiveHabits marks a StopWatch counter non-interactive and never done, but still lists it', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Deep work', isEnabled: true, type: 'StopWatch', streakMinValue: 1, countOnDay: { [today]: 5000 } })],
+    state
+  );
+  const row = habits(state)[0];
+  assert.strictEqual(row.interactive, false);
+  assert.strictEqual(row.done, false);
+  assert.strictEqual(row.value, 5000);
+});
+
+check('[SimpleCounter] Set SimpleCounter Counter Today replaces (not adds to) today\'s count', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Pushups', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: { [today]: 5 } }),
+      counterEntry('[SimpleCounter] Set SimpleCounter Counter Today', { id: 'h1', newVal: 1, today: today }),
+    ],
+    state
+  );
+  assert.strictEqual(state.simpleCounter.h1.countOnDay[today], 1);
+});
+
+check('[SimpleCounter] Sync counter time applies additively to countOnDay', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Focus', isEnabled: true, type: 'StopWatch', countOnDay: { [today]: 1000 } }),
+      counterEntry('[SimpleCounter] Sync counter time', { id: 'h1', date: today, duration: 500 }),
+    ],
+    state
+  );
+  assert.strictEqual(state.simpleCounter.h1.countOnDay[today], 1500);
+});
+
+check('[SimpleCounter] Delete multiple SimpleCounters removes the counters', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'A', isEnabled: true, type: 'ClickCounter', countOnDay: {} }),
+      addCounter({ id: 'h2', title: 'B', isEnabled: true, type: 'ClickCounter', countOnDay: {} }),
+      counterEntry('[SimpleCounter] Delete multiple SimpleCounters', { ids: ['h1', 'h2'] }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(habits(state), []);
 });
 
 console.log('');

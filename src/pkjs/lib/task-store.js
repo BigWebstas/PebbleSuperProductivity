@@ -62,9 +62,11 @@ function msIsToday(ms) {
 
 // state: { task: { [id]: {id, title, isDone, parentId?, projectId?,
 //                          __inBacklog?, ...} },
-//          project: { [id]: {id, title, ...} } }
+//          project: { [id]: {id, title, ...} },
+//          simpleCounter: { [id]: {id, title, isEnabled, type, countOnDay,
+//                                   streakMinValue?, isTrackStreaks?, ...} } }
 function emptyState() {
-  return { task: {}, project: {} };
+  return { task: {}, project: {}, simpleCounter: {} };
 }
 
 function ensureCollection(state, entityType) {
@@ -360,6 +362,84 @@ function applyProjectAction(op, actionPayload, state) {
   }
 }
 
+// "Habits" in the real app's UI are actually the SimpleCounter feature
+// (src/app/features/simple-counter/), entityType 'SIMPLE_COUNTER' - there is
+// no separate "HABIT" entity type. Confirmed against
+// simple-counter.actions.ts/reducer.ts: unlike TASK's bespoke
+// actionPayload shapes, every persistent SimpleCounter action rides the
+// same generic op-log capture path (no entity-specific meta-reducer), but
+// the actionPayload shapes themselves still vary per action type just like
+// TASK's do.
+function applySimpleCounterAction(op, actionPayload, state) {
+  var counters = ensureCollection(state, 'simpleCounter');
+  if (!actionPayload) {
+    return;
+  }
+  switch (op.actionType) {
+    case '[SimpleCounter] Add SimpleCounter':
+      if (actionPayload.simpleCounter && actionPayload.simpleCounter.id) {
+        counters[actionPayload.simpleCounter.id] = actionPayload.simpleCounter;
+      }
+      break;
+
+    case '[SimpleCounter] Update SimpleCounter':
+      if (actionPayload.simpleCounter && actionPayload.simpleCounter.id) {
+        var scId = actionPayload.simpleCounter.id;
+        counters[scId] = Object.assign({}, counters[scId], actionPayload.simpleCounter.changes);
+      }
+      break;
+
+    // Confirmed against the real reducer (setSimpleCounterCounterToday/
+    // ForDate cases): a plain REPLACE of that single day's count
+    // (Math.max(0, newVal)), not additive - unlike task time-tracking's
+    // delta semantics. This is the "mark a habit done for today" action.
+    case '[SimpleCounter] Set SimpleCounter Counter Today':
+    case '[SimpleCounter] Set SimpleCounter Counter For Date': {
+      var cId = actionPayload.id;
+      var day = actionPayload.today || actionPayload.date;
+      if (cId && day && typeof actionPayload.newVal === 'number' && counters[cId]) {
+        var countOnDay = Object.assign({}, counters[cId].countOnDay);
+        countOnDay[day] = Math.max(0, actionPayload.newVal);
+        counters[cId] = Object.assign({}, counters[cId], { countOnDay: countOnDay });
+      }
+      break;
+    }
+
+    // StopWatch-type counters' batched time sync - confirmed additive
+    // (currentVal + duration), mirroring task time-tracking exactly.
+    case '[SimpleCounter] Sync counter time': {
+      var stId = actionPayload.id;
+      var stDate = actionPayload.date;
+      var stDuration = actionPayload.duration;
+      if (stId && stDate && typeof stDuration === 'number' && counters[stId]) {
+        var stCountOnDay = Object.assign({}, counters[stId].countOnDay);
+        stCountOnDay[stDate] = (stCountOnDay[stDate] || 0) + stDuration;
+        counters[stId] = Object.assign({}, counters[stId], { countOnDay: stCountOnDay });
+      }
+      break;
+    }
+
+    case '[SimpleCounter] Delete SimpleCounter':
+      if (actionPayload.id) {
+        delete counters[actionPayload.id];
+      }
+      break;
+
+    // NOT "...Delete SimpleCounters" - the real action's string literal is
+    // "Delete multiple SimpleCounters" (deleteSimpleCounters action
+    // creator), confirmed by reading the actual createAction() call rather
+    // than assuming the plural naming pattern TASK's deleteTasks uses.
+    case '[SimpleCounter] Delete multiple SimpleCounters':
+      (actionPayload.ids || []).forEach(function (id) { delete counters[id]; });
+      break;
+
+    default:
+      // Reorder, upsert (sync/import only), and other SimpleCounter-entity
+      // actions don't affect title/isEnabled/type/countOnDay - nothing to do.
+      break;
+  }
+}
+
 // Applies one SuperSync operation to `state` in place. `crypto` is the
 // object returned by supersync-client.js's createCrypto(password) if E2EE is
 // on, or null/undefined otherwise. Never throws - a single malformed/
@@ -389,6 +469,10 @@ function applyOperation(entry, state, crypto) {
     }
     if (entityType === 'project') {
       applyProjectAction(op, payload && payload.actionPayload, state);
+      return;
+    }
+    if (entityType === 'simple_counter') {
+      applySimpleCounterAction(op, payload && payload.actionPayload, state);
       return;
     }
 
@@ -443,6 +527,9 @@ function applyOperation(entry, state, crypto) {
               }
             });
           });
+        }
+        if (payload && payload.simpleCounter && payload.simpleCounter.entities) {
+          state.simpleCounter = payload.simpleCounter.entities;
         }
         break;
       default:
@@ -609,10 +696,51 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
   });
 }
 
+// Returns up to `limit` enabled SimpleCounters ("habits" in the real app's
+// own UI labeling), each with today's progress. "Done today" mirrors the
+// majority of the real UI's own comparisons (habit-tracker.component.ts's
+// getProgress/isSimpleCompletion, EMPTY_SIMPLE_COUNTER's own default):
+// goal defaults to 1 when streakMinValue is unset, done means
+// countOnDay[today] >= goal. StopWatch-type counters are still listed
+// (matching the real habit-tracker, which doesn't filter them out either)
+// but marked non-interactive - their countOnDay values are milliseconds of
+// tracked time, not a "did you do this" count, so toggling one the same way
+// as a click/streak counter would mean overwriting real tracked duration
+// with a bogus 0 or goal value. Only isEnabled counters are included,
+// matching selectEnabledSimpleCounters.
+function getActiveHabits(state, limit) {
+  var counters = state.simpleCounter || {};
+  var today = todayStr();
+  var rows = Object.keys(counters)
+    .map(function (id) { return counters[id]; })
+    .filter(function (c) { return c && c.id && c.title && c.isEnabled; })
+    .map(function (c) {
+      var goal = c.streakMinValue || 1;
+      var value = (c.countOnDay && c.countOnDay[today]) || 0;
+      var interactive = c.type !== 'StopWatch';
+      return {
+        id: c.id,
+        title: c.title,
+        value: value,
+        goal: goal,
+        done: interactive && value >= goal,
+        interactive: interactive,
+      };
+    });
+  rows.sort(function (a, b) {
+    if (!!a.done !== !!b.done) {
+      return a.done ? 1 : -1;
+    }
+    return titleCompare(a.title, b.title);
+  });
+  return rows.slice(0, limit);
+}
+
 module.exports = {
   emptyState: emptyState,
   applyOperation: applyOperation,
   applyOperations: applyOperations,
   getActiveTasks: getActiveTasks,
+  getActiveHabits: getActiveHabits,
   todayStr: todayStr,
 };

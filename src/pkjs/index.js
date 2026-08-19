@@ -16,6 +16,10 @@ var MSG_SYNC_STATUS = 4;
 var MSG_REQUEST_SYNC = 5;
 var MSG_TASK_TOGGLE = 6;
 var MSG_TRACK_TIME_STOP = 7;
+var MSG_HABIT_SYNC_START = 8;
+var MSG_HABIT_ITEM = 9;
+var MSG_HABIT_SYNC_END = 10;
+var MSG_HABIT_TOGGLE = 11;
 
 var STATUS_OK = 0;
 var STATUS_SYNCING = 1;
@@ -23,6 +27,9 @@ var STATUS_NOT_PAIRED = 2;
 var STATUS_ERROR = 3;
 
 var MAX_TASKS = 30;
+// Kept in sync with MAX_HABITS in main.c - aplite's tight ~24KB heap is the
+// binding constraint (see that constant's own comment).
+var MAX_HABITS = 6;
 
 // Matches the real client's CURRENT_SCHEMA_VERSION (schema-version.ts) at
 // time of writing. The server only validates this field's range when it's
@@ -209,6 +216,43 @@ function sendTaskAt(tasks, index) {
   });
 }
 
+function sendHabitListToWatch(habits) {
+  var start = { MSG_TYPE: MSG_HABIT_SYNC_START, HABIT_TOTAL: habits.length };
+  Pebble.sendAppMessage(start, function () {
+    sendHabitAt(habits, 0);
+  }, function (e) {
+    console.log('[pkjs] failed to send HABIT_SYNC_START: ' + JSON.stringify(e));
+  });
+}
+
+function sendHabitAt(habits, index) {
+  if (index >= habits.length) {
+    Pebble.sendAppMessage({ MSG_TYPE: MSG_HABIT_SYNC_END }, function () {}, function (e) {
+      console.log('[pkjs] failed to send HABIT_SYNC_END: ' + JSON.stringify(e));
+    });
+    return;
+  }
+  var h = habits[index];
+  var dict = {
+    MSG_TYPE: MSG_HABIT_ITEM,
+    HABIT_INDEX: index,
+    HABIT_ID: String(h.id),
+    HABIT_TITLE: String(h.title).slice(0, 63),
+    HABIT_DONE: h.done ? 1 : 0,
+    // AppMessage ints are 32-bit signed - a StopWatch-type counter's value
+    // is milliseconds, same overflow concern/cap as TASK_TIME_SPENT_MS.
+    HABIT_VALUE: Math.min(h.value, 2000000000),
+    HABIT_GOAL: h.goal,
+    HABIT_INTERACTIVE: h.interactive ? 1 : 0,
+  };
+  Pebble.sendAppMessage(dict, function () {
+    sendHabitAt(habits, index + 1);
+  }, function (e) {
+    console.log('[pkjs] failed to send HABIT_ITEM ' + index + ': ' + JSON.stringify(e));
+    sendHabitAt(habits, index + 1);
+  });
+}
+
 // ---------------- sync engine ----------------
 
 var syncInFlight = false;
@@ -333,6 +377,8 @@ function doSync() {
       saveVectorClock(vectorClock);
       var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly);
       sendTaskListToWatch(tasks);
+      var habits = store.getActiveHabits(state, MAX_HABITS);
+      sendHabitListToWatch(habits);
       sendStatus(STATUS_OK);
     })
     .catch(function (err) {
@@ -550,6 +596,66 @@ function handleTrackTimeStop(taskId, trackedMs) {
     });
 }
 
+function handleHabitToggle(habitId, done) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+
+  var today = store.todayStr();
+  var state = loadState();
+  var counter = state.simpleCounter[habitId];
+  var goal = (counter && counter.streakMinValue) || 1;
+  var newVal = done ? goal : 0;
+
+  // Safe to apply optimistically here, unlike handleTrackTimeStop's
+  // additive delta - this mirrors handleTaskToggle's isDone set: a plain
+  // replace of countOnDay[today] (confirmed against the real reducer's own
+  // setSimpleCounterCounterToday case, Math.max(0, newVal) - not additive),
+  // so re-applying the same value again when this op comes back down
+  // through the normal replay path is harmless, not a source of drift.
+  if (counter) {
+    var countOnDay = Object.assign({}, counter.countOnDay);
+    countOnDay[today] = newVal;
+    state.simpleCounter[habitId] = Object.assign({}, counter, { countOnDay: countOnDay });
+    saveState(state);
+  }
+
+  var crypto = getCrypto();
+  // Matches setSimpleCounterCounterToday's action payload exactly:
+  // { id, newVal, today } (simple-counter.actions.ts) - a flat top-level
+  // shape, not wrapped in a nested entity object the way updateTask's is.
+  var payload = { actionPayload: { id: habitId, newVal: newVal, today: today } };
+  var clientId = getOrCreateClientId();
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  var op = {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[SimpleCounter] Set SimpleCounter Counter Today',
+    entityType: 'SIMPLE_COUNTER',
+    entityId: habitId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+
+  var habitFailureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      habitFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload habit toggle: ' + habitFailureMsg);
+      sendStatus(STATUS_ERROR, habitFailureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, habitFailureMsg);
+    });
+}
+
 // ---------------- Pebble event wiring ----------------
 
 Pebble.addEventListener('ready', function () {
@@ -568,6 +674,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TRACK_TIME_STOP:
       handleTrackTimeStop(payload.TASK_ID, payload.TRACKED_MS);
+      break;
+    case MSG_HABIT_TOGGLE:
+      handleHabitToggle(payload.HABIT_ID, payload.HABIT_DONE === 1);
       break;
     default:
       break;

@@ -17,6 +17,14 @@
 #define KEY_TRACKED_MS MESSAGE_KEY_TRACKED_MS
 #define KEY_STATUS_CODE MESSAGE_KEY_STATUS_CODE
 #define KEY_STATUS_MSG MESSAGE_KEY_STATUS_MSG
+#define KEY_HABIT_TOTAL MESSAGE_KEY_HABIT_TOTAL
+#define KEY_HABIT_INDEX MESSAGE_KEY_HABIT_INDEX
+#define KEY_HABIT_ID MESSAGE_KEY_HABIT_ID
+#define KEY_HABIT_TITLE MESSAGE_KEY_HABIT_TITLE
+#define KEY_HABIT_DONE MESSAGE_KEY_HABIT_DONE
+#define KEY_HABIT_VALUE MESSAGE_KEY_HABIT_VALUE
+#define KEY_HABIT_GOAL MESSAGE_KEY_HABIT_GOAL
+#define KEY_HABIT_INTERACTIVE MESSAGE_KEY_HABIT_INTERACTIVE
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -27,6 +35,10 @@ enum {
   MSG_REQUEST_SYNC = 5,     // watch -> phone: please refresh
   MSG_TASK_TOGGLE = 6,      // watch -> phone: TASK_ID + TASK_DONE (new state)
   MSG_TRACK_TIME_STOP = 7,  // watch -> phone: TASK_ID + TRACKED_MS (this session's tracked ms)
+  MSG_HABIT_SYNC_START = 8, // phone -> watch: HABIT_TOTAL follows
+  MSG_HABIT_ITEM = 9,       // phone -> watch: one habit
+  MSG_HABIT_SYNC_END = 10,  // phone -> watch: list is complete, redraw
+  MSG_HABIT_TOGGLE = 11,    // watch -> phone: HABIT_ID + HABIT_DONE (new state)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -71,8 +83,45 @@ typedef struct {
   int count;
 } TaskGroup;
 
+// "Habits" are Super Productivity's SimpleCounter feature (real entityType
+// SIMPLE_COUNTER - there is no separate "Habit" entity). interactive is
+// false for StopWatch-type counters: their value is milliseconds of tracked
+// time, not a "did you do this today" count, so Select doesn't toggle them
+// (see habit_menu_select_click) - only shown, formatted as a duration.
+// Kept low (unlike MAX_TASKS' 30) because aplite's ~24KB RAM budget is
+// already tight after MAX_ID_LEN's own 96-byte bump for calendar tasks - 8
+// overflowed the linked binary's APP region by 280 bytes; 6 fits with room
+// to spare. Most habit trackers don't track more than a handful anyway.
+#define MAX_HABITS 6
+// SimpleCounter ids are always a plain nanoid() (simple-counter.service.ts)
+// - unlike TASK, there's no calendar-integration id format to accommodate,
+// so this doesn't need MAX_ID_LEN's 96-byte allowance; a smaller buffer
+// here matters given MAX_HABITS' own memory comment above.
+#define MAX_HABIT_ID_LEN 32
+typedef struct {
+  char id[MAX_HABIT_ID_LEN];
+  char title[MAX_TITLE_LEN];
+  bool done;
+  bool interactive;
+  int value; // today's count, or ms tracked today for a StopWatch-type counter
+  int goal;  // streakMinValue-derived target used for the "value/goal" subtitle
+} Habit;
+
+// Single buffer, not the incoming/committed double-buffer s_tasks/s_incoming
+// use - deliberately, to save memory on the tightest platform (aplite).
+// Safe because nothing redraws the habits menu (reload_data/mark_dirty)
+// until MSG_HABIT_SYNC_END bumps s_habit_count, exactly the same guarantee
+// that already makes the task list's own mid-sync writes invisible.
+static Habit s_habits[MAX_HABITS];
+static int s_habit_count = 0;
+static int s_habit_incoming_total = 0;
+
 static Window *s_main_window;
 static MenuLayer *s_menu_layer;
+static Window *s_habits_window;
+static MenuLayer *s_habits_menu_layer;
+static TextLayer *s_habits_empty_layer;
+static StatusBarLayer *s_habits_status_bar;
 static StatusBarLayer *s_status_bar;
 static TextLayer *s_empty_layer;
 static BitmapLayer *s_logo_layer;
@@ -179,6 +228,30 @@ static void load_tasks(void) {
   }
 }
 
+static const uint32_t PERSIST_KEY_HABITS = 120;
+
+static void save_habits(void) {
+  if (s_habit_count > 0) {
+    persist_write_data(PERSIST_KEY_HABITS, s_habits, sizeof(Habit) * (size_t)s_habit_count);
+    persist_write_int(PERSIST_KEY_HABITS + 1, s_habit_count);
+  } else {
+    persist_delete(PERSIST_KEY_HABITS);
+    persist_delete(PERSIST_KEY_HABITS + 1);
+  }
+}
+
+static void load_habits(void) {
+  if (persist_exists(PERSIST_KEY_HABITS + 1)) {
+    int count = persist_read_int(PERSIST_KEY_HABITS + 1);
+    if (count > 0 && count <= MAX_HABITS) {
+      int bytes = persist_read_data(PERSIST_KEY_HABITS, s_habits, sizeof(Habit) * (size_t)count);
+      if (bytes == (int)(sizeof(Habit) * (size_t)count)) {
+        s_habit_count = count;
+      }
+    }
+  }
+}
+
 static const uint32_t PERSIST_KEY_TRACKING_ID = 110;
 static const uint32_t PERSIST_KEY_TRACKING_START = 111;
 
@@ -204,12 +277,14 @@ static void load_tracking(void) {
 
 static void request_sync(void);
 static void hide_error_overlay(void);
+static void push_habits_window(void);
+static void update_habits_empty_layer(void);
 
 // ---------- menu layer callbacks ----------
 
-// Section 0 is always the "Resync" action (1 row, no header). When there
-// are tasks, sections 1..s_group_count are one per project group (see
-// recompute_groups()); when the list is empty, section 0 doubles as the
+// Section 0 is always the "Resync" + "Habits" actions (2 rows, no header).
+// When there are tasks, sections 1..s_group_count are one per project group
+// (see recompute_groups()); when the list is empty, section 0 doubles as the
 // empty/error screen's retry target and there are no further sections.
 static uint16_t menu_get_num_sections(MenuLayer *menu_layer, void *context) {
   return s_task_count > 0 ? (uint16_t)(1 + s_group_count) : 1;
@@ -221,11 +296,14 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
     // update_empty_layer), but it still owns the window's click config, so
     // it needs at least one reportable row for SELECT to be dispatched at
     // all - otherwise "Select to retry" on the error screen is dead text.
-    // Never actually drawn in that state since the layer is hidden.
+    // Never actually drawn in that state since the layer is hidden. This
+    // also means the Habits row (see below) isn't reachable while the list
+    // is empty/erroring - a deliberately narrow scope, not a full port of
+    // this screen's navigation.
     return 1;
   }
   if (section_index == 0) {
-    return 1; // Resync row
+    return 2; // Resync row, Habits row
   }
   int group_idx = (int)section_index - 1;
   if (group_idx >= s_group_count) {
@@ -413,6 +491,27 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     return;
   }
   if (cell_index->section == 0) {
+    bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
+                        menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
+    GRect bounds = layer_get_bounds(cell_layer);
+
+    if (cell_index->row == 1) {
+      // Navigates to the habits (SimpleCounter) page - see
+      // push_habits_window(). A plain ASCII ">" rather than a Unicode arrow
+      // glyph, same reasoning as SUBTASK_PREFIX's own comment: this app's
+      // system font renders unmapped codepoints as an empty box.
+      graphics_context_set_fill_color(ctx, GColorVividCerulean);
+      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
+      GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
+      graphics_draw_text(ctx, "Habits", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      GRect arrow_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
+      graphics_draw_text(ctx, ">", fonts_get_system_font(FONT_KEY_GOTHIC_14), arrow_box,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+      return;
+    }
+
     // Reflects live sync status so a resync failure is visible even while
     // the previously-cached list is still showing, instead of being
     // silently swallowed (only the empty/error screen showed status
@@ -445,9 +544,6 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     // red regardless of selection state, so it can't be mistaken for a task.
     // Text itself still inverts to white on select, matching every other
     // row's selection feedback instead of looking inert when highlighted.
-    bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
-                        menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
-    GRect bounds = layer_get_bounds(cell_layer);
     graphics_context_set_fill_color(ctx, GColorRed);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
@@ -671,8 +767,12 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     return;
   }
   if (cell_index->section == 0) {
-    // The "Resync" row atop the populated list.
-    request_sync();
+    if (cell_index->row == 1) {
+      push_habits_window();
+    } else {
+      // The "Resync" row atop the populated list.
+      request_sync();
+    }
     return;
   }
   Task *task = resolve_task_at(*cell_index);
@@ -899,6 +999,52 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       refresh_scroll_state(true);
       break;
     }
+    case MSG_HABIT_SYNC_START: {
+      Tuple *total_tuple = dict_find(iterator, KEY_HABIT_TOTAL);
+      s_habit_incoming_total = total_tuple ? total_tuple->value->int32 : 0;
+      if (s_habit_incoming_total > MAX_HABITS) {
+        s_habit_incoming_total = MAX_HABITS;
+      }
+      break;
+    }
+    case MSG_HABIT_ITEM: {
+      Tuple *idx_tuple = dict_find(iterator, KEY_HABIT_INDEX);
+      Tuple *id_tuple = dict_find(iterator, KEY_HABIT_ID);
+      Tuple *title_tuple = dict_find(iterator, KEY_HABIT_TITLE);
+      Tuple *done_tuple = dict_find(iterator, KEY_HABIT_DONE);
+      Tuple *value_tuple = dict_find(iterator, KEY_HABIT_VALUE);
+      Tuple *goal_tuple = dict_find(iterator, KEY_HABIT_GOAL);
+      Tuple *interactive_tuple = dict_find(iterator, KEY_HABIT_INTERACTIVE);
+      if (!idx_tuple || !id_tuple || !title_tuple) {
+        break;
+      }
+      int idx = idx_tuple->value->int32;
+      if (idx < 0 || idx >= MAX_HABITS) {
+        break;
+      }
+      // Written directly into s_habits (not a separate incoming buffer -
+      // see the Habit struct's own comment on why that's safe here).
+      strncpy(s_habits[idx].id, id_tuple->value->cstring, MAX_HABIT_ID_LEN - 1);
+      s_habits[idx].id[MAX_HABIT_ID_LEN - 1] = '\0';
+      strncpy(s_habits[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
+      s_habits[idx].title[MAX_TITLE_LEN - 1] = '\0';
+      s_habits[idx].done = done_tuple && done_tuple->value->int32 != 0;
+      s_habits[idx].value = value_tuple ? value_tuple->value->int32 : 0;
+      s_habits[idx].goal = goal_tuple ? goal_tuple->value->int32 : 0;
+      s_habits[idx].interactive = interactive_tuple && interactive_tuple->value->int32 != 0;
+      break;
+    }
+    case MSG_HABIT_SYNC_END: {
+      s_habit_count = s_habit_incoming_total;
+      save_habits();
+      if (s_habits_menu_layer) {
+        menu_layer_reload_data(s_habits_menu_layer);
+      }
+      if (s_habits_empty_layer) {
+        update_habits_empty_layer();
+      }
+      break;
+    }
     case MSG_SYNC_STATUS: {
       Tuple *status_tuple = dict_find(iterator, KEY_STATUS_CODE);
       if (status_tuple) {
@@ -945,6 +1091,149 @@ static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult
   strncpy(s_status_msg, "Couldn't reach phone app", MAX_STATUS_MSG_LEN - 1);
   s_status_msg[MAX_STATUS_MSG_LEN - 1] = '\0';
   show_error_overlay();
+}
+
+// ---------- habits window ----------
+
+static Habit *resolve_habit_at(MenuIndex index) {
+  if (index.section != 0 || (int)index.row >= s_habit_count) {
+    return NULL;
+  }
+  return &s_habits[index.row];
+}
+
+static void send_habit_toggle(Habit *habit) {
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+    return;
+  }
+  dict_write_int32(iter, KEY_MSG_TYPE, MSG_HABIT_TOGGLE);
+  dict_write_cstring(iter, KEY_HABIT_ID, habit->id);
+  dict_write_int32(iter, KEY_HABIT_DONE, habit->done ? 1 : 0);
+  app_message_outbox_send();
+}
+
+static uint16_t habits_menu_get_num_sections(MenuLayer *menu_layer, void *context) {
+  return 1;
+}
+
+static uint16_t habits_menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+  return (uint16_t)s_habit_count;
+}
+
+static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
+  Habit *habit = resolve_habit_at(*cell_index);
+  if (!habit) {
+    return;
+  }
+  bool is_selected = menu_layer_get_selected_index(s_habits_menu_layer).row == cell_index->row;
+  GRect bounds = layer_get_bounds(cell_layer);
+  GColor bg = is_selected ? GColorBlack : GColorWhite;
+  GColor fg = is_selected ? GColorWhite : GColorBlack;
+  if (habit->done) {
+    fg = is_selected ? GColorLightGray : GColorDarkGray;
+  }
+  graphics_context_set_fill_color(ctx, bg);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_context_set_text_color(ctx, fg);
+
+  GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
+  graphics_draw_text(ctx, habit->title, fonts_get_system_font(TITLE_FONT_KEY), title_box,
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+  // Non-interactive (StopWatch-type) counters show today's tracked
+  // duration, reusing the same formatter the task list's own time-tracking
+  // subtitle uses. Interactive ones show "value/goal" until they hit goal,
+  // then "Done" centered - matching the task list's own done-row style.
+  char subtitle[32];
+  if (!habit->interactive) {
+    format_duration_ms(habit->value, false, subtitle, sizeof(subtitle));
+  } else if (habit->done) {
+    strncpy(subtitle, "Done", sizeof(subtitle) - 1);
+    subtitle[sizeof(subtitle) - 1] = '\0';
+  } else {
+    snprintf(subtitle, sizeof(subtitle), "%d/%d", habit->value, habit->goal);
+  }
+  GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
+  graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+                      GTextOverflowModeTrailingEllipsis,
+                      (habit->interactive && habit->done) ? GTextAlignmentCenter : GTextAlignmentLeft, NULL);
+}
+
+// A StopWatch-type counter has no simple done/not-done state (see the Habit
+// struct's own comment) - Select silently ignores it, the same way a
+// completed task ignores a long-press track-time attempt elsewhere in this
+// app, rather than a separate error/feedback path for a fairly minor case.
+static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  Habit *habit = resolve_habit_at(*cell_index);
+  if (!habit || !habit->interactive) {
+    return;
+  }
+  habit->done = !habit->done;
+  habit->value = habit->done ? habit->goal : 0;
+  save_habits();
+  menu_layer_reload_data(s_habits_menu_layer);
+  send_habit_toggle(habit);
+}
+
+static void update_habits_empty_layer(void) {
+  bool show_empty = (s_habit_count == 0);
+  layer_set_hidden(text_layer_get_layer(s_habits_empty_layer), !show_empty);
+  layer_set_hidden(menu_layer_get_layer(s_habits_menu_layer), show_empty);
+}
+
+static void habits_window_load(Window *window) {
+  Layer *window_layer = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(window_layer);
+
+  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
+  s_habits_status_bar = status_bar_layer_create();
+  layer_add_child(window_layer, status_bar_layer_get_layer(s_habits_status_bar));
+
+  GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
+                                bounds.size.w, bounds.size.h - status_bar_height);
+
+  s_habits_menu_layer = menu_layer_create(content_bounds);
+  menu_layer_set_callbacks(s_habits_menu_layer, NULL, (MenuLayerCallbacks) {
+    .get_num_sections = habits_menu_get_num_sections,
+    .get_num_rows = habits_menu_get_num_rows,
+    .draw_row = habits_menu_draw_row,
+    .select_click = habits_menu_select_click,
+  });
+  menu_layer_set_click_config_onto_window(s_habits_menu_layer, window);
+  layer_add_child(window_layer, menu_layer_get_layer(s_habits_menu_layer));
+
+  s_habits_empty_layer = text_layer_create(content_bounds);
+  text_layer_set_text_alignment(s_habits_empty_layer, GTextAlignmentCenter);
+  text_layer_set_font(s_habits_empty_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_text(s_habits_empty_layer, "No habits synced.");
+  layer_add_child(window_layer, text_layer_get_layer(s_habits_empty_layer));
+
+  update_habits_empty_layer();
+}
+
+static void habits_window_unload(Window *window) {
+  menu_layer_destroy(s_habits_menu_layer);
+  text_layer_destroy(s_habits_empty_layer);
+  status_bar_layer_destroy(s_habits_status_bar);
+}
+
+// Created once and reused (pushed again on every visit) rather than
+// destroyed/recreated at the Window* level - only its layers are torn down
+// and rebuilt each time (habits_window_load/unload), which is what actually
+// matters for memory: at most one window's worth of layers exists at a
+// time, since Back always pops this back off before returning to the main
+// window (Pebble's default unhandled-BACK behavior - no click config needed
+// here for it).
+static void push_habits_window(void) {
+  if (!s_habits_window) {
+    s_habits_window = window_create();
+    window_set_window_handlers(s_habits_window, (WindowHandlers) {
+      .load = habits_window_load,
+      .unload = habits_window_unload,
+    });
+  }
+  window_stack_push(s_habits_window, true);
 }
 
 // ---------- window lifecycle ----------
@@ -1042,6 +1331,7 @@ static void window_unload(Window *window) {
 
 static void init(void) {
   load_tasks();
+  load_habits();
   load_tracking();
   recompute_groups();
 
@@ -1060,6 +1350,9 @@ static void init(void) {
 
 static void deinit(void) {
   window_destroy(s_main_window);
+  if (s_habits_window) {
+    window_destroy(s_habits_window);
+  }
 }
 
 int main(void) {
