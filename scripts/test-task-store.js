@@ -406,13 +406,17 @@ check('addTask with isAddToBacklog excludes the task from the active list', () =
   assert.deepStrictEqual(active(state), []);
 });
 
-check('a watch-dictated Add Task upload (index.js\'s handleAddTask shape) round-trips through replay', () => {
+check('a watch-dictated Add Task upload (index.js\'s handleAddTask shape) round-trips through replay, visible under Today Only', () => {
   // Regression test for the voice-add-task feature: handleAddTask in
   // index.js builds the actionPayload as { task, workContextId,
   // workContextType, isAddToBacklog, isAddToBottom, isIgnoreShortSyntax } -
   // this mirrors that exact shape (not just { task: ... } like the addTask()
   // helper above) to confirm it's genuinely decodable by the real replay
-  // path, not just written to look plausible.
+  // path, not just written to look plausible. task.dueDay is set to today
+  // (handleAddTask's own fix) - without it, a task dictated straight onto
+  // the watch was silently invisible on the watch itself whenever Today
+  // Only was on, since an undated task doesn't pass taskIsPlannedForToday
+  // any more than it would on the real desktop's own Today page.
   const state = store.emptyState();
   const task = {
     id: 'task-abc123',
@@ -426,6 +430,7 @@ check('a watch-dictated Add Task upload (index.js\'s handleAddTask shape) round-
     created: Date.now(),
     attachments: [],
     projectId: 'INBOX_PROJECT',
+    dueDay: today,
   };
   store.applyOperations(
     [
@@ -444,6 +449,7 @@ check('a watch-dictated Add Task upload (index.js\'s handleAddTask shape) round-
   assert.strictEqual(state.task['task-abc123'].projectId, 'INBOX_PROJECT');
   assert.strictEqual(state.task['task-abc123'].__inBacklog, false);
   assert.deepStrictEqual(active(state).map((t) => t.id), ['task-abc123']);
+  assert.deepStrictEqual(active(state, 30, false, true).map((t) => t.id), ['task-abc123']);
 });
 
 check('"[Project] Move Task from regular to backlog" removes the task from the active list', () => {

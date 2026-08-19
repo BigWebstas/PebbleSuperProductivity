@@ -170,7 +170,18 @@ function generateTaskId() {
 // ---------------- AppMessage out ----------------
 
 function sendStatus(code, message) {
-  var dict = { MSG_TYPE: MSG_SYNC_STATUS, STATUS_CODE: code };
+  var config = loadConfig() || {};
+  var dict = {
+    MSG_TYPE: MSG_SYNC_STATUS,
+    STATUS_CODE: code,
+    // Always included (not conditionally), unlike STATUS_MSG below - this is
+    // what lets the watch's own row layout self-correct within the very
+    // next sync cycle after a settings change, since sendStatus() already
+    // fires at both the start and end of every doSync() (including the one
+    // webviewclosed triggers right after every settings save).
+    HABITS_ENABLED: config.enableHabits !== false ? 1 : 0,
+    ADD_TASK_ENABLED: config.enableAddTask !== false ? 1 : 0,
+  };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
   }
@@ -371,8 +382,10 @@ function doSync() {
       saveVectorClock(vectorClock);
       var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly);
       sendTaskListToWatch(tasks);
-      var habits = store.getActiveHabits(state, MAX_HABITS);
-      sendHabitListToWatch(habits);
+      if (config.enableHabits !== false) {
+        var habits = store.getActiveHabits(state, MAX_HABITS);
+        sendHabitListToWatch(habits);
+      }
       sendStatus(STATUS_OK);
     })
     .catch(function (err) {
@@ -599,6 +612,13 @@ function handleHabitAdjust(habitId, delta) {
     sendStatus(STATUS_NOT_PAIRED);
     return;
   }
+  if (config.enableHabits === false) {
+    // Defensive backstop against a stale watch UI still showing the Habits
+    // row/window for one message round-trip right after it's disabled - the
+    // row itself should already be hidden by then (see sendStatus), but
+    // don't act on a habit adjustment that shouldn't be reachable.
+    return;
+  }
 
   var today = store.todayStr();
   var state = loadState();
@@ -670,6 +690,12 @@ function handleAddTask(title) {
     sendStatus(STATUS_NOT_PAIRED);
     return;
   }
+  if (config.enableAddTask === false) {
+    // Defensive backstop against a stale watch UI still showing the Add
+    // Task row for one message round-trip right after it's disabled - the
+    // row itself should already be hidden by then (see sendStatus).
+    return;
+  }
 
   var projectId = config.defaultProjectId || 'INBOX_PROJECT';
   var task = {
@@ -684,6 +710,15 @@ function handleAddTask(title) {
     created: Date.now(),
     attachments: [],
     projectId: projectId,
+    // Without a due date, a task the user is dictating onto the watch right
+    // now would be silently invisible on the watch itself whenever Today
+    // Only is on (the same, correct, filter a desktop task with no due date
+    // is subject to on the real Today page) - mirrors what the real app's
+    // own createNewTaskWithDefaults does when a task is added while viewing
+    // the Today page (workContextId === TODAY_TAG.id: dueDay defaults to
+    // today). There's no equivalent "page" concept for a watch-initiated
+    // add, but the intent is the same: you're adding this to work on now.
+    dueDay: store.todayStr(),
   };
 
   // Matches addTask's real action payload shape (task-shared.actions.ts):
@@ -807,6 +842,8 @@ Pebble.addEventListener('showConfiguration', function () {
       // to Inbox", not "unset vs configured" - see handleAddTask.
       defaultProjectId: config.defaultProjectId || '',
       projects: projects,
+      enableHabits: config.enableHabits !== false,
+      enableAddTask: config.enableAddTask !== false,
     }
   );
   Pebble.openURL(url);
@@ -860,6 +897,8 @@ Pebble.addEventListener('webviewclosed', function (e) {
     // wants persisted has to be listed here explicitly, or it silently
     // vanishes on the next settings-only save (e.g. toggling todayOnly).
     defaultProjectId: result.defaultProjectId || '',
+    enableHabits: !!result.enableHabits,
+    enableAddTask: !!result.enableAddTask,
   });
 
   if (result.password) {

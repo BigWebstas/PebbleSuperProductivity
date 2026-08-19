@@ -23,6 +23,8 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var hasToken = !!options.hasToken;
   var defaultProjectId = options.defaultProjectId || '';
   var projects = options.projects || [];
+  var enableHabits = options.enableHabits !== false;
+  var enableAddTask = options.enableAddTask !== false;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
     : 'Only used to decrypt on this phone - never sent anywhere';
@@ -129,6 +131,26 @@ projectOptions + '\n' +
 '    microphone) is filed into this project.\n' +
 '  </p>\n' +
 '\n' +
+'  <h2>Features</h2>\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="enableHabits" type="checkbox"' + (enableHabits ? ' checked' : '') + '>\n' +
+'    <label for="enableHabits">Enable Habits</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Shows the Habits row on the watch and syncs habit data to it. Turn off\n' +
+'    if you don\'t use Super Productivity\'s habit tracking.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="enableAddTask" type="checkbox"' + (enableAddTask ? ' checked' : '') + '>\n' +
+'    <label for="enableAddTask">Enable Add Task (voice)</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Shows the microphone "Add Task" row on watches with a microphone.\n' +
+'    Watches without a microphone never show this row regardless of this\n' +
+'    setting.\n' +
+'  </p>\n' +
+'\n' +
 '  <h2>Sync</h2>\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="autoSyncOnComplete" type="checkbox"' + (autoSyncOnComplete ? ' checked' : '') + '>\n' +
@@ -193,7 +215,9 @@ projectOptions + '\n' +
 '      groupByProject: document.getElementById(\'groupByProject\').checked,\n' +
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
 '      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked,\n' +
-'      defaultProjectId: document.getElementById(\'defaultProjectId\').value\n' +
+'      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
+'      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
+'      enableAddTask: document.getElementById(\'enableAddTask\').checked\n' +
 '    });\n' +
 '  });\n' +
 '\n' +

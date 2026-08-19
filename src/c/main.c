@@ -2,7 +2,7 @@
 
 // No runtime API exposes the app's own versionLabel (package.json's
 // "version") to C code - keep this in sync by hand on every version bump.
-#define APP_VERSION "0.6.8"
+#define APP_VERSION "0.6.9"
 
 // Dictionary keys are the MESSAGE_KEY_* externs pebble.h pulls in from
 // message_keys.auto.h, generated from the "messageKeys" list in
@@ -30,6 +30,8 @@
 #define KEY_HABIT_VALUE MESSAGE_KEY_HABIT_VALUE
 #define KEY_HABIT_GOAL MESSAGE_KEY_HABIT_GOAL
 #define KEY_HABIT_DELTA MESSAGE_KEY_HABIT_DELTA
+#define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
+#define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -211,6 +213,16 @@ static Task s_incoming[MAX_TASKS];
 static int s_status_code = STATUS_SYNCING;
 #define MAX_STATUS_MSG_LEN 64
 static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
+// Phone-side settings, mirrored here via optional fields on MSG_SYNC_STATUS
+// (see inbox_received_handler) - default true so a freshly-installed/
+// not-yet-synced watch behaves exactly as it always has until a real sync
+// says otherwise. Plain unconditional statics (not inside the mic-only
+// #ifndef PBL_PLATFORM_APLITE block below) - trivial size even on aplite,
+// and keeps that block's scope narrowly mic-specific. s_add_task_enabled is
+// inert on aplite regardless of its value: PBL_IF_MICROPHONE_ELSE already
+// keeps the Add Task row permanently absent there.
+static bool s_habits_enabled = true;
+static bool s_add_task_enabled = true;
 
 static TaskGroup s_groups[MAX_TASKS]; // worst case: every task its own group
 static int s_group_count = 0;
@@ -339,16 +351,60 @@ static void start_add_task_dictation(void);
 
 // ---------- menu layer callbacks ----------
 
-// Section 0 is always the "Resync" + "Habits" actions, plus "Add Task" on
-// mic-equipped platforms (2 or 3 rows, no header) - PBL_IF_MICROPHONE_ELSE
-// resolves per-platform (aplite has no mic hardware), so aplite never even
-// reports the third row, let alone draws or routes clicks to it.
+// Section 0 is always the "Resync" action, plus "Habits" and/or "Add Task"
+// when those features are enabled (settings toggled from the phone - see
+// s_habits_enabled/s_add_task_enabled) - a DYNAMIC row count (1 to 3), not a
+// fixed one. section0_row_count()/section0_row_kind() are the single shared
+// source of truth for this layout - menu_get_num_rows/menu_draw_row/
+// menu_select_click all defer to them so they can never disagree about
+// which row index means what. Add Task also stays gated by
+// PBL_IF_MICROPHONE_ELSE regardless of s_add_task_enabled (aplite has no
+// mic hardware and never reports/draws/routes clicks to that row at all).
 // When there are tasks, sections 1..s_group_count are one per project group
 // (see recompute_groups()), followed by one final section (group_idx ==
 // s_group_count) holding a single static, non-interactive row that shows
 // the app version - always the very last row in the list. When the list is
 // empty, section 0 doubles as the empty/error screen's retry target and
 // there are no further sections (no version footer on that screen either).
+typedef enum {
+  SECTION0_ROW_RESYNC,
+  SECTION0_ROW_HABITS,
+  SECTION0_ROW_ADD_TASK,
+} Section0RowKind;
+
+static int section0_row_count(void) {
+  int count = 1; // Resync always present.
+  if (s_habits_enabled) {
+    count++;
+  }
+  if (PBL_IF_MICROPHONE_ELSE(s_add_task_enabled, false)) {
+    count++;
+  }
+  return count;
+}
+
+// Maps a section-0 row index to which action occupies it. Resync is always
+// row 0; Habits (if enabled) then Add Task (if enabled) fill in after it in
+// that fixed order - matches section0_row_count()'s own counting order.
+static Section0RowKind section0_row_kind(int row) {
+  if (row == 0) {
+    return SECTION0_ROW_RESYNC;
+  }
+  int next = 1;
+  if (s_habits_enabled) {
+    if (row == next) {
+      return SECTION0_ROW_HABITS;
+    }
+    next++;
+  }
+  if (PBL_IF_MICROPHONE_ELSE(s_add_task_enabled, false)) {
+    if (row == next) {
+      return SECTION0_ROW_ADD_TASK;
+    }
+  }
+  return SECTION0_ROW_RESYNC; // unreachable for any row menu_get_num_rows reported
+}
+
 static uint16_t menu_get_num_sections(MenuLayer *menu_layer, void *context) {
   return s_task_count > 0 ? (uint16_t)(1 + s_group_count + 1) : 1;
 }
@@ -366,7 +422,7 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
     return 1;
   }
   if (section_index == 0) {
-    return PBL_IF_MICROPHONE_ELSE(3, 2); // Resync, Habits, (Add Task)
+    return (uint16_t)section0_row_count();
   }
   int group_idx = (int)section_index - 1;
   if (group_idx == s_group_count) {
@@ -560,8 +616,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
                         menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
     GRect bounds = layer_get_bounds(cell_layer);
+    Section0RowKind kind = section0_row_kind((int)cell_index->row);
 
-    if (cell_index->row == 1) {
+    if (kind == SECTION0_ROW_HABITS) {
       // Navigates to the habits (SimpleCounter) page - see
       // push_habits_window(). Icon matches the real app's own "heart_check"
       // icon for this same feature (magic-nav-config.service.ts).
@@ -585,11 +642,11 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
 
 #ifndef PBL_PLATFORM_APLITE
-    if (cell_index->row == 2) {
-      // Only reachable on mic-equipped platforms - menu_get_num_rows never
-      // reports this row on aplite, so this branch is simply never drawn
-      // there (and, per the #ifndef, not even compiled in on that
-      // platform - see s_mic_bitmap's own comment). Starts dictation via
+    if (kind == SECTION0_ROW_ADD_TASK) {
+      // Only reachable on mic-equipped platforms with the feature enabled -
+      // section0_row_kind() never returns this on aplite, or when
+      // s_add_task_enabled is false, or (on aplite specifically) not even
+      // compiled in - see s_mic_bitmap's own comment. Starts dictation via
       // menu_select_click; see start_add_task_dictation()/
       // dictation_status_callback below.
       graphics_context_set_fill_color(ctx, GColorJaegerGreen);
@@ -947,11 +1004,13 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     return;
   }
   if (cell_index->section == 0) {
-    if (cell_index->row == 1) {
+    Section0RowKind kind = section0_row_kind((int)cell_index->row);
+    if (kind == SECTION0_ROW_HABITS) {
       push_habits_window();
 #ifndef PBL_PLATFORM_APLITE
-    } else if (cell_index->row == 2) {
-      // Only reachable on mic-equipped platforms (see menu_get_num_rows).
+    } else if (kind == SECTION0_ROW_ADD_TASK) {
+      // Only reachable on mic-equipped platforms with the feature enabled
+      // (see menu_get_num_rows/section0_row_kind).
       start_add_task_dictation();
 #endif
     } else {
@@ -1237,6 +1296,20 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         s_status_msg[MAX_STATUS_MSG_LEN - 1] = '\0';
       } else {
         s_status_msg[0] = '\0';
+      }
+      // Feature toggles set from the phone's own pairing settings - optional
+      // fields (same dict_find + null-check pattern as STATUS_CODE above),
+      // absent-means-unchanged so an old phone build talking to this watch
+      // (or vice versa) can't accidentally reset either flag. Read before
+      // reload_data below so a settings change is reflected in the very
+      // same redraw, not a subsequent one.
+      Tuple *habits_enabled_tuple = dict_find(iterator, KEY_HABITS_ENABLED);
+      if (habits_enabled_tuple) {
+        s_habits_enabled = habits_enabled_tuple->value->int32 != 0;
+      }
+      Tuple *add_task_enabled_tuple = dict_find(iterator, KEY_ADD_TASK_ENABLED);
+      if (add_task_enabled_tuple) {
+        s_add_task_enabled = add_task_enabled_tuple->value->int32 != 0;
       }
       // update_empty_layer() only redraws the empty-state text layer, which
       // stays hidden while s_task_count > 0 - reload_data is what actually
