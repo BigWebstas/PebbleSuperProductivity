@@ -39,7 +39,16 @@ enum {
 
 #define MAX_TASKS 30
 #define MAX_TITLE_LEN 64
-#define MAX_ID_LEN 40
+// Plain generated task ids are ~21 chars, but calendar-integration ids
+// (generateCalendarTaskId: `cal_${issueProviderId}_${calendarEventId}`) have
+// no fixed cap - issueProviderId alone is a ~21-char id, and calendarEventId
+// is an arbitrary iCal UID that can itself carry a recurrence-instance
+// timestamp suffix. A real one confirmed live on a real account ran 79
+// chars. 40 silently truncated it: the truncated id doesn't match any real
+// task server-side, so a toggle/track-time upload against it touches
+// nothing, while the task's TITLE (a separate field) still displayed
+// correctly - completely invisible until you act on that specific task.
+#define MAX_ID_LEN 96
 #define MAX_PROJECT_LEN 32
 
 typedef struct {
@@ -712,8 +721,17 @@ static void stop_syncing_animation(void) {
 
 static void syncing_timer_callback(void *data) {
   s_syncing_dots = (s_syncing_dots + 1) % 4;
-  static char s_syncing_text[16];
-  snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing%.*s", s_syncing_dots, "...");
+  static char s_syncing_text[MAX_STATUS_MSG_LEN + 16];
+  // A large first sync (or any multi-page catch-up) sends progress as a
+  // plain "NN%" STATUS_MSG alongside STATUS_SYNCING (see doSync()'s
+  // pullPage() in index.js) - shown here instead of the bare dots once
+  // it's non-empty. A single-page sync usually finishes before this field
+  // is ever populated, so it stays on the plain dot animation.
+  if (s_status_msg[0] != '\0') {
+    snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing %s%.*s", s_status_msg, s_syncing_dots, "...");
+  } else {
+    snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing%.*s", s_syncing_dots, "...");
+  }
   text_layer_set_text(s_empty_layer, s_syncing_text);
   s_syncing_timer = app_timer_register(SYNCING_ANIM_INTERVAL_MS, syncing_timer_callback, NULL);
 }
