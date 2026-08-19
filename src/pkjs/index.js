@@ -477,21 +477,24 @@ function handleTrackTimeStop(taskId, trackedMs) {
   }
 
   var today = store.todayStr();
-  var state = loadState();
-  var task = state.task[taskId];
-  if (task) {
-    // Mirrors the real reducer's own additive merge (task.reducer.ts) -
-    // see the matching comment on task-store.js's
-    // '[TimeTracking] Sync time spent' replay case for why this has to be
-    // additive rather than a replace.
-    var timeSpentOnDay = Object.assign({}, task.timeSpentOnDay);
-    timeSpentOnDay[today] = (timeSpentOnDay[today] || 0) + trackedMs;
-    var timeSpent = 0;
-    Object.keys(timeSpentOnDay).forEach(function (d) { timeSpent += timeSpentOnDay[d]; });
-    state.task[taskId] = Object.assign({}, task, { timeSpentOnDay: timeSpentOnDay, timeSpent: timeSpent });
-    saveState(state);
-  }
-
+  // Deliberately NOT an optimistic local bump here, unlike
+  // handleTaskToggle's isDone set. That bump is a plain replace (applying
+  // it twice is harmless), but time-tracking is additive - bumping
+  // timeSpentOnDay here, before upload, guarantees the same delta gets
+  // counted a SECOND time moments later when this exact op comes back down
+  // from the server and gets replayed by the normal additive-merge path
+  // (task-store.js's '[TimeTracking] Sync time spent' case). And if the
+  // upload never succeeds, the bump is never reverted either - it just
+  // strands there permanently, since nothing here tracks "this local delta
+  // is still unconfirmed." Both were real: found via live data showing a
+  // task's watch-displayed total far exceeding the sum of everything the
+  // server had actually ever accepted from it. The watch's own C-side
+  // optimistic bump (stop_tracking_and_report) is safe by comparison - it
+  // gets wholesale-replaced (not additively merged) by the next
+  // TASK_SYNC_END, which runAutoSyncAfterOp's follow-up doSync() below
+  // already triggers within moments, so skipping the equivalent bump here
+  // only costs a brief instant of staleness in the phone's own cache, never
+  // permanent drift.
   var crypto = getCrypto();
   // Confirmed against time-tracking.actions.ts's syncTimeSpent action
   // creator: the payload is exactly { taskId, date, duration } - duration

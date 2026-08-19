@@ -3,6 +3,7 @@ node_modules/
 *.pbw
 .DS_Store
 .lock-waf_*_build
+CLAUDE.md
 
 # Claude Code local settings (per-machine permissions, not shared)
 .claude/settings.local.json
