@@ -33,6 +33,8 @@ Productivity's own **SuperSync** server.
 
 ## Known limitations
 
+- **Initial Sync slow?** The initial sync and decrypt can take several minutes upwards of 5+
+- **Add Task Requirements.** The Add Task feature requires a newer Pebble with a Mic and a steady internet connection as its done on the phone via the cloud.
 - **Only a subset of Super Productivity actions round-trip.** Task
   completion, scheduling, backlog moves, project moves, subtask
   promotion/demotion, time tracking, and habit adjustments are handled;
