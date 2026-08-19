@@ -51,11 +51,11 @@ function todayStr() {
 }
 
 // dueWithTime is a ms timestamp (a task scheduled for a specific time of
-// day), separate from dueDay (a plain date) - the real app sets both
-// together when scheduling from its UI, but they're independent fields, so
-// a todayOnly filter keyed on dueDay alone would miss a dueWithTime-only
-// task. No custom "start of day" offset here (unlike the real app's
-// startOfNextDayDiffMs) - just the phone's local calendar day.
+// day). The real app enforces dueDay/dueWithTime as MUTUALLY EXCLUSIVE -
+// setting one clears the other (task-shared-scheduling.reducer.ts) - so a
+// todayOnly filter keyed on dueDay alone would miss a dueWithTime-only
+// task entirely. No custom "start of day" offset here (unlike the real
+// app's startOfNextDayDiffMs) - just the phone's local calendar day.
 function msIsToday(ms) {
   return dateToDateStr(new Date(ms)) === todayStr();
 }
@@ -424,16 +424,35 @@ function titleCompare(a, b) {
 // row's `project` is '' - a single implicit group, matching the flat list
 // this had before grouping existed.
 //
+// Mirrors computeOrderedTaskIdsForToday in the real app's
+// work-context.selectors.ts: dueWithTime takes priority when set (checked
+// against today's calendar day) - dueDay is only consulted as a fallback
+// when dueWithTime is NOT set. This isn't just an arbitrary tie-break: it's
+// how the real selector resolves legacy data that (pre dueDay/dueWithTime
+// mutual exclusivity - see task-shared-scheduling.reducer.ts) can carry
+// both fields, where a stale leftover dueDay must not override a dueWithTime
+// that says otherwise.
+function taskIsPlannedForToday(t, today) {
+  if (t.dueWithTime) {
+    return msIsToday(t.dueWithTime);
+  }
+  return t.dueDay === today;
+}
+
 // When todayOnly is true, tasks are further restricted to ones actually
-// planned for today: dueDay === today, OR dueWithTime falls on today's
-// calendar day (a task scheduled for a specific time can carry dueWithTime
-// without dueDay also being set) - not undated, overdue, or future-dated
-// ones. This mirrors the real app's virtual TODAY_TAG, whose membership is
-// likewise derived from dueDay/dueWithTime rather than a synced list
-// (boards.util.ts: "TODAY_TAG is virtual: membership derives from
-// dueDay/dueWithTime"). Doesn't consider deadlineDay/deadlineWithTime or
-// explicit tag assignment - not a full port, just enough to match what the
-// desktop's Today page actually shows for the common case.
+// planned for today (see taskIsPlannedForToday) - not undated, overdue, or
+// future-dated ones. This mirrors the real app's virtual TODAY_TAG, whose
+// membership is likewise derived from dueDay/dueWithTime rather than a
+// synced list (boards.util.ts: "TODAY_TAG is virtual: membership derives
+// from dueDay/dueWithTime"). A main task with no due date of its own but a
+// SUBTASK due today still qualifies - the real selector evaluates every
+// task/subtask independently and would otherwise list that subtask as its
+// own top-level Today entry; this app always nests subtasks under their
+// parent (see pushTaskAndSubtasks), so the parent has to be included for
+// the subtask to have somewhere to nest. Doesn't consider
+// deadlineDay/deadlineWithTime or explicit tag assignment - not a full
+// port, just enough to match what the desktop's Today page actually shows
+// for the common case.
 function getActiveTasks(state, limit, groupByProject, todayOnly) {
   var allTasks = state.task || {};
   var today = todayStr();
@@ -441,7 +460,16 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
     .map(function (id) { return allTasks[id]; })
     .filter(function (t) { return t && isMainTask(t) && !t.__inBacklog; })
     .filter(function (t) {
-      return !todayOnly || t.dueDay === today || (t.dueWithTime && msIsToday(t.dueWithTime));
+      if (!todayOnly) {
+        return true;
+      }
+      if (taskIsPlannedForToday(t, today)) {
+        return true;
+      }
+      return (t.subTaskIds || []).some(function (subId) {
+        var sub = allTasks[subId];
+        return sub && taskIsPlannedForToday(sub, today);
+      });
     });
 
   function withinGroupSort(a, b) {

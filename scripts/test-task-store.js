@@ -445,6 +445,69 @@ check('getActiveTasks(todayOnly=true) also keeps a dueWithTime-only task schedul
   assert.deepStrictEqual(tasks.map((t) => t.id), ['a']);
 });
 
+check('getActiveTasks(todayOnly=true) includes a main task whose SUBTASK (not the parent) is due today', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      // Parent has no due date of its own - only its subtask does.
+      addTask({ id: 'main', title: 'Undated parent', isDone: false, subTaskIds: ['sub1', 'sub2'] }),
+      addTask({ id: 'sub1', title: 'Due today subtask', isDone: false, dueDay: today, parentId: 'main' }),
+      addTask({ id: 'sub2', title: 'Undated subtask', isDone: false, parentId: 'main' }),
+      addTask({ id: 'other', title: 'Unrelated undated task', isDone: false }),
+    ],
+    state
+  );
+  const tasks = active(state, null, false, true);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1', 'sub2']);
+});
+
+check('getActiveTasks(todayOnly=true) prefers dueWithTime over a stale dueDay on legacy dual-field data', () => {
+  const state = store.emptyState();
+  const now = new Date();
+  const tomorrowAt9am = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 9, 0, 0).getTime();
+  store.applyOperations(
+    [
+      // Legacy data: dueDay says today, but dueWithTime (which takes
+      // priority once set) says tomorrow - the real app's selector would
+      // exclude this from today, not include it via the dueDay fallback.
+      addTask({ id: 'a', title: 'Stale dueDay, real time is tomorrow', isDone: false, dueDay: today, dueWithTime: tomorrowAt9am }),
+    ],
+    state
+  );
+  const tasks = active(state, null, false, true);
+  assert.deepStrictEqual(tasks.map((t) => t.id), []);
+});
+
+check('getActiveTasks(todayOnly=true) includes a recurring task\'s materialized today instance', () => {
+  // Recurring tasks have no synced representation of their own on "today" -
+  // the desktop/mobile app's TaskRepeatCfgService materializes each day's
+  // occurrence as an ordinary addTask op with dueDay baked in
+  // (task-repeat-cfg.service.ts's _getTaskRepeatTemplate/
+  // _getActionsForTaskRepeatCfg: dispatches TaskSharedActions.addTask with
+  // isAddToBacklog: false and the task's `additional.dueDay` set to the
+  // target day), carrying a repeatCfgId field the real Task model has but
+  // this replay never reads. So once another client has actually created
+  // today's instance, it's structurally indistinguishable here from any
+  // other task with dueDay === today - no repeat-specific handling needed,
+  // just confirming the ordinary addTask + dueDay path already covers it.
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({
+        id: 'repeat-cfg-1_2026-08-18',
+        title: 'Daily standup',
+        isDone: false,
+        dueDay: today,
+        repeatCfgId: 'repeat-cfg-1',
+        created: Date.now(),
+      }, { isAddToBacklog: false, isAddToBottom: true }),
+    ],
+    state
+  );
+  const tasks = active(state, null, false, true);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['repeat-cfg-1_2026-08-18']);
+});
+
 check('getActiveTasks nests subtasks under their main task, indented', () => {
   const state = store.emptyState();
   store.applyOperations(
