@@ -1,5 +1,9 @@
 #include <pebble.h>
 
+// No runtime API exposes the app's own versionLabel (package.json's
+// "version") to C code - keep this in sync by hand on every version bump.
+#define APP_VERSION "0.6.5"
+
 // Dictionary keys are the MESSAGE_KEY_* externs pebble.h pulls in from
 // message_keys.auto.h, generated from the "messageKeys" list in
 // package.json - NOT small hand-picked integers. AppMessage assigns each
@@ -306,10 +310,13 @@ static void update_habits_empty_layer(void);
 
 // Section 0 is always the "Resync" + "Habits" actions (2 rows, no header).
 // When there are tasks, sections 1..s_group_count are one per project group
-// (see recompute_groups()); when the list is empty, section 0 doubles as the
-// empty/error screen's retry target and there are no further sections.
+// (see recompute_groups()), followed by one final section (group_idx ==
+// s_group_count) holding a single static, non-interactive row that shows
+// the app version - always the very last row in the list. When the list is
+// empty, section 0 doubles as the empty/error screen's retry target and
+// there are no further sections (no version footer on that screen either).
 static uint16_t menu_get_num_sections(MenuLayer *menu_layer, void *context) {
-  return s_task_count > 0 ? (uint16_t)(1 + s_group_count) : 1;
+  return s_task_count > 0 ? (uint16_t)(1 + s_group_count + 1) : 1;
 }
 
 static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
@@ -328,7 +335,10 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
     return 2; // Resync row, Habits row
   }
   int group_idx = (int)section_index - 1;
-  if (group_idx >= s_group_count) {
+  if (group_idx == s_group_count) {
+    return 1; // version-footer row
+  }
+  if (group_idx > s_group_count) {
     return 0;
   }
   return (uint16_t)s_groups[group_idx].count;
@@ -591,6 +601,19 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, TITLE_BOX_Y + 2, ROW_ICON_SIZE, ROW_ICON_SIZE);
     graphics_context_set_compositing_mode(ctx, GCompOpSet);
     graphics_draw_bitmap_in_rect(ctx, is_selected ? s_check_white_bitmap : s_check_bitmap, icon_rect);
+    return;
+  }
+  if ((int)cell_index->section - 1 == s_group_count) {
+    // Static version-footer row, always last - ignores is_selected (never
+    // inverts like a real row would) and menu_select_click/long_click
+    // already no-op here since resolve_task_at returns NULL for a
+    // group_idx past s_group_count, so this never behaves like a task row.
+    GRect bounds = layer_get_bounds(cell_layer);
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    graphics_context_set_text_color(ctx, GColorDarkGray);
+    graphics_draw_text(ctx, "v" APP_VERSION, fonts_get_system_font(FONT_KEY_GOTHIC_14), bounds,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
     return;
   }
   Task *task = resolve_task_at(*cell_index);
@@ -1179,10 +1202,13 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // app uses, so a highlighted habit visually ties back to the row that
   // brought you here.
   GColor bg = is_selected ? GColorVividCerulean : GColorWhite;
+  // Unlike a done TASK's title (which dims - see menu_draw_row), a done
+  // HABIT's title stays full-strength black/white: the "- Done" subtitle
+  // already carries that signal, and a habit routinely gets incremented
+  // past goal (still "done") or decremented back below it on the same day,
+  // so dimming here would flicker on every single increment/decrement
+  // rather than mark a settled, no-longer-relevant task.
   GColor fg = is_selected ? GColorWhite : GColorBlack;
-  if (habit->done) {
-    fg = is_selected ? GColorLightGray : GColorDarkGray;
-  }
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_text_color(ctx, fg);
