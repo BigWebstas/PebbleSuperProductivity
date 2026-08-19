@@ -369,6 +369,46 @@ check('addTask with isAddToBacklog excludes the task from the active list', () =
   assert.deepStrictEqual(active(state), []);
 });
 
+check('a watch-dictated Add Task upload (index.js\'s handleAddTask shape) round-trips through replay', () => {
+  // Regression test for the voice-add-task feature: handleAddTask in
+  // index.js builds the actionPayload as { task, workContextId,
+  // workContextType, isAddToBacklog, isAddToBottom, isIgnoreShortSyntax } -
+  // this mirrors that exact shape (not just { task: ... } like the addTask()
+  // helper above) to confirm it's genuinely decodable by the real replay
+  // path, not just written to look plausible.
+  const state = store.emptyState();
+  const task = {
+    id: 'task-abc123',
+    subTaskIds: [],
+    timeSpentOnDay: {},
+    timeSpent: 0,
+    timeEstimate: 0,
+    isDone: false,
+    title: 'Mix insecticide for fruit trees',
+    tagIds: [],
+    created: Date.now(),
+    attachments: [],
+    projectId: 'INBOX_PROJECT',
+  };
+  store.applyOperations(
+    [
+      taskEntry('[Task Shared] addTask', {
+        task: task,
+        workContextId: 'INBOX_PROJECT',
+        workContextType: 'PROJECT',
+        isAddToBacklog: false,
+        isAddToBottom: false,
+        isIgnoreShortSyntax: true,
+      }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task['task-abc123'].title, 'Mix insecticide for fruit trees');
+  assert.strictEqual(state.task['task-abc123'].projectId, 'INBOX_PROJECT');
+  assert.strictEqual(state.task['task-abc123'].__inBacklog, false);
+  assert.deepStrictEqual(active(state).map((t) => t.id), ['task-abc123']);
+});
+
 check('"[Project] Move Task from regular to backlog" removes the task from the active list', () => {
   const state = store.emptyState();
   store.applyOperations(

@@ -2,7 +2,7 @@
 
 // No runtime API exposes the app's own versionLabel (package.json's
 // "version") to C code - keep this in sync by hand on every version bump.
-#define APP_VERSION "0.6.6"
+#define APP_VERSION "0.6.7"
 
 // Dictionary keys are the MESSAGE_KEY_* externs pebble.h pulls in from
 // message_keys.auto.h, generated from the "messageKeys" list in
@@ -44,6 +44,7 @@ enum {
   MSG_HABIT_ITEM = 9,       // phone -> watch: one habit
   MSG_HABIT_SYNC_END = 10,  // phone -> watch: list is complete, redraw
   MSG_HABIT_ADJUST = 11,    // watch -> phone: HABIT_ID + HABIT_DELTA (+1 or -1)
+  MSG_TASK_ADD = 12,        // watch -> phone: TASK_TITLE (new task's dictated title)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -152,6 +153,33 @@ static GBitmap *s_check_bitmap;
 static GBitmap *s_check_white_bitmap;
 static GBitmap *s_heart_bitmap;
 static GBitmap *s_heart_white_bitmap;
+// Mic/dictation state - compiled out entirely on aplite (#ifndef, not just
+// a runtime PBL_IF_MICROPHONE_ELSE check), matching MAX_HABITS' own
+// #ifdef PBL_PLATFORM_APLITE precedent elsewhere in this file: aplite has no
+// mic hardware and can never reach the "Add Task" row (see
+// menu_get_num_rows), so paying for this code/data there at all - not just
+// leaving it unreached at runtime - would eat into a budget this file has
+// otherwise been careful to protect (aplite's RAM headroom dropped from a
+// ~314-byte baseline to ~121 bytes when this was still a runtime-only guard,
+// confirmed via pebble build's own memory report).
+#ifndef PBL_PLATFORM_APLITE
+static GBitmap *s_mic_bitmap;
+static GBitmap *s_mic_white_bitmap;
+// One session for the app's whole lifetime (created in window_load,
+// destroyed in window_unload) - the SDK's own dictation_session_create doc
+// confirms a session "can be used more than once" and "can be restarted
+// multiple times after the UI is exited or stopped", so there's no need to
+// recreate it per "Add Task" press.
+static DictationSession *s_dictation_session;
+// dictation_session_start()'s own return value doesn't cleanly express
+// "a session is already in progress" (it returns DictationSessionStatus,
+// not a bool, despite the header's prose describing boolean-ish semantics) -
+// this flag is a self-contained guard against a rapid double-press starting
+// a second session on top of one already running, independent of whatever
+// the SDK does internally. Set before starting, cleared unconditionally at
+// the top of the status callback (every status, not just success).
+static bool s_dictation_pending;
+#endif
 // A sync error's full message is otherwise only visible as a single-line,
 // easily-missed subtitle on the Resync row (or squeezed into the small
 // empty-state text when there's no cached list yet) - this takes over the
@@ -305,10 +333,16 @@ static void request_sync(void);
 static void hide_error_overlay(void);
 static void push_habits_window(void);
 static void update_habits_empty_layer(void);
+#ifndef PBL_PLATFORM_APLITE
+static void start_add_task_dictation(void);
+#endif
 
 // ---------- menu layer callbacks ----------
 
-// Section 0 is always the "Resync" + "Habits" actions (2 rows, no header).
+// Section 0 is always the "Resync" + "Habits" actions, plus "Add Task" on
+// mic-equipped platforms (2 or 3 rows, no header) - PBL_IF_MICROPHONE_ELSE
+// resolves per-platform (aplite has no mic hardware), so aplite never even
+// reports the third row, let alone draws or routes clicks to it.
 // When there are tasks, sections 1..s_group_count are one per project group
 // (see recompute_groups()), followed by one final section (group_idx ==
 // s_group_count) holding a single static, non-interactive row that shows
@@ -332,7 +366,7 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
     return 1;
   }
   if (section_index == 0) {
-    return 2; // Resync row, Habits row
+    return PBL_IF_MICROPHONE_ELSE(3, 2); // Resync, Habits, (Add Task)
   }
   int group_idx = (int)section_index - 1;
   if (group_idx == s_group_count) {
@@ -550,6 +584,28 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       return;
     }
 
+#ifndef PBL_PLATFORM_APLITE
+    if (cell_index->row == 2) {
+      // Only reachable on mic-equipped platforms - menu_get_num_rows never
+      // reports this row on aplite, so this branch is simply never drawn
+      // there (and, per the #ifndef, not even compiled in on that
+      // platform - see s_mic_bitmap's own comment). Starts dictation via
+      // menu_select_click; see start_add_task_dictation()/
+      // dictation_status_callback below.
+      graphics_context_set_fill_color(ctx, GColorJaegerGreen);
+      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
+      GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, 30);
+      graphics_draw_text(ctx, "Add Task", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
+                               ROW_ICON_SIZE, ROW_ICON_SIZE);
+      graphics_context_set_compositing_mode(ctx, GCompOpSet);
+      graphics_draw_bitmap_in_rect(ctx, is_selected ? s_mic_white_bitmap : s_mic_bitmap, icon_rect);
+      return;
+    }
+#endif
+
     // Reflects live sync status so a resync failure is visible even while
     // the previously-cached list is still showing, instead of being
     // silently swallowed (only the empty/error screen showed status
@@ -763,6 +819,57 @@ static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
   app_message_outbox_send();
 }
 
+#ifndef PBL_PLATFORM_APLITE
+static void send_task_add(const char *title) {
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+    return;
+  }
+  dict_write_int32(iter, KEY_MSG_TYPE, MSG_TASK_ADD);
+  dict_write_cstring(iter, KEY_TASK_TITLE, title);
+  app_message_outbox_send();
+}
+
+// Fires when dictation finishes (success, cancel, or failure). Only ever
+// registered on mic-equipped platforms - compiled out entirely on aplite
+// (see s_mic_bitmap's own comment for why).
+static void dictation_status_callback(DictationSession *session, DictationSessionStatus status,
+                                       char *transcription, void *context) {
+  s_dictation_pending = false;
+  if (status == DictationSessionStatusSuccess) {
+    send_task_add(transcription);
+    return;
+  }
+  if (status == DictationSessionStatusFailureTranscriptionRejected) {
+    // The user declined the transcription on the confirmation screen (which
+    // this app leaves enabled - dictation_session_enable_confirmation) -
+    // this is a cancel, not a failure, so it's a silent no-op, same as
+    // long-selecting a done task is (see menu_select_long_click).
+    return;
+  }
+  // Every other failure (no speech, connectivity, disabled, internal,
+  // recognizer error) already gets a dialog from the OS's own dictation UI
+  // by default (dictation_session_enable_error_dialogs, left at its default
+  // "on" here) - duplicating that in this app's own error overlay would be
+  // redundant, not closing a silent gap the way the outbox/STATUS_NOT_PAIRED
+  // fixes did (those had no other signal at all). Logged only.
+  APP_LOG(APP_LOG_LEVEL_INFO, "dictation failed, status=%d", (int)status);
+}
+
+static void start_add_task_dictation(void) {
+  if (s_dictation_pending || !s_dictation_session) {
+    // Ignores a rapid double-press (own guard, not relying on
+    // dictation_session_start()'s own return value - see s_dictation_pending's
+    // comment) and is a no-op if this ever gets called before window_load
+    // has created the session (shouldn't happen: the row that reaches this
+    // is itself gated by PBL_IF_MICROPHONE_ELSE).
+    return;
+  }
+  s_dictation_pending = true;
+  dictation_session_start(s_dictation_session);
+}
+#endif
+
 static void tracking_tick_callback(void *data) {
   // Only the elapsed-time text changes each tick, not the row data itself -
   // mark_dirty (a repaint) rather than reload_data (which also re-asks for
@@ -842,6 +949,11 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
   if (cell_index->section == 0) {
     if (cell_index->row == 1) {
       push_habits_window();
+#ifndef PBL_PLATFORM_APLITE
+    } else if (cell_index->row == 2) {
+      // Only reachable on mic-equipped platforms (see menu_get_num_rows).
+      start_add_task_dictation();
+#endif
     } else {
       // The "Resync" row atop the populated list.
       request_sync();
@@ -1385,6 +1497,18 @@ static void window_load(Window *window) {
   s_heart_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_HEART_CHECK);
   s_heart_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_HEART_CHECK_WHITE);
 
+  // Add Task row + dictation session - mic-equipped platforms only, compiled
+  // out entirely on aplite (see s_mic_bitmap's own comment for why this is
+  // a real #ifndef and not just a runtime check).
+#ifndef PBL_PLATFORM_APLITE
+  s_mic_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_MICROPHONE);
+  s_mic_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_MICROPHONE_WHITE);
+  s_dictation_session = dictation_session_create(MAX_TITLE_LEN, dictation_status_callback, NULL);
+  // Lets the user review/retry the transcription before it's sent, rather
+  // than blind-sending whatever the recognizer heard.
+  dictation_session_enable_confirmation(s_dictation_session, true);
+#endif
+
   // Full content_bounds (not the logo-strip-shrunk box the empty-state text
   // gets), and added last so it draws on top of every other layer here
   // when shown - covers the whole content area, not just another line of
@@ -1428,6 +1552,11 @@ static void window_unload(Window *window) {
   gbitmap_destroy(s_check_white_bitmap);
   gbitmap_destroy(s_heart_bitmap);
   gbitmap_destroy(s_heart_white_bitmap);
+#ifndef PBL_PLATFORM_APLITE
+  dictation_session_destroy(s_dictation_session);
+  gbitmap_destroy(s_mic_bitmap);
+  gbitmap_destroy(s_mic_white_bitmap);
+#endif
   status_bar_layer_destroy(s_status_bar);
 }
 

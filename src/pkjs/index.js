@@ -20,6 +20,7 @@ var MSG_HABIT_SYNC_START = 8;
 var MSG_HABIT_ITEM = 9;
 var MSG_HABIT_SYNC_END = 10;
 var MSG_HABIT_ADJUST = 11; // watch -> phone: HABIT_ID + HABIT_DELTA (+1 or -1)
+var MSG_TASK_ADD = 12; // watch -> phone: TASK_TITLE (new task's dictated title)
 
 var STATUS_OK = 0;
 var STATUS_SYNCING = 1;
@@ -156,6 +157,14 @@ function getCrypto() {
 
 function generateOpId() {
   return 'op-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+}
+
+// Real task ids are nanoid() (~21 chars) server-side, but the server only
+// validates entityId is a non-empty string <= 255 chars (validation.service.ts)
+// - no nanoid-specific format required - so this just needs to be unique,
+// same ad-hoc shape generateOpId() above already uses for op ids.
+function generateTaskId() {
+  return 'task-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
 }
 
 // ---------------- AppMessage out ----------------
@@ -645,6 +654,103 @@ function handleHabitAdjust(habitId, delta) {
     });
 }
 
+// Watch-dictated "Add Task" - the only watch-initiated write that creates a
+// brand-new entity rather than toggling/adjusting an existing one.
+// config.defaultProjectId is a setting local to this app's own pairing page
+// (not a read of the real app's own GlobalConfig.tasks.defaultProjectId) -
+// falls back to Super Productivity's built-in Inbox project when unset.
+function handleAddTask(title) {
+  if (!title || !String(title).trim()) {
+    // Defensive - the watch's own dictation confirmation UI shouldn't ever
+    // hand back an empty string, but don't trust that blindly.
+    return;
+  }
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+
+  var projectId = config.defaultProjectId || 'INBOX_PROJECT';
+  var task = {
+    id: generateTaskId(),
+    subTaskIds: [],
+    timeSpentOnDay: {},
+    timeSpent: 0,
+    timeEstimate: 0,
+    isDone: false,
+    title: String(title).trim(),
+    tagIds: [],
+    created: Date.now(),
+    attachments: [],
+    projectId: projectId,
+  };
+
+  // Matches addTask's real action payload shape (task-shared.actions.ts):
+  // { task, workContextId, workContextType, isAddToBacklog, isAddToBottom }.
+  // workContextType is unconditionally 'PROJECT' here - both the configured
+  // default project and the Inbox fallback are Project entities, never a
+  // Tag, so there's no tag-context case to handle. isIgnoreShortSyntax is
+  // set defensively (op-log replay doesn't actually re-dispatch through the
+  // real app's short-syntax Effect, so this isn't currently load-bearing,
+  // but costs nothing and guards against that changing later).
+  var payload = {
+    actionPayload: {
+      task: task,
+      workContextId: projectId,
+      workContextType: 'PROJECT',
+      isAddToBacklog: false,
+      isAddToBottom: false,
+      isIgnoreShortSyntax: true,
+    },
+  };
+
+  // Optimistic local update via the SAME replay path a real synced addTask
+  // op goes through (task-store.js's applyTaskAction 'addTask' case), not a
+  // hand-rolled merge - so this can't drift from what replay actually does.
+  var state = loadState();
+  store.applyOperations(
+    [{ op: { entityType: 'TASK', actionType: '[Task Shared] addTask', opType: 'CRT', payload: payload, isPayloadEncrypted: false } }],
+    state
+  );
+  saveState(state);
+
+  // Unlike toggle/habit-adjust, the watch has no way to render a task it's
+  // never seen on its own - push the updated list right away rather than
+  // waiting for uploadSingleOp/runAutoSyncAfterOp's follow-up sync to
+  // eventually get around to it.
+  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly));
+
+  var crypto = getCrypto();
+  var clientId = getOrCreateClientId();
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  var op = {
+    id: generateOpId(),
+    opType: 'CRT',
+    actionType: '[Task Shared] addTask',
+    entityType: 'TASK',
+    entityId: task.id,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+
+  var addTaskFailureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      addTaskFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload new task: ' + addTaskFailureMsg);
+      sendStatus(STATUS_ERROR, addTaskFailureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, addTaskFailureMsg);
+    });
+}
+
 // ---------------- Pebble event wiring ----------------
 
 Pebble.addEventListener('ready', function () {
@@ -667,6 +773,9 @@ Pebble.addEventListener('appmessage', function (e) {
     case MSG_HABIT_ADJUST:
       handleHabitAdjust(payload.HABIT_ID, payload.HABIT_DELTA);
       break;
+    case MSG_TASK_ADD:
+      handleAddTask(payload.TASK_TITLE);
+      break;
     default:
       break;
   }
@@ -674,6 +783,10 @@ Pebble.addEventListener('appmessage', function (e) {
 
 Pebble.addEventListener('showConfiguration', function () {
   var config = loadConfig() || {};
+  var state = loadState();
+  var projects = Object.keys(state.project || {}).map(function (id) {
+    return { id: id, title: state.project[id].title };
+  });
   var url = pairingPage.buildPairingPageUrl(
     config.baseUrl || supersync.DEFAULT_BASE_URL,
     config.email || '',
@@ -688,6 +801,12 @@ Pebble.addEventListener('showConfiguration', function () {
       // webviewclosed below for the other half of this.
       hasPassword: !!localStorage.getItem('sp_password'),
       hasToken: !!config.jwt,
+      // "Add Task" dictation's target project - a setting local to this
+      // app's own pairing page, separate from the real app's own
+      // GlobalConfig.tasks.defaultProjectId. Empty string means "fall back
+      // to Inbox", not "unset vs configured" - see handleAddTask.
+      defaultProjectId: config.defaultProjectId || '',
+      projects: projects,
     }
   );
   Pebble.openURL(url);
@@ -737,6 +856,10 @@ Pebble.addEventListener('webviewclosed', function (e) {
     groupByProject: !!result.groupByProject,
     todayOnly: !!result.todayOnly,
     autoSyncOnComplete: !!result.autoSyncOnComplete,
+    // saveConfig() is a full replace, not a merge - every field the app
+    // wants persisted has to be listed here explicitly, or it silently
+    // vanishes on the next settings-only save (e.g. toggling todayOnly).
+    defaultProjectId: result.defaultProjectId || '',
   });
 
   if (result.password) {

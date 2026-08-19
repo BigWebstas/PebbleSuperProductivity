@@ -9,7 +9,7 @@
   h1 { font-size: 18px; }
   h2 { font-size: 15px; margin-top: 24px; }
   label { display: block; margin-top: 14px; font-size: 13px; font-weight: 600; }
-  input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; }
+  input, select { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; }
   .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
   .checkbox-row input { width: auto; margin: 0; }
   .checkbox-row label { display: inline; margin: 0; font-weight: normal; }
@@ -68,6 +68,17 @@
     the watch, instead of one flat list.
   </p>
 
+  <label for="defaultProjectId">Default project for "Add Task"</label>
+  <select id="defaultProjectId">
+    <option value="">Inbox (default)</option>
+    <!-- pairing-page.js (what actually ships) fills this with the synced
+         project list - this static mirror has no data source of its own. -->
+  </select>
+  <p class="hint">
+    A task you dictate on the watch (the "Add Task" row, on watches with a
+    microphone) is filed into this project.
+  </p>
+
   <button id="saveBtn">Save &amp; sync</button>
   <button id="cancelBtn" class="secondary">Cancel</button>
 
@@ -111,7 +122,8 @@
       email: document.getElementById('email').value.trim(),
       password: document.getElementById('password').value,
       jwt: jwt,
-      groupByProject: document.getElementById('groupByProject').checked
+      groupByProject: document.getElementById('groupByProject').checked,
+      defaultProjectId: document.getElementById('defaultProjectId').value
     });
   });
 

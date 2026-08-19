@@ -21,12 +21,22 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var autoSyncOnComplete = !!options.autoSyncOnComplete;
   var hasPassword = !!options.hasPassword;
   var hasToken = !!options.hasToken;
+  var defaultProjectId = options.defaultProjectId || '';
+  var projects = options.projects || [];
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
     : 'Only used to decrypt on this phone - never sent anywhere';
   var jwtPlaceholder = hasToken
     ? 'Already saved - leave blank to keep it'
     : 'Paste the token shown after you log in below';
+  // Project titles are arbitrary user text (unlike every other value
+  // templated into this page so far) - must be escaped same as
+  // baseUrl/email, or a title containing a stray '"' or '<' could break out
+  // of the <option> markup.
+  var projectOptions = projects.map(function (p) {
+    var selected = p.id === defaultProjectId ? ' selected' : '';
+    return '<option value="' + escapeHtmlAttr(p.id) + '"' + selected + '>' + escapeHtmlAttr(p.title) + '</option>';
+  }).join('\n');
   var html = '<!doctype html>\n' +
 '<html lang="en">\n' +
 '<head>\n' +
@@ -38,7 +48,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  h1 { font-size: 18px; }\n' +
 '  h2 { font-size: 15px; margin-top: 24px; }\n' +
 '  label { display: block; margin-top: 14px; font-size: 13px; font-weight: 600; }\n' +
-'  input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; }\n' +
+'  input, select { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; }\n' +
 '  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }\n' +
 '  .checkbox-row input { width: auto; margin: 0; }\n' +
 '  .checkbox-row label { display: inline; margin: 0; font-weight: normal; }\n' +
@@ -109,6 +119,16 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    future-dated tasks.\n' +
 '  </p>\n' +
 '\n' +
+'  <label for="defaultProjectId">Default project for "Add Task"</label>\n' +
+'  <select id="defaultProjectId">\n' +
+'    <option value="">Inbox (default)</option>\n' +
+projectOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">\n' +
+'    A task you dictate on the watch (the "Add Task" row, on watches with a\n' +
+'    microphone) is filed into this project.\n' +
+'  </p>\n' +
+'\n' +
 '  <h2>Sync</h2>\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="autoSyncOnComplete" type="checkbox"' + (autoSyncOnComplete ? ' checked' : '') + '>\n' +
@@ -172,7 +192,8 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '      jwt: jwt,\n' +
 '      groupByProject: document.getElementById(\'groupByProject\').checked,\n' +
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
-'      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked\n' +
+'      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked,\n' +
+'      defaultProjectId: document.getElementById(\'defaultProjectId\').value\n' +
 '    });\n' +
 '  });\n' +
 '\n' +
