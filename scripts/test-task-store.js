@@ -483,6 +483,44 @@ check('getActiveTasks excludes backlog tasks but includes everything else, any d
   assert.deepStrictEqual(tasks.map((t) => t.id), ['c', 'a', 'b']);
 });
 
+check('getActiveTasks never shows a "ghost" task created by an update op for an unseen id', () => {
+  // mergeTaskChanges() deliberately creates a bare, title-less record
+  // rather than throwing when an update-style op references a task id
+  // this replay never saw a create/snapshot for (see "updateTask on an
+  // unknown id creates a bare record rather than throwing" above) - real
+  // symptom this caused: a task showing up on the watch as literally
+  // "(untitled)" in "No Project". getActiveTasks now filters on t.title
+  // as the tell for "this is a ghost, not a real task" instead of
+  // surfacing it with placeholder text.
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'real', title: 'Real task', isDone: false }),
+      updateTask('ghost', { isDone: true }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.ghost.isDone, true); // still tolerated internally, not thrown
+  const tasks = active(state);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['real']);
+});
+
+check('getActiveTasks skips a ghost subtask referenced by a real parent\'s subTaskIds', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'main', title: 'Plan trip', isDone: false, subTaskIds: ['sub1', 'ghost-sub'] }),
+      addTask({ id: 'sub1', title: 'Book flights', isDone: false, parentId: 'main' }),
+      // 'ghost-sub' is listed in main's subTaskIds but its own create op
+      // was never seen - e.g. an update for it arrived without one.
+      updateTask('ghost-sub', { isDone: true }),
+    ],
+    state
+  );
+  const tasks = active(state);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1']);
+});
+
 check('getActiveTasks(todayOnly=true) keeps only tasks due exactly today, drops undated, overdue, and future', () => {
   const state = store.emptyState();
   store.applyOperations(

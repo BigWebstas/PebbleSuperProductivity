@@ -525,7 +525,17 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
   var today = todayStr();
   var mainTasks = Object.keys(allTasks)
     .map(function (id) { return allTasks[id]; })
-    .filter(function (t) { return t && isMainTask(t) && !t.__inBacklog; })
+    // t.title is the tell for a "ghost" record: mergeTaskChanges()
+    // deliberately creates a bare { ...changes } entry (no throw) when an
+    // update-style op references a task id this replay has never seen a
+    // create/snapshot for - e.g. a stray/out-of-order op, or a real task
+    // that was deleted/archived before this account's visible history
+    // began. A real task always has a title; nothing about that intentional
+    // no-throw behavior was ever meant to make ghosts user-visible, so they
+    // never got a title fallback - filtered here instead of leaving them to
+    // surface as a literal "(untitled)" row in "No Project" (see
+    // pushTaskAndSubtasks, which no longer substitutes placeholder text).
+    .filter(function (t) { return t && t.title && isMainTask(t) && !t.__inBacklog; })
     .filter(function (t) {
       if (!todayOnly) {
         return true;
@@ -584,11 +594,17 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
 var SUBTASK_PREFIX = '    ~ ';
 
 function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
-  rows.push({ id: t.id, title: t.title || '(untitled)', isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined });
+  // t is already guaranteed a real title here - getActiveTasks filters
+  // ghost (title-less) records out of mainTasks before this is ever
+  // called. Subtasks aren't filtered upstream (pulled straight from
+  // allTasks by id), so a ghost subtask - same "update referenced an id
+  // this replay never saw a create for" cause as a ghost main task - is
+  // skipped here instead of surfacing as a placeholder-titled row.
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
-    if (sub) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + (sub.title || '(untitled)'), isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined });
+    if (sub && sub.title) {
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined });
     }
   });
 }

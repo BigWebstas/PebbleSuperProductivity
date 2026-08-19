@@ -422,6 +422,12 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
           subtitle = "Sync failed";
         }
         break;
+      case STATUS_NOT_PAIRED:
+        // Previously only shown on the empty/first-run screen (see
+        // update_empty_layer) - invisible once a cached list is already on
+        // screen, same silent-failure shape as the outbox case above.
+        subtitle = "Not paired - open phone app";
+        break;
       default:
         break;
     }
@@ -911,6 +917,16 @@ static void inbox_dropped_handler(AppMessageResult reason, void *context) {
 
 static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_WARNING, "AppMessage send failed: %d", (int)reason);
+  // Previously silent (log-only): a watch->phone send (task toggle, track-
+  // time-stop, resync request) that fails here - e.g. the phone app is
+  // backgrounded or Bluetooth is momentarily busy - used to vanish with zero
+  // on-screen feedback, indistinguishable from "worked fine". Routing it
+  // through the same fullscreen overlay as a phone->watch sync error makes
+  // every send failure visible instead of just this one class of them.
+  s_status_code = STATUS_ERROR;
+  strncpy(s_status_msg, "Couldn't reach phone app", MAX_STATUS_MSG_LEN - 1);
+  s_status_msg[MAX_STATUS_MSG_LEN - 1] = '\0';
+  show_error_overlay();
 }
 
 // ---------- window lifecycle ----------

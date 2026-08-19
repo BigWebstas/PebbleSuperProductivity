@@ -24,6 +24,15 @@ var STATUS_ERROR = 3;
 
 var MAX_TASKS = 30;
 
+// Matches the real client's CURRENT_SCHEMA_VERSION (schema-version.ts) at
+// time of writing. The server only validates this field's range when it's
+// present (validation.service.ts treats a missing schemaVersion as "skip the
+// check"), so omitting it isn't what was breaking uploads - but every op the
+// real app writes carries it, and the field is required (non-optional,
+// non-nullable) in both the shared request schema and the operations table,
+// so it belongs on outgoing ops for correctness regardless.
+var SCHEMA_VERSION = 4;
+
 // ---------------- local storage helpers ----------------
 
 function loadConfig() {
@@ -243,7 +252,23 @@ function doSync() {
           vectorClock = mergeVectorClocks(vectorClock, entry.op.vectorClock);
         }
       });
-      lastSeq = res.latestSeq != null ? res.latestSeq : lastSeq;
+      // NOT res.latestSeq: confirmed against the real server source
+      // (operation-download.service.ts's getOpsSinceWithSeq - `const
+      // latestSeq = seqRow?.lastSeq ?? 0`) that field is the ACCOUNT'S
+      // overall high-water mark, completely unrelated to pagination
+      // position - it is NOT "the seq to resume from". Using it as the
+      // next page's sinceSeq was confirmed live (against a real ~3600-op
+      // account) to jump straight to the account's current end on the
+      // very first page whenever hasMore is true, silently skipping every
+      // op in between forever (lastSeq gets persisted at that
+      // artificially-inflated value, so the skipped range is never
+      // revisited on any later sync either). The correct resume point is
+      // the highest serverSeq actually seen in THIS page.
+      (res.ops || []).forEach(function (entry) {
+        if (entry.serverSeq > lastSeq) {
+          lastSeq = entry.serverSeq;
+        }
+      });
       if (res.hasMore) {
         return pullPage();
       }
@@ -330,9 +355,19 @@ function uploadSingleOp(op, config, clientId) {
         err.rejectedResult = result;
         throw err;
       }
-      if (res && res.latestSeq != null) {
-        saveLastSeq(res.latestSeq);
-      }
+      // Deliberately NOT saveLastSeq(res.latestSeq) here: confirmed against
+      // the real server source that this response's latestSeq is the
+      // ACCOUNT'S overall high-water mark (same field/meaning as
+      // downloadOps's own latestSeq - see pullPage()'s comment), not "how
+      // far this upload's piggybacked res.newOps actually got us". Saving
+      // it jumps our cursor to the account's current end without ever
+      // downloading/applying anything in between - including res.newOps
+      // itself, which this code never even looked at - silently losing any
+      // ops from other clients that arrived since our last real sync,
+      // every single time this ran. lastSeq now only ever advances via
+      // pullPage()'s own per-page-max tracking; runAutoSyncAfterOp's
+      // follow-up sync (on by default) picks up whatever res.newOps would
+      // have piggybacked, correctly this time.
     })
     .catch(function (err) {
       if (err && err.rejectedResult && err.rejectedResult.existingClock) {
@@ -413,6 +448,7 @@ function handleTaskToggle(taskId, done) {
     vectorClock: newVectorClock,
     clientId: clientId,
     timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
   };
 
   var toggleFailureMsg = null;
@@ -478,6 +514,7 @@ function handleTrackTimeStop(taskId, trackedMs) {
     vectorClock: newVectorClock,
     clientId: clientId,
     timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
   };
 
   var trackFailureMsg = null;
