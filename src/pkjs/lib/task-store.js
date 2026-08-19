@@ -116,18 +116,38 @@ function applyTaskAction(op, actionPayload, state) {
       }
       break;
 
-    // These carry a full, already-correct task snapshot (the action
-    // creator itself bakes in dueDay/dueWithTime before dispatch) - a
-    // straight replace matches what the real reducer's entity-adapter
-    // update ends up storing. isMoveToBacklog mirrors
-    // handleScheduleTaskWithTime's backlog-move side effect.
+    // NOT a full task snapshot - confirmed wrong by reading the actual
+    // reducer (handleScheduleTaskWithTime in
+    // task-shared-scheduling.reducer.ts): dueWithTime/remindAt are their
+    // OWN top-level actionPayload fields, siblings of `task`, and the real
+    // reducer only ever reads `task.id` from the task field itself
+    // (taskAdapter.updateOne({ id: task.id, changes: { dueWithTime,
+    // dueDay: undefined, remindAt } })) - a narrow merge onto the task
+    // already in the store, not a replace. Whether actionPayload.task
+    // happens to also carry a matching dueWithTime depends entirely on the
+    // calling code and isn't guaranteed: task-repeat-cfg.service.ts's
+    // recurring-task creation passes `task: taskWithTargetDates`, a
+    // snapshot built BEFORE the schedule was computed, so it never has
+    // dueWithTime - a previous version of this code did a full replace
+    // with that task object and silently dropped the schedule entirely,
+    // which is why a recurring task with a time never showed "@ ..." like
+    // a normal scheduled task did. isMoveToBacklog mirrors
+    // handleScheduleTaskWithTime's own backlog-move side effect.
     case '[Task Shared] scheduleTaskWithTime':
-    case '[Task Shared] reScheduleTaskWithTime':
-      replaceTaskPreservingBacklog(tasks, actionPayload.task);
-      if (actionPayload.isMoveToBacklog && actionPayload.task) {
-        setInBacklog(tasks, actionPayload.task.id, true);
+    case '[Task Shared] reScheduleTaskWithTime': {
+      var schedId = actionPayload.task && actionPayload.task.id;
+      if (schedId) {
+        mergeTaskChanges(tasks, schedId, {
+          dueWithTime: actionPayload.dueWithTime,
+          dueDay: undefined,
+          remindAt: actionPayload.remindAt,
+        });
+        if (actionPayload.isMoveToBacklog) {
+          setInBacklog(tasks, schedId, true);
+        }
       }
       break;
+    }
 
     case '[Task Shared] restoreTask':
     case '[Task Shared] restoreDeletedTask':
@@ -145,6 +165,29 @@ function applyTaskAction(op, actionPayload, state) {
         mergeTaskChanges(tasks, u.id, u.changes);
       });
       break;
+
+    // Mirrors handleMoveToOtherProject in project-shared.reducer.ts:
+    // reassigns projectId on the task and every one of its subtasks (only
+    // the parent moves between the two projects' own taskIds lists, but
+    // ALL of them get the new projectId - subtasks are never independently
+    // listed in a project's taskIds). Previously unhandled entirely, which
+    // left a moved task's projectId stale here - showing under its old
+    // project, or "No Project" if it never had one - even though the real
+    // account has it correctly reassigned. Also clears __inBacklog: the
+    // real reducer removes the moved tasks from the old project's
+    // backlogTaskIds and never adds them to the new project's, so a move
+    // always drops backlog membership regardless of where it started.
+    case '[Task Shared] moveToOtherProject': {
+      var movedTask = actionPayload.task;
+      if (movedTask && movedTask.id && actionPayload.targetProjectId) {
+        var movedIds = [movedTask.id].concat(movedTask.subTaskIds || []);
+        movedIds.forEach(function (id) {
+          mergeTaskChanges(tasks, id, { projectId: actionPayload.targetProjectId });
+          setInBacklog(tasks, id, false);
+        });
+      }
+      break;
+    }
 
     // Mirrors handlePlanTasksForToday in task-shared-scheduling.reducer.ts:
     // sets dueDay to the target day and clears remindAt. Kept for its own

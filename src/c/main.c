@@ -64,6 +64,16 @@ static StatusBarLayer *s_status_bar;
 static TextLayer *s_empty_layer;
 static BitmapLayer *s_logo_layer;
 static GBitmap *s_logo_bitmap;
+// A sync error's full message is otherwise only visible as a single-line,
+// easily-missed subtitle on the Resync row (or squeezed into the small
+// empty-state text when there's no cached list yet) - this takes over the
+// whole content area instead, and - unlike everything else here, which
+// just reflects whatever the latest status is - deliberately does NOT
+// auto-update/dismiss itself on the next status change, so a transient
+// retry succeeding underneath can't yank the message away before it's
+// been read. Only an explicit Select dismisses it (see menu_select_click).
+static TextLayer *s_error_layer;
+static bool s_error_overlay_active = false;
 
 static Task s_tasks[MAX_TASKS];
 static int s_task_count = 0;      // tasks currently shown (committed)
@@ -89,18 +99,6 @@ static int s_group_count = 0;
 #define TITLE_BOX_X 6
 #define TITLE_BOX_Y 2
 
-// MenuLayer's own default row height (measured in the emulator: no
-// get_cell_height callback existed before this, and every row - Resync,
-// task, whatever - rendered at exactly 44px). Kept explicit now that a
-// callback exists, rather than relying on "return the platform default"
-// (there's no public API to query it), so the Resync row and undone tasks
-// keep the exact height they've always had.
-#define DEFAULT_CELL_HEIGHT 44
-// Extra height for a done task's row: subtitle_box in menu_draw_row is
-// anchored to the bottom of the row's own bounds, so growing the row
-// pushes "Done" further from the title without needing to touch that
-// positioning code at all.
-#define DONE_CELL_EXTRA_HEIGHT 16
 static AppTimer *s_scroll_timer = NULL;
 static int s_scroll_offset_px = 0;
 
@@ -156,6 +154,7 @@ static void load_tasks(void) {
 }
 
 static void request_sync(void);
+static void hide_error_overlay(void);
 
 // ---------- menu layer callbacks ----------
 
@@ -325,14 +324,6 @@ static void menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, M
   refresh_scroll_state(true);
 }
 
-static int16_t menu_get_cell_height(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
-  Task *task = resolve_task_at(*cell_index);
-  if (task && task->done) {
-    return DEFAULT_CELL_HEIGHT + DONE_CELL_EXTRA_HEIGHT;
-  }
-  return DEFAULT_CELL_HEIGHT;
-}
-
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
   if (s_task_count == 0) {
     return;
@@ -468,6 +459,14 @@ static void send_task_toggle(Task *task) {
 }
 
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  if (s_error_overlay_active) {
+    // Click routing goes through MenuLayer's own config regardless of
+    // whether its layer is currently hidden (same mechanism the empty-
+    // screen's phantom row 0 below already relies on), so this fires even
+    // though s_menu_layer is hidden behind the overlay right now.
+    hide_error_overlay();
+    return;
+  }
   if (s_task_count == 0) {
     // The empty/error screen's phantom row 0 (see menu_get_num_rows) lands
     // here - this is what makes "Select to retry" actually retry.
@@ -515,7 +514,38 @@ static void start_syncing_animation(void) {
   s_syncing_timer = app_timer_register(SYNCING_ANIM_INTERVAL_MS, syncing_timer_callback, NULL);
 }
 
+// Shows (or, called again while already showing, re-affirms/updates the
+// message on) the fullscreen error overlay, hiding whatever the menu/
+// empty-state layers were showing underneath. Safe to call regardless of
+// s_task_count - stop_syncing_animation() covers the case where this
+// interrupts the very first sync's "Syncing..." animation.
+static void show_error_overlay(void) {
+  s_error_overlay_active = true;
+  static char s_error_overlay_text[MAX_STATUS_MSG_LEN + 48];
+  if (s_status_msg[0] != '\0') {
+    snprintf(s_error_overlay_text, sizeof(s_error_overlay_text),
+              "Sync Error\n\n%s\n\nSelect to dismiss", s_status_msg);
+  } else {
+    snprintf(s_error_overlay_text, sizeof(s_error_overlay_text), "Sync Error\n\nSelect to dismiss");
+  }
+  text_layer_set_text(s_error_layer, s_error_overlay_text);
+  layer_set_hidden(text_layer_get_layer(s_error_layer), false);
+  layer_set_hidden(menu_layer_get_layer(s_menu_layer), true);
+  layer_set_hidden(text_layer_get_layer(s_empty_layer), true);
+  layer_set_hidden(bitmap_layer_get_layer(s_logo_layer), true);
+  stop_syncing_animation();
+}
+
 static void update_empty_layer(void) {
+  // The error overlay owns menu/empty-layer visibility while it's up (it
+  // hides both itself, in show_error_overlay()) - without this guard, any
+  // background status update arriving before Select dismisses it (e.g. a
+  // retry's own TASK_SYNC_END) would un-hide the menu or empty layer right
+  // out from under the overlay via the calls below, even though the
+  // overlay's own layer would still be showing on top of it too.
+  if (s_error_overlay_active) {
+    return;
+  }
   bool show_empty = (s_task_count == 0);
   layer_set_hidden(text_layer_get_layer(s_empty_layer), !show_empty);
   layer_set_hidden(bitmap_layer_get_layer(s_logo_layer), !show_empty);
@@ -553,6 +583,17 @@ static void update_empty_layer(void) {
       text_layer_set_text(s_empty_layer, "No tasks for today.");
       break;
   }
+}
+
+// Dismisses the error overlay (Select, see menu_select_click) and hands
+// visibility back to update_empty_layer() - now unguarded, since the flag
+// flips before calling it - to restore whichever of menu/empty-state is
+// correct for however s_task_count/s_status_code look right now (not
+// necessarily how they looked when the overlay first appeared).
+static void hide_error_overlay(void) {
+  s_error_overlay_active = false;
+  layer_set_hidden(text_layer_get_layer(s_error_layer), true);
+  update_empty_layer();
 }
 
 // ---------- AppMessage ----------
@@ -637,9 +678,15 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       // update_empty_layer() only redraws the empty-state text layer, which
       // stays hidden while s_task_count > 0 - reload_data is what actually
-      // refreshes the Resync row's status subtitle in that case.
+      // refreshes the Resync row's status subtitle in that case. Both are
+      // no-ops while the error overlay is up (see its guard in
+      // update_empty_layer()) - reload_data itself is harmless against a
+      // hidden MenuLayer either way.
       menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
+      if (s_status_code == STATUS_ERROR) {
+        show_error_overlay();
+      }
       break;
     }
     default:
@@ -673,7 +720,6 @@ static void window_load(Window *window) {
     .get_num_sections = menu_get_num_sections,
     .get_num_rows = menu_get_num_rows,
     .get_header_height = menu_get_header_height,
-    .get_cell_height = menu_get_cell_height,
     .draw_header = menu_draw_header,
     .draw_row = menu_draw_row,
     .select_click = menu_select_click,
@@ -706,6 +752,20 @@ static void window_load(Window *window) {
   bitmap_layer_set_compositing_mode(s_logo_layer, GCompOpSet);
   layer_add_child(window_layer, bitmap_layer_get_layer(s_logo_layer));
 
+  // Full content_bounds (not the logo-strip-shrunk box the empty-state text
+  // gets), and added last so it draws on top of every other layer here
+  // when shown - covers the whole content area, not just another line of
+  // subtitle text, so a sync error is actually readable instead of easy to
+  // miss. Hidden by default; only show_error_overlay() reveals it.
+  s_error_layer = text_layer_create(content_bounds);
+  text_layer_set_text_alignment(s_error_layer, GTextAlignmentCenter);
+  text_layer_set_font(s_error_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_background_color(s_error_layer, GColorRed);
+  text_layer_set_text_color(s_error_layer, GColorBlack);
+  text_layer_set_overflow_mode(s_error_layer, GTextOverflowModeWordWrap);
+  layer_set_hidden(text_layer_get_layer(s_error_layer), true);
+  layer_add_child(window_layer, text_layer_get_layer(s_error_layer));
+
   update_empty_layer();
   request_sync();
 }
@@ -715,6 +775,7 @@ static void window_unload(Window *window) {
   stop_syncing_animation();
   menu_layer_destroy(s_menu_layer);
   text_layer_destroy(s_empty_layer);
+  text_layer_destroy(s_error_layer);
   bitmap_layer_destroy(s_logo_layer);
   gbitmap_destroy(s_logo_bitmap);
   status_bar_layer_destroy(s_status_bar);

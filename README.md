@@ -237,6 +237,28 @@ traffic. Since then, three things resolved almost everything that was
   upload is now accepted (previously reproduced the exact rejection this
   fixes), with a `vectorClock` correctly merging the remote component seen
   on download with this client's own incremented one.
+- **`scheduleTaskWithTime`/`reScheduleTaskWithTime` were treated as a full
+  task-snapshot replace, and `dueWithTime` isn't actually part of that
+  snapshot - the real cause of a recurring task with a start time never
+  showing its "@ ..." time like a manually-scheduled task did.** Found by
+  reading the actual reducer
+  (`task-shared-scheduling.reducer.ts`'s `handleScheduleTaskWithTime`):
+  `dueWithTime`/`remindAt` are their own top-level `actionPayload` fields,
+  siblings of `task`, and the real reducer only ever reads `task.id` from
+  the task field - `taskAdapter.updateOne({ id: task.id, changes: {
+  dueWithTime, dueDay: undefined, remindAt } })`, a narrow merge onto
+  whatever's already in the store, never a replace. Whether
+  `actionPayload.task` happens to *also* carry a matching `dueWithTime`
+  turns out to depend entirely on the calling code:
+  `task-repeat-cfg.service.ts`'s recurring-task creation dispatches
+  `addTask` (dueDay only) immediately followed by a separate
+  `scheduleTaskWithTime` whose `task` field is the same pre-schedule
+  snapshot, with `dueWithTime` passed alongside it, not merged in. The old
+  full-replace here used only `actionPayload.task`, so a recurring task's
+  schedule was silently dropped on replay every time. Fixed to merge
+  `{ dueWithTime, dueDay: undefined, remindAt }` from the action's own
+  top-level fields, matching `handleScheduleTaskWithTime` exactly instead
+  of trusting an assumption about what the `task` payload contains.
 
 **Known gaps, not "assumed" so much as "not yet built":**
 - Handled TASK action types, confirmed against
@@ -248,11 +270,17 @@ traffic. Since then, three things resolved almost everything that was
   `restoreDeletedTask`, `applyShortSyntax` (typing scheduling info directly
   into a task's title), `convertToMainTask`/`convertToSubTask` (subtask
   promotion/demotion - `convertToMainTask` clearing `parentId` is what makes
-  a promoted subtask visible as a main task at all). Everything else in
-  that file (`moveToOtherProject`, `setDeadline`/deadline-related actions,
-  `addTagToTask`, ...) is a no-op - the task keeps whatever state it had
-  before that action, which is usually harmless (most of those don't touch
-  title/isDone/backlog-membership) but not guaranteed to be.
+  a promoted subtask visible as a main task at all), `moveToOtherProject`
+  (reassigns `projectId` on the task and every subtask, and clears
+  `__inBacklog` - mirrors `handleMoveToOtherProject` in
+  `project-shared.reducer.ts`, which always drops backlog membership on a
+  project move regardless of where the task started; unhandled until a user
+  report of tasks incorrectly showing "No Project" after being moved on
+  another client traced back to this). Everything else in that file
+  (`setDeadline`/deadline-related actions, `addTagToTask`, ...) is a no-op -
+  the task keeps whatever state it had before that action, which is usually
+  harmless (most of those don't touch title/isDone/backlog-membership/
+  projectId) but not guaranteed to be.
 - **The active-task filter is backlog membership, not a due date** - this
   changed from "only tasks due today" in an earlier version, per explicit
   direction, once it turned out "due today" and "not in the backlog" are

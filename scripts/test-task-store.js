@@ -349,17 +349,62 @@ check('"[Project] Move all backlog tasks to regular" clears the flag for every t
   assert.deepStrictEqual(ids, ['a', 'b']); // c is a different project, stays in backlog
 });
 
-check('a full-replace action (addTask/scheduleTaskWithTime/...) preserves a previously-set __inBacklog flag', () => {
+check('a full-replace action (addTask/restoreTask/restoreDeletedTask) preserves a previously-set __inBacklog flag', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
       addTask({ id: 'a', title: 'X' }, { isAddToBacklog: true }),
-      // scheduleTaskWithTime replaces the whole task record - the real
-      // payload never mentions __inBacklog since we invented it, so a
-      // naive replace would silently un-backlog this task.
+      // restoreTask replaces the whole task record - the real payload
+      // never mentions __inBacklog since we invented it, so a naive
+      // replace would silently un-backlog this task.
+      taskEntry('[Task Shared] restoreTask', { task: { id: 'a', title: 'X' } }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.__inBacklog, true);
+});
+
+check('scheduleTaskWithTime sets dueWithTime from its own top-level field, not actionPayload.task', () => {
+  // Reproduces the real task-repeat-cfg.service.ts call shape for a
+  // recurring task with a start time: `task` is a pre-schedule snapshot
+  // with no dueWithTime of its own (createRepeatableTask dispatches
+  // addTask, then a SEPARATE scheduleTaskWithTime whose `task` field is
+  // the same pre-schedule object) - dueWithTime/remindAt are sibling
+  // fields on the action payload, and the real reducer
+  // (handleScheduleTaskWithTime) only ever reads `task.id`, never
+  // `task.dueWithTime`. A previous version of this replay read
+  // actionPayload.task.dueWithTime instead and silently dropped the
+  // schedule whenever a caller didn't happen to pre-merge it in - which
+  // is exactly why a recurring task with a time never showed "@ ..." like
+  // a normal scheduled task did.
+  const state = store.emptyState();
+  const at9am = Date.now();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Daily standup', dueDay: today }),
       taskEntry('[Task Shared] scheduleTaskWithTime', {
-        task: { id: 'a', title: 'X', dueWithTime: Date.now() },
+        task: { id: 'a' }, // no dueWithTime here - matches the real recurring-task call site
+        dueWithTime: at9am,
+        remindAt: at9am,
+        isMoveToBacklog: false,
+      }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueWithTime, at9am);
+  assert.strictEqual(state.task.a.dueDay, undefined); // dueDay/dueWithTime mutual exclusivity
+  assert.strictEqual(state.task.a.title, 'Daily standup'); // untouched - a merge, not a replace
+});
+
+check('scheduleTaskWithTime with isMoveToBacklog moves the task out of the active list', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'X' }),
+      taskEntry('[Task Shared] scheduleTaskWithTime', {
+        task: { id: 'a' },
         dueWithTime: Date.now(),
+        isMoveToBacklog: true,
       }),
     ],
     state
@@ -590,6 +635,44 @@ check('getActiveTasks(groupByProject=true) keeps a subtask in its parent\'s grou
   );
   const tasks = active(state, 30, true);
   assert.deepStrictEqual(tasks.map((t) => t.project), ['Work', 'Work']);
+});
+
+check('moveToOtherProject reassigns projectId on the task and its subtasks, clears backlog', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Personal' } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p2', title: 'Work' } }),
+      addTask({ id: 'main', title: 'Ship feature', isDone: false, projectId: 'p1', subTaskIds: ['sub1'] }, { isAddToBacklog: true }),
+      addTask({ id: 'sub1', title: 'Write tests', isDone: false, parentId: 'main', projectId: 'p1' }),
+      taskEntry('[Task Shared] moveToOtherProject', {
+        task: { id: 'main', subTaskIds: ['sub1'] },
+        targetProjectId: 'p2',
+      }),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.main.projectId, 'p2');
+  assert.strictEqual(state.task.sub1.projectId, 'p2');
+  // Moving out of the backlog project also clears backlog membership -
+  // the task should now be active, not still hidden.
+  const tasks = active(state, 30, true);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1']);
+  assert.deepStrictEqual(tasks.map((t) => t.project), ['Work', 'Work']);
+});
+
+check('moveToOtherProject on an undated, no-project task fixes it away from "No Project"', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Errands' } }),
+      addTask({ id: 'a', title: 'Buy milk', isDone: false }),
+      taskEntry('[Task Shared] moveToOtherProject', { task: { id: 'a' }, targetProjectId: 'p1' }),
+    ],
+    state
+  );
+  const tasks = active(state, 30, true);
+  assert.deepStrictEqual(tasks.map((t) => t.project), ['Errands']);
 });
 
 console.log('');
