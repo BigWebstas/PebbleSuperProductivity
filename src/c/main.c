@@ -1174,7 +1174,11 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   }
   bool is_selected = menu_layer_get_selected_index(s_habits_menu_layer).row == cell_index->row;
   GRect bounds = layer_get_bounds(cell_layer);
-  GColor bg = is_selected ? GColorBlack : GColorWhite;
+  // Matches the Habits nav row's own background (menu_draw_row's section-0
+  // branch) rather than the plain black every other selected row in this
+  // app uses, so a highlighted habit visually ties back to the row that
+  // brought you here.
+  GColor bg = is_selected ? GColorVividCerulean : GColorWhite;
   GColor fg = is_selected ? GColorWhite : GColorBlack;
   if (habit->done) {
     fg = is_selected ? GColorLightGray : GColorDarkGray;
@@ -1187,22 +1191,24 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   graphics_draw_text(ctx, habit->title, fonts_get_system_font(TITLE_FONT_KEY), title_box,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  // "value/goal" until today's count reaches goal, then "Done" centered -
-  // matching the task list's own done-row style. StopWatch-type counters
-  // (no simple increment/decrement state - see the Habit struct's own
-  // comment) are filtered out entirely before ever reaching the watch
-  // (getActiveHabits in task-store.js), so every row here is manipulable.
+  // "value/goal" always visible, with " - Done" appended once today's count
+  // reaches goal - same dash-separated "two settled facts" convention the
+  // task list's own subtitle uses for due time + tracked time. Keeping the
+  // count alongside "Done" (rather than replacing it, as this used to)
+  // matters once incrementing past goal is possible: "Done" alone can't
+  // tell you 3/3 from 7/3. StopWatch-type counters (no simple increment/
+  // decrement state - see the Habit struct's own comment) are filtered out
+  // entirely before ever reaching the watch (getActiveHabits in
+  // task-store.js), so every row here is manipulable.
   char subtitle[32];
   if (habit->done) {
-    strncpy(subtitle, "Done", sizeof(subtitle) - 1);
-    subtitle[sizeof(subtitle) - 1] = '\0';
+    snprintf(subtitle, sizeof(subtitle), "%d/%d - Done", habit->value, habit->goal);
   } else {
     snprintf(subtitle, sizeof(subtitle), "%d/%d", habit->value, habit->goal);
   }
   GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
   graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
-                      GTextOverflowModeTrailingEllipsis,
-                      habit->done ? GTextAlignmentCenter : GTextAlignmentLeft, NULL);
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
 // Select bumps today's count up by one, long-select down by one (never
