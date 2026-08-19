@@ -14,6 +14,7 @@
 #define KEY_TASK_PROJECT MESSAGE_KEY_TASK_PROJECT
 #define KEY_TASK_DUE_MIN MESSAGE_KEY_TASK_DUE_MIN
 #define KEY_TASK_TIME_SPENT_MS MESSAGE_KEY_TASK_TIME_SPENT_MS
+#define KEY_TASK_TIME_ESTIMATE_MS MESSAGE_KEY_TASK_TIME_ESTIMATE_MS
 #define KEY_TRACKED_MS MESSAGE_KEY_TRACKED_MS
 #define KEY_STATUS_CODE MESSAGE_KEY_STATUS_CODE
 #define KEY_STATUS_MSG MESSAGE_KEY_STATUS_MSG
@@ -24,7 +25,7 @@
 #define KEY_HABIT_DONE MESSAGE_KEY_HABIT_DONE
 #define KEY_HABIT_VALUE MESSAGE_KEY_HABIT_VALUE
 #define KEY_HABIT_GOAL MESSAGE_KEY_HABIT_GOAL
-#define KEY_HABIT_INTERACTIVE MESSAGE_KEY_HABIT_INTERACTIVE
+#define KEY_HABIT_DELTA MESSAGE_KEY_HABIT_DELTA
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -38,7 +39,7 @@ enum {
   MSG_HABIT_SYNC_START = 8, // phone -> watch: HABIT_TOTAL follows
   MSG_HABIT_ITEM = 9,       // phone -> watch: one habit
   MSG_HABIT_SYNC_END = 10,  // phone -> watch: list is complete, redraw
-  MSG_HABIT_TOGGLE = 11,    // watch -> phone: HABIT_ID + HABIT_DONE (new state)
+  MSG_HABIT_ADJUST = 11,    // watch -> phone: HABIT_ID + HABIT_DELTA (+1 or -1)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -70,6 +71,7 @@ typedef struct {
   bool done;
   int due_min;       // minutes since local midnight, or -1 when the task has no dueWithTime
   int time_spent_ms; // total tracked time (all days, all devices), 0 if none
+  int time_estimate_ms; // 0 if none
 } Task;
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
@@ -84,15 +86,24 @@ typedef struct {
 } TaskGroup;
 
 // "Habits" are Super Productivity's SimpleCounter feature (real entityType
-// SIMPLE_COUNTER - there is no separate "Habit" entity). interactive is
-// false for StopWatch-type counters: their value is milliseconds of tracked
-// time, not a "did you do this today" count, so Select doesn't toggle them
-// (see habit_menu_select_click) - only shown, formatted as a duration.
+// SIMPLE_COUNTER - there is no separate "Habit" entity). StopWatch-type
+// counters (value in ms of tracked time, not a "did you do this today"
+// count - nothing to increment/decrement) are filtered out entirely before
+// ever reaching the watch (getActiveHabits in task-store.js), so every
+// Habit here is always manipulable.
 // Kept low (unlike MAX_TASKS' 30) because aplite's ~24KB RAM budget is
-// already tight after MAX_ID_LEN's own 96-byte bump for calendar tasks - 8
-// overflowed the linked binary's APP region by 280 bytes; 6 fits with room
-// to spare. Most habit trackers don't track more than a handful anyway.
-#define MAX_HABITS 6
+// already tight after MAX_ID_LEN's own 96-byte bump for calendar tasks.
+// aplite specifically, not a shared cap - basalt/chalk/diorite still have
+// ~41KB free and emery ~106KB, so holding every platform back to aplite's
+// number here would be needlessly conservative for the other four.
+// Confirmed via pebble build's own per-platform memory report: 8 overflowed
+// aplite's linked binary by 280 bytes even before the row-icon resources
+// added below; those pushed the workable aplite number down further to 3.
+#ifdef PBL_PLATFORM_APLITE
+#define MAX_HABITS 3
+#else
+#define MAX_HABITS 8
+#endif
 // SimpleCounter ids are always a plain nanoid() (simple-counter.service.ts)
 // - unlike TASK, there's no calendar-integration id format to accommodate,
 // so this doesn't need MAX_ID_LEN's 96-byte allowance; a smaller buffer
@@ -102,8 +113,7 @@ typedef struct {
   char id[MAX_HABIT_ID_LEN];
   char title[MAX_TITLE_LEN];
   bool done;
-  bool interactive;
-  int value; // today's count, or ms tracked today for a StopWatch-type counter
+  int value; // today's count
   int goal;  // streakMinValue-derived target used for the "value/goal" subtitle
 } Habit;
 
@@ -126,6 +136,18 @@ static StatusBarLayer *s_status_bar;
 static TextLayer *s_empty_layer;
 static BitmapLayer *s_logo_layer;
 static GBitmap *s_logo_bitmap;
+// Icons drawn directly into the Resync/Habits rows (menu_draw_row, not a
+// standing BitmapLayer - these rows are custom-painted, same as their
+// title/subtitle text). One black/white pair per icon so it can invert on
+// selection the same way the row's own text color already does -
+// GCompOpSet's alpha-aware compositing doesn't give a free color-invert for
+// an 8-bit source bitmap, so this is two actual assets, not one recolored
+// at draw time.
+#define ROW_ICON_SIZE 25
+static GBitmap *s_check_bitmap;
+static GBitmap *s_check_white_bitmap;
+static GBitmap *s_heart_bitmap;
+static GBitmap *s_heart_white_bitmap;
 // A sync error's full message is otherwise only visible as a single-line,
 // easily-missed subtitle on the Resync row (or squeezed into the small
 // empty-state text when there's no cached list yet) - this takes over the
@@ -497,18 +519,24 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
     if (cell_index->row == 1) {
       // Navigates to the habits (SimpleCounter) page - see
-      // push_habits_window(). A plain ASCII ">" rather than a Unicode arrow
-      // glyph, same reasoning as SUBTASK_PREFIX's own comment: this app's
-      // system font renders unmapped codepoints as an empty box.
+      // push_habits_window(). Icon matches the real app's own "heart_check"
+      // icon for this same feature (magic-nav-config.service.ts).
       graphics_context_set_fill_color(ctx, GColorVividCerulean);
       graphics_fill_rect(ctx, bounds, 0, GCornerNone);
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-      GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
+      GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, 30);
       graphics_draw_text(ctx, "Habits", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
                           GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-      GRect arrow_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
-      graphics_draw_text(ctx, ">", fonts_get_system_font(FONT_KEY_GOTHIC_14), arrow_box,
-                          GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+      GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
+                               ROW_ICON_SIZE, ROW_ICON_SIZE);
+      // GCompOpSet (not the GCompOpAssign default) is what makes the
+      // bitmap's own alpha channel - the transparent background and the
+      // checkmark cutout - actually take effect here, same as
+      // bitmap_layer_set_compositing_mode(..., GCompOpSet) does for
+      // s_logo_layer above; a raw graphics_draw_bitmap_in_rect call doesn't
+      // inherit that, it has its own context-level compositing mode.
+      graphics_context_set_compositing_mode(ctx, GCompOpSet);
+      graphics_draw_bitmap_in_rect(ctx, is_selected ? s_heart_white_bitmap : s_heart_bitmap, icon_rect);
       return;
     }
 
@@ -547,12 +575,22 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_context_set_fill_color(ctx, GColorRed);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-    GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
+    GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, 30);
     graphics_draw_text(ctx, "Resync", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    // Full row width (not narrowed like title_box above) - a status message
+    // here ("Failed: ...") is more important not to truncate than leaving
+    // room to dodge the icon, which sits up in the title row's vertical
+    // band, not down here.
     GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
     graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    // Matches the Habits row's own icon (see below) so the two pinned rows
+    // read as a consistent pair - "the sp logo" (this app's checkmark
+    // mark, already used elsewhere as IMAGE_MENU_ICON/IMAGE_LOGO_LARGE).
+    GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, TITLE_BOX_Y + 2, ROW_ICON_SIZE, ROW_ICON_SIZE);
+    graphics_context_set_compositing_mode(ctx, GCompOpSet);
+    graphics_draw_bitmap_in_rect(ctx, is_selected ? s_check_white_bitmap : s_check_bitmap, icon_rect);
     return;
   }
   Task *task = resolve_task_at(*cell_index);
@@ -638,13 +676,25 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       }
     }
 
-    char subtitle[40] = "";
+    char subtitle[56] = "";
     if (task->due_min >= 0) {
       format_due_time(task->due_min, subtitle, sizeof(subtitle));
     }
     if (effective_ms > 0 || is_tracking_this) {
       char time_text[20];
       format_duration_ms(effective_ms, is_tracking_this, time_text, sizeof(time_text));
+      // The estimate rides on the same time_text - "already spent / target"
+      // - rather than its own separate segment, since it's only meaningful
+      // alongside the timer, not on its own (see the "if visible" gate
+      // below).
+      if (task->time_estimate_ms > 0) {
+        char estimate_text[20];
+        format_duration_ms(task->time_estimate_ms, false, estimate_text, sizeof(estimate_text));
+        char combined[48];
+        snprintf(combined, sizeof(combined), "%s / %s", time_text, estimate_text);
+        strncpy(time_text, combined, sizeof(time_text) - 1);
+        time_text[sizeof(time_text) - 1] = '\0';
+      }
       size_t existing_len = strlen(subtitle);
       if (existing_len > 0) {
         // A dash reads as "these are two separate, settled facts about this
@@ -821,17 +871,12 @@ static void stop_syncing_animation(void) {
 
 static void syncing_timer_callback(void *data) {
   s_syncing_dots = (s_syncing_dots + 1) % 4;
-  static char s_syncing_text[MAX_STATUS_MSG_LEN + 16];
-  // A large first sync (or any multi-page catch-up) sends progress as a
-  // plain "NN%" STATUS_MSG alongside STATUS_SYNCING (see doSync()'s
-  // pullPage() in index.js) - shown here instead of the bare dots once
-  // it's non-empty. A single-page sync usually finishes before this field
-  // is ever populated, so it stays on the plain dot animation.
-  if (s_status_msg[0] != '\0') {
-    snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing %s%.*s", s_status_msg, s_syncing_dots, "...");
-  } else {
-    snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing%.*s", s_syncing_dots, "...");
-  }
+  static char s_syncing_text[64];
+  // A first sync can genuinely take a few minutes on a large/old account
+  // (replaying its whole op-log history) with no way to give an accurate
+  // percentage worth trusting - a plain heads-up reads better than a
+  // number that's either absent for most of the wait or jumps around.
+  snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing%.*s\n\nThis may take a few minutes", s_syncing_dots, "...");
   text_layer_set_text(s_empty_layer, s_syncing_text);
   s_syncing_timer = app_timer_register(SYNCING_ANIM_INTERVAL_MS, syncing_timer_callback, NULL);
 }
@@ -841,7 +886,7 @@ static void start_syncing_animation(void) {
     return;
   }
   s_syncing_dots = 0;
-  text_layer_set_text(s_empty_layer, "Syncing");
+  text_layer_set_text(s_empty_layer, "Syncing\n\nThis may take a few minutes");
   s_syncing_timer = app_timer_register(SYNCING_ANIM_INTERVAL_MS, syncing_timer_callback, NULL);
 }
 
@@ -962,6 +1007,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *project_tuple = dict_find(iterator, KEY_TASK_PROJECT);
       Tuple *due_min_tuple = dict_find(iterator, KEY_TASK_DUE_MIN);
       Tuple *time_spent_tuple = dict_find(iterator, KEY_TASK_TIME_SPENT_MS);
+      Tuple *time_estimate_tuple = dict_find(iterator, KEY_TASK_TIME_ESTIMATE_MS);
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -983,6 +1029,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       // Absent means "phone has no tracked time for this task" - see
       // sendTaskAt() in index.js, same convention as due_min above.
       s_incoming[idx].time_spent_ms = time_spent_tuple ? time_spent_tuple->value->int32 : 0;
+      // Absent means "no timeEstimate" - same convention as time_spent_ms.
+      s_incoming[idx].time_estimate_ms = time_estimate_tuple ? time_estimate_tuple->value->int32 : 0;
       break;
     }
     case MSG_TASK_SYNC_END: {
@@ -1014,7 +1062,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *done_tuple = dict_find(iterator, KEY_HABIT_DONE);
       Tuple *value_tuple = dict_find(iterator, KEY_HABIT_VALUE);
       Tuple *goal_tuple = dict_find(iterator, KEY_HABIT_GOAL);
-      Tuple *interactive_tuple = dict_find(iterator, KEY_HABIT_INTERACTIVE);
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -1031,7 +1078,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habits[idx].done = done_tuple && done_tuple->value->int32 != 0;
       s_habits[idx].value = value_tuple ? value_tuple->value->int32 : 0;
       s_habits[idx].goal = goal_tuple ? goal_tuple->value->int32 : 0;
-      s_habits[idx].interactive = interactive_tuple && interactive_tuple->value->int32 != 0;
       break;
     }
     case MSG_HABIT_SYNC_END: {
@@ -1102,14 +1148,14 @@ static Habit *resolve_habit_at(MenuIndex index) {
   return &s_habits[index.row];
 }
 
-static void send_habit_toggle(Habit *habit) {
+static void send_habit_adjust(Habit *habit, int32_t delta) {
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
     return;
   }
-  dict_write_int32(iter, KEY_MSG_TYPE, MSG_HABIT_TOGGLE);
+  dict_write_int32(iter, KEY_MSG_TYPE, MSG_HABIT_ADJUST);
   dict_write_cstring(iter, KEY_HABIT_ID, habit->id);
-  dict_write_int32(iter, KEY_HABIT_DONE, habit->done ? 1 : 0);
+  dict_write_int32(iter, KEY_HABIT_DELTA, delta);
   app_message_outbox_send();
 }
 
@@ -1141,14 +1187,13 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   graphics_draw_text(ctx, habit->title, fonts_get_system_font(TITLE_FONT_KEY), title_box,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  // Non-interactive (StopWatch-type) counters show today's tracked
-  // duration, reusing the same formatter the task list's own time-tracking
-  // subtitle uses. Interactive ones show "value/goal" until they hit goal,
-  // then "Done" centered - matching the task list's own done-row style.
+  // "value/goal" until today's count reaches goal, then "Done" centered -
+  // matching the task list's own done-row style. StopWatch-type counters
+  // (no simple increment/decrement state - see the Habit struct's own
+  // comment) are filtered out entirely before ever reaching the watch
+  // (getActiveHabits in task-store.js), so every row here is manipulable.
   char subtitle[32];
-  if (!habit->interactive) {
-    format_duration_ms(habit->value, false, subtitle, sizeof(subtitle));
-  } else if (habit->done) {
+  if (habit->done) {
     strncpy(subtitle, "Done", sizeof(subtitle) - 1);
     subtitle[sizeof(subtitle) - 1] = '\0';
   } else {
@@ -1157,23 +1202,36 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
   graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
                       GTextOverflowModeTrailingEllipsis,
-                      (habit->interactive && habit->done) ? GTextAlignmentCenter : GTextAlignmentLeft, NULL);
+                      habit->done ? GTextAlignmentCenter : GTextAlignmentLeft, NULL);
 }
 
-// A StopWatch-type counter has no simple done/not-done state (see the Habit
-// struct's own comment) - Select silently ignores it, the same way a
-// completed task ignores a long-press track-time attempt elsewhere in this
-// app, rather than a separate error/feedback path for a fairly minor case.
-static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
-  Habit *habit = resolve_habit_at(*cell_index);
-  if (!habit || !habit->interactive) {
+// Select bumps today's count up by one, long-select down by one (never
+// below 0) - the phone applies the delta against its own cached value and
+// uploads the resulting total as a plain replace (see handleHabitAdjust in
+// index.js), so this optimistic local bump is just a guess at what that'll
+// resolve to, corrected by the next full sync same as everywhere else
+// optimistic updates happen in this app.
+static void adjust_habit(MenuIndex index, int32_t delta) {
+  Habit *habit = resolve_habit_at(index);
+  if (!habit || habit->value + delta < 0) {
+    // Already at 0 and trying to go lower - a silent no-op, same as a
+    // long-press track-time attempt on an already-done task elsewhere in
+    // this app, rather than a separate error/feedback path.
     return;
   }
-  habit->done = !habit->done;
-  habit->value = habit->done ? habit->goal : 0;
+  habit->value += delta;
+  habit->done = habit->value >= habit->goal;
   save_habits();
   menu_layer_reload_data(s_habits_menu_layer);
-  send_habit_toggle(habit);
+  send_habit_adjust(habit, delta);
+}
+
+static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  adjust_habit(*cell_index, 1);
+}
+
+static void habits_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  adjust_habit(*cell_index, -1);
 }
 
 static void update_habits_empty_layer(void) {
@@ -1199,6 +1257,7 @@ static void habits_window_load(Window *window) {
     .get_num_rows = habits_menu_get_num_rows,
     .draw_row = habits_menu_draw_row,
     .select_click = habits_menu_select_click,
+    .select_long_click = habits_menu_select_long_click,
   });
   menu_layer_set_click_config_onto_window(s_habits_menu_layer, window);
   layer_add_child(window_layer, menu_layer_get_layer(s_habits_menu_layer));
@@ -1287,6 +1346,13 @@ static void window_load(Window *window) {
   bitmap_layer_set_compositing_mode(s_logo_layer, GCompOpSet);
   layer_add_child(window_layer, bitmap_layer_get_layer(s_logo_layer));
 
+  // Row icons for the Resync/Habits rows (menu_draw_row) - loaded once here
+  // rather than per-draw, same reasoning as s_logo_bitmap above.
+  s_check_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_MENU_ICON);
+  s_check_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_CHECK_WHITE);
+  s_heart_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_HEART_CHECK);
+  s_heart_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_HEART_CHECK_WHITE);
+
   // Full content_bounds (not the logo-strip-shrunk box the empty-state text
   // gets), and added last so it draws on top of every other layer here
   // when shown - covers the whole content area, not just another line of
@@ -1326,6 +1392,10 @@ static void window_unload(Window *window) {
   text_layer_destroy(s_error_layer);
   bitmap_layer_destroy(s_logo_layer);
   gbitmap_destroy(s_logo_bitmap);
+  gbitmap_destroy(s_check_bitmap);
+  gbitmap_destroy(s_check_white_bitmap);
+  gbitmap_destroy(s_heart_bitmap);
+  gbitmap_destroy(s_heart_white_bitmap);
   status_bar_layer_destroy(s_status_bar);
 }
 

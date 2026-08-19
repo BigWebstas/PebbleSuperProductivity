@@ -705,44 +705,49 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
   // allTasks by id), so a ghost subtask - same "update referenced an id
   // this replay never saw a create for" cause as a ghost main task - is
   // skipped here instead of surfacing as a placeholder-titled row.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined });
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
     }
   });
 }
 
-// Returns up to `limit` enabled SimpleCounters ("habits" in the real app's
-// own UI labeling), each with today's progress. "Done today" mirrors the
-// majority of the real UI's own comparisons (habit-tracker.component.ts's
-// getProgress/isSimpleCompletion, EMPTY_SIMPLE_COUNTER's own default):
-// goal defaults to 1 when streakMinValue is unset, done means
-// countOnDay[today] >= goal. StopWatch-type counters are still listed
-// (matching the real habit-tracker, which doesn't filter them out either)
-// but marked non-interactive - their countOnDay values are milliseconds of
-// tracked time, not a "did you do this" count, so toggling one the same way
-// as a click/streak counter would mean overwriting real tracked duration
-// with a bogus 0 or goal value. Only isEnabled counters are included,
-// matching selectEnabledSimpleCounters.
+// Returns up to `limit` enabled, manipulable SimpleCounters ("habits" in the
+// real app's own UI labeling), each with today's progress. "Done today"
+// mirrors the majority of the real UI's own comparisons
+// (habit-tracker.component.ts's getProgress/isSimpleCompletion,
+// EMPTY_SIMPLE_COUNTER's own default): goal defaults to 1 when
+// streakMinValue is unset, done means countOnDay[today] >= goal.
+// StopWatch-type counters are excluded (unlike the real habit-tracker,
+// which does still list them) - their countOnDay values are milliseconds
+// of tracked time, not a "did you do this" count, and the watch's only
+// interaction here is Select/long-select incrementing/decrementing by one,
+// which has no sensible meaning against a duration. Only isEnabled
+// counters are included, matching selectEnabledSimpleCounters.
 function getActiveHabits(state, limit) {
   var counters = state.simpleCounter || {};
   var today = todayStr();
   var rows = Object.keys(counters)
     .map(function (id) { return counters[id]; })
-    .filter(function (c) { return c && c.id && c.title && c.isEnabled; })
+    // Only isEnabled (matches selectEnabledSimpleCounters) and only
+    // ClickCounter/RepeatedCountdownReminder types - StopWatch-type
+    // counters' countOnDay values are milliseconds of tracked time, not a
+    // count, so there's nothing on the watch to increment/decrement; they
+    // used to be listed read-only, but the watch has no other view where a
+    // non-manipulable habit is useful, so they're excluded outright here
+    // instead.
+    .filter(function (c) { return c && c.id && c.title && c.isEnabled && c.type !== 'StopWatch'; })
     .map(function (c) {
       var goal = c.streakMinValue || 1;
       var value = (c.countOnDay && c.countOnDay[today]) || 0;
-      var interactive = c.type !== 'StopWatch';
       return {
         id: c.id,
         title: c.title,
         value: value,
         goal: goal,
-        done: interactive && value >= goal,
-        interactive: interactive,
+        done: value >= goal,
       };
     });
   rows.sort(function (a, b) {

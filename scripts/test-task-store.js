@@ -777,7 +777,7 @@ check('moveToOtherProject on an undated, no-project task fixes it away from "No 
   assert.deepStrictEqual(tasks.map((t) => t.project), ['Errands']);
 });
 
-check('getActiveHabits includes an enabled click-counter, marked interactive, not done below goal', () => {
+check('getActiveHabits includes an enabled click-counter, not done below goal', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
@@ -786,7 +786,7 @@ check('getActiveHabits includes an enabled click-counter, marked interactive, no
     state
   );
   const rows = habits(state);
-  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, interactive: true }]);
+  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false }]);
 });
 
 check('getActiveHabits marks done once today\'s count reaches goal', () => {
@@ -820,16 +820,13 @@ check('getActiveHabits excludes a disabled counter', () => {
   assert.deepStrictEqual(habits(state), []);
 });
 
-check('getActiveHabits marks a StopWatch counter non-interactive and never done, but still lists it', () => {
+check('getActiveHabits excludes a StopWatch-type counter entirely (not manipulable from the watch)', () => {
   const state = store.emptyState();
   store.applyOperations(
     [addCounter({ id: 'h1', title: 'Deep work', isEnabled: true, type: 'StopWatch', streakMinValue: 1, countOnDay: { [today]: 5000 } })],
     state
   );
-  const row = habits(state)[0];
-  assert.strictEqual(row.interactive, false);
-  assert.strictEqual(row.done, false);
-  assert.strictEqual(row.value, 5000);
+  assert.deepStrictEqual(habits(state), []);
 });
 
 check('[SimpleCounter] Set SimpleCounter Counter Today replaces (not adds to) today\'s count', () => {

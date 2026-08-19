@@ -19,7 +19,7 @@ var MSG_TRACK_TIME_STOP = 7;
 var MSG_HABIT_SYNC_START = 8;
 var MSG_HABIT_ITEM = 9;
 var MSG_HABIT_SYNC_END = 10;
-var MSG_HABIT_TOGGLE = 11;
+var MSG_HABIT_ADJUST = 11; // watch -> phone: HABIT_ID + HABIT_DELTA (+1 or -1)
 
 var STATUS_OK = 0;
 var STATUS_SYNCING = 1;
@@ -27,9 +27,12 @@ var STATUS_NOT_PAIRED = 2;
 var STATUS_ERROR = 3;
 
 var MAX_TASKS = 30;
-// Kept in sync with MAX_HABITS in main.c - aplite's tight ~24KB heap is the
-// binding constraint (see that constant's own comment).
-var MAX_HABITS = 6;
+// Matches the generous (non-aplite) MAX_HABITS in main.c - aplite compiles
+// with a smaller one and safely clamps/ignores anything beyond its own
+// array bound (see MAX_HABITS's own comment there), so this can just be the
+// ceiling every other platform actually uses; no need to know which
+// platform is paired.
+var MAX_HABITS = 8;
 
 // Matches the real client's CURRENT_SCHEMA_VERSION (schema-version.ts) at
 // time of writing. The server only validates this field's range when it's
@@ -207,6 +210,9 @@ function sendTaskAt(tasks, index) {
     // wrap into a negative/garbage duration on the watch.
     dict.TASK_TIME_SPENT_MS = Math.min(t.timeSpent, 2000000000);
   }
+  if (t.timeEstimate) {
+    dict.TASK_TIME_ESTIMATE_MS = Math.min(t.timeEstimate, 2000000000);
+  }
   Pebble.sendAppMessage(dict, function () {
     sendTaskAt(tasks, index + 1);
   }, function (e) {
@@ -239,11 +245,8 @@ function sendHabitAt(habits, index) {
     HABIT_ID: String(h.id),
     HABIT_TITLE: String(h.title).slice(0, 63),
     HABIT_DONE: h.done ? 1 : 0,
-    // AppMessage ints are 32-bit signed - a StopWatch-type counter's value
-    // is milliseconds, same overflow concern/cap as TASK_TIME_SPENT_MS.
-    HABIT_VALUE: Math.min(h.value, 2000000000),
+    HABIT_VALUE: h.value,
     HABIT_GOAL: h.goal,
-    HABIT_INTERACTIVE: h.interactive ? 1 : 0,
   };
   Pebble.sendAppMessage(dict, function () {
     sendHabitAt(habits, index + 1);
@@ -276,10 +279,6 @@ function doSync() {
   var lastSeq = loadLastSeq();
   var vectorClock = loadVectorClock();
   var isFirstSync = lastSeq === 0 && Object.keys(state.task).length === 0;
-  // Set right before pullPage()'s loop actually starts (below), not here -
-  // bootstrapFromSnapshot() can still move lastSeq forward first on a first
-  // sync, and that jump shouldn't count against the progress range.
-  var startSeq;
 
   var pullPage = function () {
     // Deliberately NOT passing clientId as excludeClient here (unlike every
@@ -317,17 +316,6 @@ function doSync() {
           lastSeq = entry.serverSeq;
         }
       });
-      // Progress feedback for a large first sync (or any multi-page catch-
-      // up): res.latestSeq is the account's overall high-water mark (see
-      // the note above) - exactly the right denominator for "how far
-      // through this account's history are we", since ops are strictly
-      // sequential by serverSeq. Capped below 100 while hasMore is still
-      // true so a concurrent upload nudging latestSeq forward mid-sync
-      // can't make this read 100% before the sync actually finishes.
-      if (res.hasMore && res.latestSeq > startSeq) {
-        var percent = Math.min(99, Math.floor(100 * (lastSeq - startSeq) / (res.latestSeq - startSeq)));
-        sendStatus(STATUS_SYNCING, percent + '%');
-      }
       if (res.hasMore) {
         return pullPage();
       }
@@ -362,10 +350,7 @@ function doSync() {
     });
   };
 
-  var work = (isFirstSync ? bootstrapFromSnapshot() : Promise.resolve()).then(function () {
-    startSeq = lastSeq;
-    return pullPage();
-  });
+  var work = isFirstSync ? bootstrapFromSnapshot().then(pullPage) : pullPage();
 
   // Returned so callers that trigger a sync as a side effect (e.g.
   // handleTaskToggle's autoSyncOnComplete) can tell once it's actually
@@ -596,7 +581,10 @@ function handleTrackTimeStop(taskId, trackedMs) {
     });
 }
 
-function handleHabitToggle(habitId, done) {
+// delta is +1 (Select) or -1 (long-select). Applied against whatever this
+// phone's own cache currently has for today's count, not the watch's own
+// (possibly stale) value - the watch sends a direction, not a target.
+function handleHabitAdjust(habitId, delta) {
   var config = loadConfig();
   if (!config || !config.jwt) {
     sendStatus(STATUS_NOT_PAIRED);
@@ -606,8 +594,11 @@ function handleHabitToggle(habitId, done) {
   var today = store.todayStr();
   var state = loadState();
   var counter = state.simpleCounter[habitId];
-  var goal = (counter && counter.streakMinValue) || 1;
-  var newVal = done ? goal : 0;
+  if (!counter) {
+    return;
+  }
+  var currentVal = (counter.countOnDay && counter.countOnDay[today]) || 0;
+  var newVal = Math.max(0, currentVal + delta);
 
   // Safe to apply optimistically here, unlike handleTrackTimeStop's
   // additive delta - this mirrors handleTaskToggle's isDone set: a plain
@@ -615,12 +606,10 @@ function handleHabitToggle(habitId, done) {
   // setSimpleCounterCounterToday case, Math.max(0, newVal) - not additive),
   // so re-applying the same value again when this op comes back down
   // through the normal replay path is harmless, not a source of drift.
-  if (counter) {
-    var countOnDay = Object.assign({}, counter.countOnDay);
-    countOnDay[today] = newVal;
-    state.simpleCounter[habitId] = Object.assign({}, counter, { countOnDay: countOnDay });
-    saveState(state);
-  }
+  var countOnDay = Object.assign({}, counter.countOnDay);
+  countOnDay[today] = newVal;
+  state.simpleCounter[habitId] = Object.assign({}, counter, { countOnDay: countOnDay });
+  saveState(state);
 
   var crypto = getCrypto();
   // Matches setSimpleCounterCounterToday's action payload exactly:
@@ -648,7 +637,7 @@ function handleHabitToggle(habitId, done) {
   uploadSingleOp(op, config, clientId)
     .catch(function (err) {
       habitFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
-      console.log('[pkjs] failed to upload habit toggle: ' + habitFailureMsg);
+      console.log('[pkjs] failed to upload habit adjustment: ' + habitFailureMsg);
       sendStatus(STATUS_ERROR, habitFailureMsg);
     })
     .then(function () {
@@ -675,8 +664,8 @@ Pebble.addEventListener('appmessage', function (e) {
     case MSG_TRACK_TIME_STOP:
       handleTrackTimeStop(payload.TASK_ID, payload.TRACKED_MS);
       break;
-    case MSG_HABIT_TOGGLE:
-      handleHabitToggle(payload.HABIT_ID, payload.HABIT_DONE === 1);
+    case MSG_HABIT_ADJUST:
+      handleHabitAdjust(payload.HABIT_ID, payload.HABIT_DELTA);
       break;
     default:
       break;

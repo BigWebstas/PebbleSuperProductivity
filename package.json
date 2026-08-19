@@ -1,6 +1,6 @@
 {
   "name": "pebble-super-productivity",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Pebble/PebbleOS watchapp that syncs tasks with Super Productivity's SuperSync server",
   "author": "BW",
   "private": true,
@@ -40,6 +40,21 @@
           "type": "png",
           "name": "IMAGE_LOGO_LARGE",
           "file": "images/icon-large.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_CHECK_WHITE",
+          "file": "images/icon-check-white.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_HEART_CHECK",
+          "file": "images/icon-heart-check.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_HEART_CHECK_WHITE",
+          "file": "images/icon-heart-check-white.png"
         }
       ]
     },
@@ -53,6 +68,7 @@
       "TASK_PROJECT",
       "TASK_DUE_MIN",
       "TASK_TIME_SPENT_MS",
+      "TASK_TIME_ESTIMATE_MS",
       "TRACKED_MS",
       "STATUS_CODE",
       "STATUS_MSG",
@@ -63,7 +79,7 @@
       "HABIT_DONE",
       "HABIT_VALUE",
       "HABIT_GOAL",
-      "HABIT_INTERACTIVE"
+      "HABIT_DELTA"
     ]
   }
 }
