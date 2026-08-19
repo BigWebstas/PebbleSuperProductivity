@@ -185,7 +185,7 @@ check('updateTask on an unknown id creates a bare record rather than throwing', 
   assert.strictEqual(state.task.ghost.isDone, true);
 });
 
-check('planTasksForToday sets dueDay on existing tasks (real task state, even though it no longer drives the active-list filter)', () => {
+check('planTasksForToday sets dueDay on existing tasks', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
@@ -197,6 +197,43 @@ check('planTasksForToday sets dueDay on existing tasks (real task state, even th
   );
   assert.strictEqual(state.task.a.dueDay, today);
   assert.strictEqual(state.task.b.dueDay, today);
+});
+
+check('planTasksForToday clears a stale dueWithTime so it does not shadow the new dueDay', () => {
+  // Regression test for a real bug: "Add to Today" on a task that still
+  // carried a dueWithTime from an earlier, non-today scheduling (e.g.
+  // previously scheduled for a specific time on some other day) set dueDay
+  // correctly but left the old dueWithTime in place. taskIsPlannedForToday()
+  // checks dueWithTime FIRST, so the task stayed invisible under Today Only
+  // forever even though the desktop app - whose real reducer conditionally
+  // clears dueWithTime here too (handlePlanTasksForToday /
+  // shouldClearDueTimeForToday) - showed it normally.
+  const state = store.emptyState();
+  const staleTimestamp = new Date('2099-01-01T09:00:00').getTime();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Old scheduled task', isDone: false, dueWithTime: staleTimestamp }),
+      planTasksForToday(today, ['a']),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueDay, today);
+  assert.strictEqual(state.task.a.dueWithTime, undefined);
+  assert.deepStrictEqual(active(state, 30, false, true).map((t) => t.id), ['a']);
+});
+
+check('planTasksForToday keeps dueWithTime when it already lands on today', () => {
+  const state = store.emptyState();
+  const todayNoon = new Date();
+  todayNoon.setHours(12, 0, 0, 0);
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Already scheduled for today', isDone: false, dueWithTime: todayNoon.getTime() }),
+      planTasksForToday(today, ['a']),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.dueWithTime, todayNoon.getTime());
 });
 
 check('planTasksForToday ignores ids that do not exist yet (matches the real reducer)', () => {

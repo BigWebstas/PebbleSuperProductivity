@@ -204,10 +204,26 @@ function applyTaskAction(op, actionPayload, state) {
     // sake (dueDay is still real task state worth having correct) even
     // though it no longer drives the active-task filter.
     case '[Task Shared] planTasksForToday': {
+      // Confirmed against the real handlePlanTasksForToday
+      // (task-shared-scheduling.reducer.ts): besides setting dueDay, it
+      // ALSO conditionally clears dueWithTime via shouldClearDueTimeForToday
+      // (is-today.util.ts) - cleared unless the existing dueWithTime
+      // already happens to land on today. Previously this case only ever
+      // set dueDay, never touching a leftover dueWithTime - harmless if the
+      // task had none, but taskIsPlannedForToday() checks dueWithTime
+      // FIRST, so a task "Add to Today"'d while still carrying a stale
+      // dueWithTime (any value not already today) stayed hidden from the
+      // watch's Today Only filter forever, even though the desktop
+      // correctly cleared it and showed the task normally.
       var today = actionPayload.today || todayStr();
       (actionPayload.taskIds || []).forEach(function (id) {
         if (tasks[id]) {
-          mergeTaskChanges(tasks, id, { dueDay: today, remindAt: undefined });
+          var changes = { dueDay: today, remindAt: undefined };
+          var existingDueWithTime = tasks[id].dueWithTime;
+          if (existingDueWithTime && !msIsToday(existingDueWithTime)) {
+            changes.dueWithTime = undefined;
+          }
+          mergeTaskChanges(tasks, id, changes);
         }
       });
       break;

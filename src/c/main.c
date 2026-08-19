@@ -2,7 +2,7 @@
 
 // No runtime API exposes the app's own versionLabel (package.json's
 // "version") to C code - keep this in sync by hand on every version bump.
-#define APP_VERSION "0.6.7"
+#define APP_VERSION "0.6.8"
 
 // Dictionary keys are the MESSAGE_KEY_* externs pebble.h pulls in from
 // message_keys.auto.h, generated from the "messageKeys" list in
