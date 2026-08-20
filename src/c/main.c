@@ -2,7 +2,7 @@
 
 // No runtime API exposes the app's own versionLabel (package.json's
 // "version") to C code - keep this in sync by hand on every version bump.
-#define APP_VERSION "0.6.13"
+#define APP_VERSION "0.6.14"
 
 // Dictionary keys are the MESSAGE_KEY_* externs pebble.h pulls in from
 // message_keys.auto.h, generated from the "messageKeys" list in
@@ -276,6 +276,14 @@ static int s_group_count = 0;
 #define SCROLL_STEP_PX 6
 #define SCROLL_GAP_PX 24
 #define TITLE_FONT_KEY FONT_KEY_GOTHIC_18_BOLD
+// One step up from FONT_KEY_GOTHIC_14 (Pebble's system fonts only come in
+// fixed sizes, no arbitrary point sizes) - used for a task row's due/
+// tracked-time/"Done" subtitle and a habit row's value/goal subtitle
+// specifically, not every small-text use in the app (Resync's status line,
+// the Finish Day row's version subtitle, and the empty-list version footer
+// stay at FONT_KEY_GOTHIC_14 - those read more as app chrome than content
+// the user is actively scanning row to row).
+#define SUBTITLE_FONT_KEY FONT_KEY_GOTHIC_18
 #define TITLE_BOX_X 6
 #define TITLE_BOX_Y 2
 
@@ -641,9 +649,11 @@ static void format_due_time(int due_min, char *out, size_t out_len) {
 // keep it compact - this ticks every second while tracking, but a second
 // digit isn't useful once the total is measured in hours), "5m 09s"
 // (>= 1 minute), or "42s". is_tracking prefixes a plain ASCII "> " marker
-// (not a Unicode glyph - see the subtask marker's own comment on why this
-// codebase avoids those) so a live-ticking number reads unambiguously as
-// "currently running" versus a static previously-accumulated total.
+// so a live-ticking number reads unambiguously as "currently running"
+// versus a static previously-accumulated total - plain ASCII here just
+// because there's no need for anything fancier, not because this codebase
+// avoids non-ASCII glyphs in general (see the subtask marker's own comment,
+// task-store.js's SUBTASK_PREFIX, for glyphs confirmed to render fine).
 static void format_duration_ms(int ms, bool is_tracking, char *out, size_t out_len) {
   int total_s = ms / 1000;
   int h = total_s / 3600;
@@ -909,13 +919,13 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   }
 
   if (task->done) {
-    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
-    graphics_draw_text(ctx, "Done", fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 22, bounds.size.w - TITLE_BOX_X * 2, 22);
+    graphics_draw_text(ctx, "Done", fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
   } else {
     // Tracked time is shown BEHIND (after) the due time when the task has
     // one, both sharing the single subtitle line - not its own row, since
-    // every other subtitle here already lives in that same 18px strip.
+    // every other subtitle here already lives in that same 22px strip.
     bool is_tracking_this = s_tracking_task_id[0] != '\0' &&
                              strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
     int effective_ms = task->time_spent_ms;
@@ -961,8 +971,8 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
 
     if (subtitle[0] != '\0') {
-      GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
-      graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+      GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 22, bounds.size.w - TITLE_BOX_X * 2, 22);
+      graphics_draw_text(ctx, subtitle, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
                           GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     }
   }
@@ -991,6 +1001,19 @@ static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
+// Set right before send_finish_day() queues its message; outbox_sent_handler
+// checks this to know a just-CONFIRMED send is the one that should close the
+// app, not some unrelated message (task toggle, resync, ...) that happens to
+// succeed around the same time. Closing only on confirmed send (not merely
+// "queued") is deliberate: closing eagerly and having the send fail
+// afterward would hide that failure behind an app that's no longer open to
+// show it, defeating this app's own outbox_failed_handler fix (see
+// CLAUDE.md's "AppMessage send failures used to be completely silent") for
+// this one action. outbox_failed_handler clears the flag too, so a failed
+// send doesn't leave it armed for some later, unrelated successful send to
+// wrongly trigger a close.
+static bool s_close_after_finish_day_sent = false;
+
 // No extra keys - the watch has no way to build a full-fidelity archive
 // payload itself (its own Task struct is a trimmed display projection, not
 // the real task's full field set other real clients need to persist into
@@ -1178,6 +1201,9 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
     // archiving needs the phone's own full-fidelity state.task cache, which
     // the watch doesn't have; this is a pure fire-and-forget trigger, and
     // the phone pushes an updated task list back once it's actually done.
+    // Closes the app once the send is confirmed (outbox_sent_handler), not
+    // eagerly here - see s_close_after_finish_day_sent's own comment.
+    s_close_after_finish_day_sent = true;
     send_finish_day();
     return;
   }
@@ -1478,8 +1504,26 @@ static void inbox_dropped_handler(AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_WARNING, "AppMessage dropped: %d", (int)reason);
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// Fires once the phone-side OS layer actually confirms delivery (not just
+// "queued") of ANY outbound message - only closes the app when the
+// Finish Day send is what just succeeded, tracked via
+// s_close_after_finish_day_sent (see its own comment).
+static void outbox_sent_handler(DictionaryIterator *iterator, void *context) {
+  if (s_close_after_finish_day_sent) {
+    s_close_after_finish_day_sent = false;
+    window_stack_pop_all(true);
+  }
+}
+#endif
+
 static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_WARNING, "AppMessage send failed: %d", (int)reason);
+#ifndef PBL_PLATFORM_APLITE
+  // Don't leave the flag armed for some later, unrelated successful send to
+  // wrongly close the app - see s_close_after_finish_day_sent's own comment.
+  s_close_after_finish_day_sent = false;
+#endif
   // Previously silent (log-only): a watch->phone send (task toggle, track-
   // time-stop, resync request) that fails here - e.g. the phone app is
   // backgrounded or Bluetooth is momentarily busy - used to vanish with zero
@@ -1649,7 +1693,10 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // past goal (still "done") or decremented back below it on the same day,
   // so dimming here would flicker on every single increment/decrement
   // rather than mark a settled, no-longer-relevant task.
-  GColor fg = is_selected ? GColorWhite : GColorBlack;
+  // Text stays black even when selected (unlike every other selectable row
+  // in this app, which inverts to white) - the cerulean selected background
+  // here is light enough that black reads better on it than white does.
+  GColor fg = GColorBlack;
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_text_color(ctx, fg);
@@ -1706,8 +1753,8 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   } else {
     snprintf(subtitle, sizeof(subtitle), "%d/%d", habit->value, habit->goal);
   }
-  GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
-  graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+  GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 22, bounds.size.w - TITLE_BOX_X * 2, 22);
+  graphics_draw_text(ctx, subtitle, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
@@ -1986,6 +2033,9 @@ static void init(void) {
   app_message_register_inbox_received(inbox_received_handler);
   app_message_register_inbox_dropped(inbox_dropped_handler);
   app_message_register_outbox_failed(outbox_failed_handler);
+#ifndef PBL_PLATFORM_APLITE
+  app_message_register_outbox_sent(outbox_sent_handler);
+#endif
   app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
 
   s_main_window = window_create();

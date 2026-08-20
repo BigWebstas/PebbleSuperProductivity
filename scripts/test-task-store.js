@@ -811,8 +811,8 @@ check('getActiveTasks nests subtasks under their main task, indented', () => {
   );
   const tasks = active(state);
   assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1', 'sub2']);
-  assert.strictEqual(tasks[1].title, '    ~ Book flights');
-  assert.strictEqual(tasks[2].title, '    ~ Book hotel');
+  assert.strictEqual(tasks[1].title, '    » Book flights');
+  assert.strictEqual(tasks[2].title, '    » Book hotel');
 });
 
 check('getActiveTasks never lists a subtask as a top-level row on its own', () => {

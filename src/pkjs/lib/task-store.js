@@ -771,12 +771,15 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
 // into the title string itself. Plain leading spaces alone read as barely
 // different from a regular row at this font size - a leading marker plus
 // wider indentation reads unambiguously as "sub-item of the row above".
-// Plain ASCII (~), not a Unicode glyph. Tried, in order: the literal
-// letter L; U+2514 (BOX DRAWINGS LIGHT UP AND RIGHT, "└") and U+00C0 ('À'),
-// of which only À actually rendered - U+2514 renders as an empty
-// missing-glyph box on this app's system font on every platform, including
-// color ones (confirmed in the emulator, twice). Settled on ~ regardless.
-var SUBTASK_PREFIX = '    ~ ';
+// U+00BB (RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK, "»") - confirmed
+// rendering correctly on this app's system font in the emulator, unlike an
+// earlier attempt at U+2514 (BOX DRAWINGS LIGHT UP AND RIGHT, "└"), which
+// showed as an empty missing-glyph box on every platform (confirmed twice).
+// Not every non-ASCII codepoint fails the way U+2514 did - » (plus ›, ·,
+// also tried) rendered fine, it was specifically that one glyph missing
+// from the font, not a blanket Unicode limitation. Previously plain ASCII
+// (~) for exactly that reason, before this was re-tested more thoroughly.
+var SUBTASK_PREFIX = '    » ';
 
 function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
   // t is already guaranteed a real title here - getActiveTasks filters
