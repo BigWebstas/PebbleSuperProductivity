@@ -799,26 +799,19 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
 // mirrors the majority of the real UI's own comparisons
 // (habit-tracker.component.ts's getProgress/isSimpleCompletion,
 // EMPTY_SIMPLE_COUNTER's own default): goal defaults to 1 when
-// streakMinValue is unset, done means countOnDay[today] >= goal.
-// StopWatch-type counters are excluded (unlike the real habit-tracker,
-// which does still list them) - their countOnDay values are milliseconds
-// of tracked time, not a "did you do this" count, and the watch's only
-// interaction here is Select/long-select incrementing/decrementing by one,
-// which has no sensible meaning against a duration. Only isEnabled
-// counters are included, matching selectEnabledSimpleCounters.
+// streakMinValue is unset, done means countOnDay[today] >= goal - this
+// holds for StopWatch-type counters too (value/goal are both milliseconds
+// there, not a plain count), which the watch now shows with a live-ticking
+// timer (long-select to start/stop) instead of the Select/long-select
+// increment/decrement ClickCounter/RepeatedCountdownReminder rows use - see
+// isStopwatch below and main.c's habits_menu_select_long_click. Only
+// isEnabled counters are included, matching selectEnabledSimpleCounters.
 function getActiveHabits(state, limit) {
   var counters = state.simpleCounter || {};
   var today = todayStr();
   var rows = Object.keys(counters)
     .map(function (id) { return counters[id]; })
-    // Only isEnabled (matches selectEnabledSimpleCounters) and only
-    // ClickCounter/RepeatedCountdownReminder types - StopWatch-type
-    // counters' countOnDay values are milliseconds of tracked time, not a
-    // count, so there's nothing on the watch to increment/decrement; they
-    // used to be listed read-only, but the watch has no other view where a
-    // non-manipulable habit is useful, so they're excluded outright here
-    // instead.
-    .filter(function (c) { return c && c.id && c.title && c.isEnabled && c.type !== 'StopWatch'; })
+    .filter(function (c) { return c && c.id && c.title && c.isEnabled; })
     .map(function (c) {
       var goal = c.streakMinValue || 1;
       var value = (c.countOnDay && c.countOnDay[today]) || 0;
@@ -828,6 +821,7 @@ function getActiveHabits(state, limit) {
         value: value,
         goal: goal,
         done: value >= goal,
+        isStopwatch: c.type === 'StopWatch',
       };
     });
   rows.sort(function (a, b) {

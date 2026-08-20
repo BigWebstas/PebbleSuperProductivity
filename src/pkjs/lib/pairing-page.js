@@ -108,8 +108,8 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    <label for="groupByProject">Group tasks by project</label>\n' +
 '  </div>\n' +
 '  <p class="hint">\n' +
-'    Shows a bold, underlined project name above each group of tasks on\n' +
-'    the watch, instead of one flat list.\n' +
+'    Shows a bold, underlined project name on a green header above each\n' +
+'    group of tasks on the watch, instead of one flat list.\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
@@ -154,12 +154,13 @@ projectOptions + '\n' +
 '  <h2>Sync</h2>\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="autoSyncOnComplete" type="checkbox"' + (autoSyncOnComplete ? ' checked' : '') + '>\n' +
-'    <label for="autoSyncOnComplete">Sync automatically when completing a task</label>\n' +
+'    <label for="autoSyncOnComplete">Sync automatically after a watch change</label>\n' +
 '  </div>\n' +
 '  <p class="hint">\n' +
-'    Pulls the latest changes from the server right after you check off a\n' +
-'    task on the watch, instead of waiting for the next manual Resync or\n' +
-'    app launch. Uses a bit more battery/data per completed task.\n' +
+'    Pulls the latest changes from the server right after you complete a\n' +
+'    task, track time, adjust a habit, or add a task on the watch, instead\n' +
+'    of waiting for the next manual Resync or app launch. Uses a bit more\n' +
+'    battery/data per action.\n' +
 '  </p>\n' +
 '\n' +
 '  <h2>Danger zone</h2>\n' +

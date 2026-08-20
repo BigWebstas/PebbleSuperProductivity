@@ -20,6 +20,7 @@ var MSG_HABIT_SYNC_START = 8;
 var MSG_HABIT_ITEM = 9;
 var MSG_HABIT_SYNC_END = 10;
 var MSG_HABIT_ADJUST = 11; // watch -> phone: HABIT_ID + HABIT_DELTA (+1 or -1)
+var MSG_HABIT_TRACK_STOP = 13; // watch -> phone: HABIT_ID + TRACKED_MS (this session's tracked ms, StopWatch-type only)
 var MSG_TASK_ADD = 12; // watch -> phone: TASK_TITLE (new task's dictated title)
 
 var STATUS_OK = 0;
@@ -267,6 +268,7 @@ function sendHabitAt(habits, index) {
     HABIT_DONE: h.done ? 1 : 0,
     HABIT_VALUE: h.value,
     HABIT_GOAL: h.goal,
+    HABIT_TYPE: h.isStopwatch ? 1 : 0,
   };
   Pebble.sendAppMessage(dict, function () {
     sendHabitAt(habits, index + 1);
@@ -693,6 +695,63 @@ function handleHabitAdjust(habitId, delta) {
     });
 }
 
+// Long-select time tracking for a StopWatch-type habit - modeled directly on
+// handleTrackTimeStop (same additive-delta reasoning: syncSimpleCounterTime
+// applies duration on top of whatever's already there server-side, so NOT
+// bumping state.simpleCounter here optimistically avoids the exact double-
+// count drift handleTrackTimeStop's own comment documents for tasks. The
+// watch's own C-side optimistic bump (stop_habit_tracking_and_report) gives
+// instant feedback and gets wholesale-replaced by the next
+// MSG_HABIT_SYNC_END, which runAutoSyncAfterOp's follow-up doSync() below
+// triggers moments later by default.
+function handleHabitTrackStop(habitId, trackedMs) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (config.enableHabits === false) {
+    return;
+  }
+  if (!habitId || !trackedMs || trackedMs <= 0) {
+    return;
+  }
+
+  var today = store.todayStr();
+  var crypto = getCrypto();
+  // Matches syncSimpleCounterTime's action payload exactly: { id, date,
+  // duration } (simple-counter.actions.ts) - same shape as syncTimeSpent's
+  // { taskId, date, duration }, just id instead of taskId.
+  var payload = { actionPayload: { id: habitId, date: today, duration: trackedMs }, entityChanges: [] };
+  var clientId = getOrCreateClientId();
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  var op = {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[SimpleCounter] Sync counter time',
+    entityType: 'SIMPLE_COUNTER',
+    entityId: habitId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+
+  var trackFailureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      trackFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload habit tracked time: ' + trackFailureMsg);
+      sendStatus(STATUS_ERROR, trackFailureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, trackFailureMsg);
+    });
+}
+
 // Watch-dictated "Add Task" - the only watch-initiated write that creates a
 // brand-new entity rather than toggling/adjusting an existing one.
 // config.defaultProjectId is a setting local to this app's own pairing page
@@ -835,6 +894,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_HABIT_ADJUST:
       handleHabitAdjust(payload.HABIT_ID, payload.HABIT_DELTA);
+      break;
+    case MSG_HABIT_TRACK_STOP:
+      handleHabitTrackStop(payload.HABIT_ID, payload.TRACKED_MS);
       break;
     case MSG_TASK_ADD:
       handleAddTask(payload.TASK_TITLE);

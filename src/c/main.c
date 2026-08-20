@@ -2,7 +2,7 @@
 
 // No runtime API exposes the app's own versionLabel (package.json's
 // "version") to C code - keep this in sync by hand on every version bump.
-#define APP_VERSION "0.6.11"
+#define APP_VERSION "0.6.12"
 
 // Dictionary keys are the MESSAGE_KEY_* externs pebble.h pulls in from
 // message_keys.auto.h, generated from the "messageKeys" list in
@@ -30,6 +30,7 @@
 #define KEY_HABIT_VALUE MESSAGE_KEY_HABIT_VALUE
 #define KEY_HABIT_GOAL MESSAGE_KEY_HABIT_GOAL
 #define KEY_HABIT_DELTA MESSAGE_KEY_HABIT_DELTA
+#define KEY_HABIT_TYPE MESSAGE_KEY_HABIT_TYPE
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
 
@@ -47,6 +48,7 @@ enum {
   MSG_HABIT_SYNC_END = 10,  // phone -> watch: list is complete, redraw
   MSG_HABIT_ADJUST = 11,    // watch -> phone: HABIT_ID + HABIT_DELTA (+1 or -1)
   MSG_TASK_ADD = 12,        // watch -> phone: TASK_TITLE (new task's dictated title)
+  MSG_HABIT_TRACK_STOP = 13, // watch -> phone: HABIT_ID + TRACKED_MS (this session's tracked ms, StopWatch-type only)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -94,10 +96,11 @@ typedef struct {
 
 // "Habits" are Super Productivity's SimpleCounter feature (real entityType
 // SIMPLE_COUNTER - there is no separate "Habit" entity). StopWatch-type
-// counters (value in ms of tracked time, not a "did you do this today"
-// count - nothing to increment/decrement) are filtered out entirely before
-// ever reaching the watch (getActiveHabits in task-store.js), so every
-// Habit here is always manipulable.
+// counters have a ms-valued value/goal (tracked time, not a "did you do
+// this today" count) and a long-select-to-start/stop timer instead of the
+// Select/long-select increment/decrement ClickCounter/RepeatedCountdown-
+// Reminder rows use - see Habit.is_stopwatch, habits_menu_select_long_click,
+// and start_habit_tracking/stop_habit_tracking_and_report below.
 // Kept low (unlike MAX_TASKS' 30) because aplite's ~24KB RAM budget is
 // already tight after MAX_ID_LEN's own 96-byte bump for calendar tasks.
 // aplite specifically, not a shared cap - basalt/chalk/diorite still have
@@ -106,8 +109,15 @@ typedef struct {
 // Confirmed via pebble build's own per-platform memory report: 8 overflowed
 // aplite's linked binary by 280 bytes even before the row-icon resources
 // added below; those pushed the workable aplite number down further to 3.
+// The StopWatch habit timer (see s_tracking_habit_id's own comment) is
+// excluded from aplite's VISIBLE habit list entirely rather than shown
+// read-only there (see resolve_habit_at/habits_menu_get_num_rows) - even
+// with the tracking machinery and its display path fully compiled out,
+// the Habit struct's own extra is_stopwatch field (needed on every
+// platform, to know which entries to skip) still grew aplite's habit
+// array past budget, pushing the workable number down once more to 2.
 #ifdef PBL_PLATFORM_APLITE
-#define MAX_HABITS 3
+#define MAX_HABITS 2
 #else
 #define MAX_HABITS 8
 #endif
@@ -119,8 +129,13 @@ typedef struct {
 typedef struct {
   char id[MAX_HABIT_ID_LEN];
   char title[MAX_TITLE_LEN];
+  // The two bools are adjacent (not one before, one after value/goal) so
+  // they share a single alignment-padding gap ahead of the ints instead of
+  // each opening their own - zero-cost on every platform, but every byte
+  // matters on aplite (see MAX_HABITS' own comment).
   bool done;
-  int value; // today's count
+  bool is_stopwatch; // StopWatch-type counter - see the comment above
+  int value; // today's count, or ms tracked today when is_stopwatch
   int goal;  // streakMinValue-derived target used for the "value/goal" subtitle
 } Habit;
 
@@ -205,6 +220,29 @@ static char s_tracking_task_id[MAX_ID_LEN] = "";
 static time_t s_tracking_start_epoch = 0;
 static AppTimer *s_tracking_tick_timer = NULL;
 #define TRACKING_TICK_INTERVAL_MS 1000
+
+// Same idea as s_tracking_task_id above, but for a StopWatch-type habit -
+// kept as its own independent slot (not reusing s_tracking_task_id) since
+// the real app's own currentTaskId (task) and SimpleCounter.isOn (habit)
+// are independent pieces of state too: tracking a task and a habit
+// stopwatch at the same time is a real, valid scenario there, not a
+// conflict to resolve. Unlike s_tracking_tick_timer (which redraws
+// s_menu_layer, a layer that exists for the app's whole lifetime), this
+// one's tick timer only runs while the habits window is actually loaded -
+// see habits_window_load/unload - since s_habits_menu_layer is torn down
+// and rebuilt on every visit to that window.
+// Compiled out entirely on aplite (#ifndef, matching s_mic_bitmap's own
+// precedent for the same reason): the tracking machinery (persisted
+// start/stop state, tick timer, the functions below) pushed aplite's
+// already-tight budget 820 bytes over its .bss region even with
+// MAX_HABITS already down to 3 there. A StopWatch habit still shows its
+// "value / goal" progress read-only on aplite (habits_menu_draw_row) -
+// just without the ability to start/stop tracking from the watch itself.
+#ifndef PBL_PLATFORM_APLITE
+static char s_tracking_habit_id[MAX_HABIT_ID_LEN] = "";
+static time_t s_tracking_habit_start_epoch = 0;
+static AppTimer *s_habit_tracking_tick_timer = NULL;
+#endif
 
 static Task s_tasks[MAX_TASKS];
 static int s_task_count = 0;      // tasks currently shown (committed)
@@ -340,6 +378,32 @@ static void load_tracking(void) {
     s_tracking_start_epoch = (time_t)persist_read_int(PERSIST_KEY_TRACKING_START);
   }
 }
+
+#ifndef PBL_PLATFORM_APLITE
+static const uint32_t PERSIST_KEY_HABIT_TRACKING_ID = 130;
+static const uint32_t PERSIST_KEY_HABIT_TRACKING_START = 131;
+
+// Mirrors save_tracking()/load_tracking() above, for a tracked StopWatch
+// habit instead of a tracked task - see s_tracking_habit_id's own comment
+// on why this is a separate slot rather than reusing the task one, and on
+// why this whole block is compiled out on aplite.
+static void save_habit_tracking(void) {
+  if (s_tracking_habit_id[0] != '\0') {
+    persist_write_string(PERSIST_KEY_HABIT_TRACKING_ID, s_tracking_habit_id);
+    persist_write_int(PERSIST_KEY_HABIT_TRACKING_START, (int)s_tracking_habit_start_epoch);
+  } else {
+    persist_delete(PERSIST_KEY_HABIT_TRACKING_ID);
+    persist_delete(PERSIST_KEY_HABIT_TRACKING_START);
+  }
+}
+
+static void load_habit_tracking(void) {
+  if (persist_exists(PERSIST_KEY_HABIT_TRACKING_ID)) {
+    persist_read_string(PERSIST_KEY_HABIT_TRACKING_ID, s_tracking_habit_id, sizeof(s_tracking_habit_id));
+    s_tracking_habit_start_epoch = (time_t)persist_read_int(PERSIST_KEY_HABIT_TRACKING_START);
+  }
+}
+#endif
 
 static void request_sync(void);
 static void hide_error_overlay(void);
@@ -498,6 +562,20 @@ static Task *find_task_by_id(const char *id) {
   }
   return NULL;
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// Same idea as find_task_by_id, for the habits list - only needed by the
+// habit-tracking functions below, which are themselves compiled out on
+// aplite (see s_tracking_habit_id's own comment).
+static Habit *find_habit_by_id(const char *id) {
+  for (int i = 0; i < s_habit_count; i++) {
+    if (strncmp(s_habits[i].id, id, MAX_HABIT_ID_LEN) == 0) {
+      return &s_habits[i];
+    }
+  }
+  return NULL;
+}
+#endif
 
 // Resolves a MenuIndex to the Task it points at, or NULL if it isn't on a
 // task row at all (the Resync row, a group header, or nothing there once
@@ -1256,6 +1334,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *done_tuple = dict_find(iterator, KEY_HABIT_DONE);
       Tuple *value_tuple = dict_find(iterator, KEY_HABIT_VALUE);
       Tuple *goal_tuple = dict_find(iterator, KEY_HABIT_GOAL);
+      Tuple *type_tuple = dict_find(iterator, KEY_HABIT_TYPE);
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -1272,6 +1351,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habits[idx].done = done_tuple && done_tuple->value->int32 != 0;
       s_habits[idx].value = value_tuple ? value_tuple->value->int32 : 0;
       s_habits[idx].goal = goal_tuple ? goal_tuple->value->int32 : 0;
+      s_habits[idx].is_stopwatch = type_tuple && type_tuple->value->int32 != 0;
       break;
     }
     case MSG_HABIT_SYNC_END: {
@@ -1350,10 +1430,32 @@ static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult
 // ---------- habits window ----------
 
 static Habit *resolve_habit_at(MenuIndex index) {
-  if (index.section != 0 || (int)index.row >= s_habit_count) {
+  if (index.section != 0) {
+    return NULL;
+  }
+#ifdef PBL_PLATFORM_APLITE
+  // StopWatch-type habits are skipped entirely on aplite (no tracking
+  // machinery or read-only display path is compiled in there - see
+  // MAX_HABITS' own comment), so row indices here walk only the
+  // non-StopWatch subset of s_habits, same list habits_menu_get_num_rows
+  // counts.
+  int visible_row = 0;
+  for (int i = 0; i < s_habit_count; i++) {
+    if (s_habits[i].is_stopwatch) {
+      continue;
+    }
+    if (visible_row == (int)index.row) {
+      return &s_habits[i];
+    }
+    visible_row++;
+  }
+  return NULL;
+#else
+  if ((int)index.row >= s_habit_count) {
     return NULL;
   }
   return &s_habits[index.row];
+#endif
 }
 
 static void send_habit_adjust(Habit *habit, int32_t delta) {
@@ -1367,12 +1469,101 @@ static void send_habit_adjust(Habit *habit, int32_t delta) {
   app_message_outbox_send();
 }
 
+// Everything from here through stop_habit_tracking_and_report is the
+// StopWatch-habit timer itself - compiled out entirely on aplite (see
+// s_tracking_habit_id's own comment on why). habits_menu_draw_row/
+// select_long_click below have their own narrower #ifndef guards around
+// just the pieces that touch this state, so a StopWatch habit still
+// displays its progress read-only on aplite.
+#ifndef PBL_PLATFORM_APLITE
+static void send_habit_track_stop(const char *habit_id, int32_t tracked_ms) {
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+    return;
+  }
+  dict_write_int32(iter, KEY_MSG_TYPE, MSG_HABIT_TRACK_STOP);
+  dict_write_cstring(iter, KEY_HABIT_ID, habit_id);
+  dict_write_int32(iter, KEY_TRACKED_MS, tracked_ms);
+  app_message_outbox_send();
+}
+
+// Redraw-only ticker for a tracked StopWatch habit, mirroring
+// tracking_tick_callback for tasks - only the elapsed-time text changes each
+// tick, so mark_dirty rather than reload_data. Guarded on s_habits_menu_layer
+// being non-NULL because, unlike s_menu_layer (alive for the app's whole
+// lifetime), this layer is torn down whenever the habits window unloads -
+// see stop_habit_tracking_tick() being called there before the destroy.
+static void habit_tracking_tick_callback(void *data) {
+  if (s_habits_menu_layer) {
+    layer_mark_dirty(menu_layer_get_layer(s_habits_menu_layer));
+  }
+  s_habit_tracking_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, habit_tracking_tick_callback, NULL);
+}
+
+static void start_habit_tracking_tick(void) {
+  if (!s_habit_tracking_tick_timer) {
+    s_habit_tracking_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, habit_tracking_tick_callback, NULL);
+  }
+}
+
+static void stop_habit_tracking_tick(void) {
+  if (s_habit_tracking_tick_timer) {
+    app_timer_cancel(s_habit_tracking_tick_timer);
+    s_habit_tracking_tick_timer = NULL;
+  }
+}
+
+static void start_habit_tracking(Habit *habit) {
+  strncpy(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN - 1);
+  s_tracking_habit_id[MAX_HABIT_ID_LEN - 1] = '\0';
+  s_tracking_habit_start_epoch = time(NULL);
+  save_habit_tracking();
+  start_habit_tracking_tick();
+}
+
+// Stops whatever StopWatch habit is currently being tracked (a no-op if
+// nothing is) - mirrors stop_tracking_and_report's task equivalent,
+// including the optimistic local bump (corrected by the next full sync,
+// same as everywhere else this app does that).
+static void stop_habit_tracking_and_report(void) {
+  if (s_tracking_habit_id[0] == '\0') {
+    return;
+  }
+  time_t elapsed_s = time(NULL) - s_tracking_habit_start_epoch;
+  if (elapsed_s > 0) {
+    int32_t elapsed_ms = (int32_t)elapsed_s * 1000;
+    send_habit_track_stop(s_tracking_habit_id, elapsed_ms);
+    Habit *tracked_habit = find_habit_by_id(s_tracking_habit_id);
+    if (tracked_habit) {
+      tracked_habit->value += elapsed_ms;
+      tracked_habit->done = tracked_habit->value >= tracked_habit->goal;
+      save_habits();
+    }
+  }
+  s_tracking_habit_id[0] = '\0';
+  s_tracking_habit_start_epoch = 0;
+  save_habit_tracking();
+  stop_habit_tracking_tick();
+}
+#endif
+
 static uint16_t habits_menu_get_num_sections(MenuLayer *menu_layer, void *context) {
   return 1;
 }
 
 static uint16_t habits_menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+#ifdef PBL_PLATFORM_APLITE
+  // Matches resolve_habit_at's own aplite-only filtering - see its comment.
+  uint16_t visible = 0;
+  for (int i = 0; i < s_habit_count; i++) {
+    if (!s_habits[i].is_stopwatch) {
+      visible++;
+    }
+  }
+  return visible;
+#else
   return (uint16_t)s_habit_count;
+#endif
 }
 
 static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
@@ -1407,11 +1598,44 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // task list's own subtitle uses for due time + tracked time. Keeping the
   // count alongside "Done" (rather than replacing it, as this used to)
   // matters once incrementing past goal is possible: "Done" alone can't
-  // tell you 3/3 from 7/3. StopWatch-type counters (no simple increment/
-  // decrement state - see the Habit struct's own comment) are filtered out
-  // entirely before ever reaching the watch (getActiveHabits in
-  // task-store.js), so every row here is manipulable.
-  char subtitle[32];
+  // tell you 3/3 from 7/3.
+  // Sized for the worst case of the StopWatch branch below: two 20-byte
+  // format_duration_ms outputs joined by " / " plus " - Done" (matches
+  // menu_draw_row's own combined[48] sizing for the analogous task subtitle,
+  // with extra headroom for " - Done").
+  char subtitle[56];
+#ifndef PBL_PLATFORM_APLITE
+  if (habit->is_stopwatch) {
+    // Same "spent / estimate" formatting as a task's own timer subtitle
+    // (menu_draw_row), reusing format_duration_ms directly - value/goal are
+    // ms here, not a plain count. effective_ms adds this session's
+    // still-running elapsed time on top of the last-synced value, same as
+    // menu_draw_row's effective_ms does for a tracked task.
+    bool is_tracking_this = s_tracking_habit_id[0] != '\0' &&
+                             strncmp(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN) == 0;
+    int effective_ms = habit->value;
+    if (is_tracking_this) {
+      time_t elapsed_s = time(NULL) - s_tracking_habit_start_epoch;
+      if (elapsed_s > 0) {
+        effective_ms += (int)elapsed_s * 1000;
+      }
+    }
+    bool effective_done = effective_ms >= habit->goal;
+    char time_text[20];
+    format_duration_ms(effective_ms, is_tracking_this, time_text, sizeof(time_text));
+    char goal_text[20];
+    format_duration_ms(habit->goal, false, goal_text, sizeof(goal_text));
+    if (effective_done) {
+      snprintf(subtitle, sizeof(subtitle), "%s / %s - Done", time_text, goal_text);
+    } else {
+      snprintf(subtitle, sizeof(subtitle), "%s / %s", time_text, goal_text);
+    }
+  } else
+#endif
+  // On aplite, habit->is_stopwatch is never true here - resolve_habit_at's
+  // own aplite-only filtering never returns one (see its comment) - so the
+  // StopWatch branch above is unreachable there and compiled out entirely,
+  // leaving just this plain-count path.
   if (habit->done) {
     snprintf(subtitle, sizeof(subtitle), "%d/%d - Done", habit->value, habit->goal);
   } else {
@@ -1444,15 +1668,49 @@ static void adjust_habit(MenuIndex index, int32_t delta) {
 }
 
 static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  Habit *habit = resolve_habit_at(*cell_index);
+  if (habit && habit->is_stopwatch) {
+    // No plain-count action for a StopWatch habit - see long-select, which
+    // starts/stops its timer instead (same button this app's task list
+    // already uses for time tracking).
+    return;
+  }
   adjust_habit(*cell_index, 1);
 }
 
+// Long-select toggles time tracking on a StopWatch-type habit (starts it if
+// nothing, or a different habit, is being tracked; stops it if this habit is
+// the one already being tracked - mirrors menu_select_long_click's task
+// timer exactly, including only one habit tracking at a time), or decrements
+// a ClickCounter/RepeatedCountdownReminder habit by one otherwise.
 static void habits_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  Habit *habit = resolve_habit_at(*cell_index);
+  if (habit && habit->is_stopwatch) {
+#ifndef PBL_PLATFORM_APLITE
+    bool already_tracking_this = s_tracking_habit_id[0] != '\0' &&
+                                  strncmp(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN) == 0;
+    stop_habit_tracking_and_report();
+    if (!already_tracking_this) {
+      start_habit_tracking(habit);
+    }
+    menu_layer_reload_data(s_habits_menu_layer);
+#endif
+    // No tracking capability on aplite (see s_tracking_habit_id's own
+    // comment) - a long-press on a StopWatch row is a silent no-op there,
+    // same as everywhere else in this app an unavailable action is ignored
+    // rather than given a separate error/feedback path.
+    return;
+  }
   adjust_habit(*cell_index, -1);
 }
 
 static void update_habits_empty_layer(void) {
-  bool show_empty = (s_habit_count == 0);
+  // habits_menu_get_num_rows(NULL, 0, NULL) rather than a plain s_habit_count
+  // check - on aplite those can disagree (a habit list containing only
+  // StopWatch-type entries has s_habit_count > 0 but zero VISIBLE rows there
+  // - see habits_menu_get_num_rows/resolve_habit_at's own aplite filtering),
+  // which would otherwise leave a blank menu instead of the empty-state text.
+  bool show_empty = (habits_menu_get_num_rows(NULL, 0, NULL) == 0);
   layer_set_hidden(text_layer_get_layer(s_habits_empty_layer), !show_empty);
   layer_set_hidden(menu_layer_get_layer(s_habits_menu_layer), show_empty);
 }
@@ -1486,9 +1744,27 @@ static void habits_window_load(Window *window) {
   layer_add_child(window_layer, text_layer_get_layer(s_habits_empty_layer));
 
   update_habits_empty_layer();
+
+#ifndef PBL_PLATFORM_APLITE
+  // Resumes a StopWatch habit's live-ticking redraw if one was already being
+  // tracked (elapsed time itself is derived from the persisted start
+  // timestamp regardless - see load_habit_tracking() in init() - this is
+  // just about getting the redraw going again), same reasoning as
+  // window_load's own equivalent for task tracking.
+  if (s_tracking_habit_id[0] != '\0') {
+    start_habit_tracking_tick();
+  }
+#endif
 }
 
 static void habits_window_unload(Window *window) {
+#ifndef PBL_PLATFORM_APLITE
+  // Cancel before destroying s_habits_menu_layer, not after - the tick
+  // timer's own callback checks the pointer but a still-running timer
+  // touching a just-destroyed layer is exactly what window_unload's own
+  // stop_tracking_tick()-before-menu_layer_destroy ordering avoids too.
+  stop_habit_tracking_tick();
+#endif
   menu_layer_destroy(s_habits_menu_layer);
   text_layer_destroy(s_habits_empty_layer);
   status_bar_layer_destroy(s_habits_status_bar);
@@ -1637,6 +1913,9 @@ static void init(void) {
   load_tasks();
   load_habits();
   load_tracking();
+#ifndef PBL_PLATFORM_APLITE
+  load_habit_tracking();
+#endif
   recompute_groups();
 
   app_message_register_inbox_received(inbox_received_handler);

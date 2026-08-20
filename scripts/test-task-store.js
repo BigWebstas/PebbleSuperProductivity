@@ -930,7 +930,7 @@ check('getActiveHabits includes an enabled click-counter, not done below goal', 
     state
   );
   const rows = habits(state);
-  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false }]);
+  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, isStopwatch: false }]);
 });
 
 check('getActiveHabits marks done once today\'s count reaches goal', () => {
@@ -964,13 +964,35 @@ check('getActiveHabits excludes a disabled counter', () => {
   assert.deepStrictEqual(habits(state), []);
 });
 
-check('getActiveHabits excludes a StopWatch-type counter entirely (not manipulable from the watch)', () => {
+check('getActiveHabits includes a StopWatch-type counter, tagged isStopwatch, value/goal in ms', () => {
   const state = store.emptyState();
   store.applyOperations(
-    [addCounter({ id: 'h1', title: 'Deep work', isEnabled: true, type: 'StopWatch', streakMinValue: 1, countOnDay: { [today]: 5000 } })],
+    [addCounter({ id: 'h1', title: 'Deep work', isEnabled: true, type: 'StopWatch', streakMinValue: 600000, countOnDay: { [today]: 300000 } })],
     state
   );
-  assert.deepStrictEqual(habits(state), []);
+  const row = habits(state)[0];
+  assert.strictEqual(row.isStopwatch, true);
+  assert.strictEqual(row.value, 300000);
+  assert.strictEqual(row.goal, 600000);
+  assert.strictEqual(row.done, false);
+});
+
+check('getActiveHabits marks a StopWatch-type counter done once its tracked ms reaches goal', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Deep work', isEnabled: true, type: 'StopWatch', streakMinValue: 600000, countOnDay: { [today]: 600000 } })],
+    state
+  );
+  assert.strictEqual(habits(state)[0].done, true);
+});
+
+check('getActiveHabits tags a ClickCounter row isStopwatch: false', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Pushups', isEnabled: true, type: 'ClickCounter', countOnDay: {} })],
+    state
+  );
+  assert.strictEqual(habits(state)[0].isStopwatch, false);
 });
 
 check('[SimpleCounter] Set SimpleCounter Counter Today replaces (not adds to) today\'s count', () => {

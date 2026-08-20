@@ -1,6 +1,6 @@
 {
   "name": "pebble-super-productivity",
-  "version": "0.6.11",
+  "version": "0.6.12",
   "description": "Pebble/PebbleOS watchapp that syncs tasks with Super Productivity's SuperSync server",
   "author": "BW",
   "private": true,
@@ -90,6 +90,7 @@
       "HABIT_VALUE",
       "HABIT_GOAL",
       "HABIT_DELTA",
+      "HABIT_TYPE",
       "HABITS_ENABLED",
       "ADD_TASK_ENABLED"
     ]
