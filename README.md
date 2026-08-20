@@ -31,6 +31,22 @@ Productivity's own **SuperSync** server.
 3. The watch syncs automatically on next launch, or immediately if it's
    already open.
 
+## Changelog
+
+- **v0.6.10** — fix watch-uploaded task/time/habit ops silently failing to apply on desktop (missing `entityChanges` on the op payload)
+- **v0.6.9** — fix voice-added tasks not showing under Today Only, add settings to disable Habits/Add Task
+- **v0.6.8** — fix "Add to Today" leaving a stale `dueWithTime` that hid the task from Today Only
+- **v0.6.7** — add voice-dictated task creation via a new "Add Task" row
+- **v0.6.6** — keep the version footer's text black instead of gray
+- **v0.6.5** — add a version footer row to the task list, stop dimming done habit titles
+- **v0.6.4** — fix a task planned-for-today (no time) not syncing to the watch, change Resync's idle subtitle to "Synced"
+- **v0.6.3** — keep habit count visible alongside "Done", match selected-row color to nav
+- **v0.6.2** — habit increment/decrement, row icons, task time estimate, sync message
+- **v0.6.1** — fix todayOnly wrongly hiding a backlog task planned for today
+- **v0.6.0** — add a habits page
+
+See [GitHub Releases](https://github.com/BigWebstas/PebbleSuperProductivity/releases) for the full history.
+
 ## Known limitations
 
 - **Initial Sync slow?** The initial sync and decrypt can take several minutes upwards of 5+
