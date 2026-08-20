@@ -495,7 +495,16 @@ function handleTaskToggle(taskId, done) {
   // already fixed on the read side - see README) meant a watch toggle
   // wasn't decodable by any real client's replay, including our own next
   // sync: sync only actually worked in the download direction.
-  var payload = { actionPayload: { task: { id: taskId, changes: { isDone: done } } } };
+  // entityChanges is required (even empty) for the real client's own
+  // isMultiEntityPayload() guard (operation.types.ts) - without it,
+  // extractActionPayload() never unwraps actionPayload, so the replayed
+  // action ends up with a top-level `actionPayload` key instead of `task`,
+  // and the reducer destructures `task` as undefined. Empty is valid/
+  // expected here per the real client's own validate-operation-payload.ts
+  // ("Most actions have empty entityChanges because actionPayload is
+  // sufficient for replay") - updateTask's reducer reads `action.task`
+  // directly, never entityChanges.
+  var payload = { actionPayload: { task: { id: taskId, changes: { isDone: done } } }, entityChanges: [] };
   var clientId = getOrCreateClientId();
   // REQUIRED by the real server (confirmed by reading
   // validation.service.ts's sanitizeVectorClock(), called from
@@ -573,7 +582,15 @@ function handleTrackTimeStop(taskId, trackedMs) {
   // not the full timeSpentOnDay map (see validation.service.ts's
   // TASK_TIME_DELTA_ACTION_TYPE check, which validates precisely this
   // shape for the unencrypted case).
-  var payload = { actionPayload: { taskId: taskId, date: today, duration: trackedMs } };
+  // entityChanges required for the same isMultiEntityPayload() unwrap reason
+  // as handleTaskToggle's payload above. syncTimeSpent's reducer
+  // (task.reducer.ts) reads action.taskId/date/duration directly, never
+  // entityChanges - the real client only populates non-empty entityChanges
+  // for this action type to help conflict-resolution's disjoint-field merge
+  // (conflict-disjoint-merge.util.ts) attribute a concurrent-edit delta to
+  // this field; omitting it here only affects that merge-conflict edge case
+  // (falls back to whole-op LWW), not basic replay.
+  var payload = { actionPayload: { taskId: taskId, date: today, duration: trackedMs }, entityChanges: [] };
   var clientId = getOrCreateClientId();
   var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
   saveVectorClock(newVectorClock);
@@ -644,7 +661,9 @@ function handleHabitAdjust(habitId, delta) {
   // Matches setSimpleCounterCounterToday's action payload exactly:
   // { id, newVal, today } (simple-counter.actions.ts) - a flat top-level
   // shape, not wrapped in a nested entity object the way updateTask's is.
-  var payload = { actionPayload: { id: habitId, newVal: newVal, today: today } };
+  // entityChanges required for the same isMultiEntityPayload() unwrap reason
+  // as handleTaskToggle's payload above.
+  var payload = { actionPayload: { id: habitId, newVal: newVal, today: today }, entityChanges: [] };
   var clientId = getOrCreateClientId();
   var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
   saveVectorClock(newVectorClock);
@@ -729,6 +748,14 @@ function handleAddTask(title) {
   // set defensively (op-log replay doesn't actually re-dispatch through the
   // real app's short-syntax Effect, so this isn't currently load-bearing,
   // but costs nothing and guards against that changing later).
+  // entityChanges required for the same isMultiEntityPayload() unwrap reason
+  // as handleTaskToggle's payload above - without it, the real desktop
+  // client's extractActionPayload() never unwraps actionPayload, so
+  // action.task is undefined and the addTask reducer throws a TypeError
+  // reading task.dueDay, silently dropping the op (this was the actual
+  // cause of dictated tasks never appearing on desktop, confirmed live via
+  // a "Skipped N reducer-failed operation(s)" console log after dictating a
+  // task - see git history/commit message for the fuller trace).
   var payload = {
     actionPayload: {
       task: task,
@@ -738,6 +765,7 @@ function handleAddTask(title) {
       isAddToBottom: false,
       isIgnoreShortSyntax: true,
     },
+    entityChanges: [],
   };
 
   // Optimistic local update via the SAME replay path a real synced addTask
