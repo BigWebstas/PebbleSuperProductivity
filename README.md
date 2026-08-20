@@ -33,6 +33,7 @@ Productivity's own **SuperSync** server.
 
 ## Changelog
 
+- **v0.6.11** — change the Add Task row's icon from a mic glyph to a plus sign
 - **v0.6.10** — fix watch-uploaded task/time/habit ops silently failing to apply on desktop (missing `entityChanges` on the op payload)
 - **v0.6.9** — fix voice-added tasks not showing under Today Only, add settings to disable Habits/Add Task
 - **v0.6.8** — fix "Add to Today" leaving a stale `dueWithTime` that hid the task from Today Only
