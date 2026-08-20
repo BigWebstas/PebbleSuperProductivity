@@ -21,6 +21,7 @@ var MSG_HABIT_ITEM = 9;
 var MSG_HABIT_SYNC_END = 10;
 var MSG_HABIT_ADJUST = 11; // watch -> phone: HABIT_ID + HABIT_DELTA (+1 or -1)
 var MSG_HABIT_TRACK_STOP = 13; // watch -> phone: HABIT_ID + TRACKED_MS (this session's tracked ms, StopWatch-type only)
+var MSG_FINISH_DAY = 14; // watch -> phone: archive every currently-done task (no extra keys)
 var MSG_TASK_ADD = 12; // watch -> phone: TASK_TITLE (new task's dictated title)
 
 var STATUS_OK = 0;
@@ -873,6 +874,110 @@ function handleAddTask(title) {
     });
 }
 
+// Watch-triggered "Finish Day" - archives every currently-done task, the
+// one core data-mutating effect of the real app's Finish Day flow
+// (daily-summary.component.ts's finishDay() -> TaskService.moveToArchive()
+// -> TaskSharedActions.moveToArchive({ tasks })). The rest of that flow
+// (mood/eval sheet, work-time note, "plan tomorrow" tab, GitLab pre-sync
+// hooks) is optional UI enrichment moveToArchive's own reducer never reads.
+//
+// Unlike every other watch-initiated op, the watch sends NO task data at
+// all here - just a bare trigger (see send_finish_day in main.c) - because
+// the real moveToArchive payload needs FULL task objects: other real
+// clients write whatever's sent here directly into their own permanent
+// archive store when this op replays on their side
+// (writeTasksToArchiveForRemoteSync in the real app's
+// archive-operation-handler.service.ts), so a stub built from the watch's
+// own trimmed C-side Task struct (title/done/due/time only) would archive
+// permanently lossy data on every other client. This phone's own
+// state.task cache already holds the full task objects as synced from the
+// op log, so building the payload here (not on the watch) is the only way
+// to avoid that.
+function handleFinishDay() {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+
+  var state = loadState();
+  var allTasks = state.task || {};
+  // Matches the real workContextService.doneTasks$ -> moveToArchive(doneTasks)
+  // shape: only top-level tasks are passed as TaskWithSubTasks[], each with
+  // its subtasks nested inline - subtask completion doesn't independently
+  // archive, it rides along with its parent (same treatment subtasks get
+  // everywhere else in this file - see pushTaskAndSubtasks in task-store.js).
+  var doneParents = Object.keys(allTasks)
+    .map(function (id) { return allTasks[id]; })
+    .filter(function (t) { return t && t.isDone && !t.parentId; });
+
+  if (doneParents.length === 0) {
+    // Nothing to archive - a silent no-op, same convention as every other
+    // no-effect watch action in this file (e.g. adjust_habit already at 0).
+    return;
+  }
+
+  var tasksWithSubtasks = doneParents.map(function (t) {
+    var subTasks = (t.subTaskIds || [])
+      .map(function (subId) { return allTasks[subId]; })
+      .filter(function (sub) { return !!sub; });
+    return Object.assign({}, t, { subTasks: subTasks });
+  });
+  var archivedIds = doneParents.map(function (t) { return t.id; });
+
+  // Optimistic local update via the SAME replay path a real synced
+  // moveToArchive op goes through (task-store.js's applyTaskAction
+  // 'moveToArchive' case, already there for the read side since it's how
+  // this watch reacts when a REAL client finishes their day) - so this
+  // can't drift from what replay actually does.
+  store.applyOperations(
+    [{ op: { entityType: 'TASK', actionType: '[Task Shared] moveToArchive', opType: 'UPD', payload: { actionPayload: { tasks: tasksWithSubtasks } }, isPayloadEncrypted: false } }],
+    state
+  );
+  saveState(state);
+  // Unlike toggle/habit-adjust, archived tasks vanish from the list rather
+  // than just changing in place - push the updated list right away rather
+  // than waiting for uploadSingleOp/runAutoSyncAfterOp's follow-up sync.
+  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly));
+
+  var crypto = getCrypto();
+  // entityChanges required for the same isMultiEntityPayload() unwrap
+  // reason as every other payload in this file. entityIds (plural, plus
+  // entityId set to the first id) mirrors the real client's own bulk-op
+  // wire shape for moveToArchive (operation-log.effects.ts) - confirmed
+  // against the server's own SuperSyncOperationSchema, which accepts both
+  // as independent optional top-level fields.
+  var payload = { actionPayload: { tasks: tasksWithSubtasks }, entityChanges: [] };
+  var clientId = getOrCreateClientId();
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  var op = {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[Task Shared] moveToArchive',
+    entityType: 'TASK',
+    entityId: archivedIds[0],
+    entityIds: archivedIds,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+
+  var finishDayFailureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      finishDayFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload finish-day archive: ' + finishDayFailureMsg);
+      sendStatus(STATUS_ERROR, finishDayFailureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, finishDayFailureMsg);
+    });
+}
+
 // ---------------- Pebble event wiring ----------------
 
 Pebble.addEventListener('ready', function () {
@@ -900,6 +1005,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_ADD:
       handleAddTask(payload.TASK_TITLE);
+      break;
+    case MSG_FINISH_DAY:
+      handleFinishDay();
       break;
     default:
       break;

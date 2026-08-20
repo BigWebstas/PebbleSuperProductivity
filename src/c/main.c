@@ -2,7 +2,7 @@
 
 // No runtime API exposes the app's own versionLabel (package.json's
 // "version") to C code - keep this in sync by hand on every version bump.
-#define APP_VERSION "0.6.12"
+#define APP_VERSION "0.6.13"
 
 // Dictionary keys are the MESSAGE_KEY_* externs pebble.h pulls in from
 // message_keys.auto.h, generated from the "messageKeys" list in
@@ -49,6 +49,7 @@ enum {
   MSG_HABIT_ADJUST = 11,    // watch -> phone: HABIT_ID + HABIT_DELTA (+1 or -1)
   MSG_TASK_ADD = 12,        // watch -> phone: TASK_TITLE (new task's dictated title)
   MSG_HABIT_TRACK_STOP = 13, // watch -> phone: HABIT_ID + TRACKED_MS (this session's tracked ms, StopWatch-type only)
+  MSG_FINISH_DAY = 14,      // watch -> phone: archive every currently-done task (no extra keys)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -426,10 +427,18 @@ static void start_add_task_dictation(void);
 // mic hardware and never reports/draws/routes clicks to that row at all).
 // When there are tasks, sections 1..s_group_count are one per project group
 // (see recompute_groups()), followed by one final section (group_idx ==
-// s_group_count) holding a single static, non-interactive row that shows
-// the app version - always the very last row in the list. When the list is
+// s_group_count) holding a single "Finish Day" row - always the very last
+// row in the list, centered like the version text it also still shows (as
+// a subtitle now, not the row's sole content). Long-select archives every
+// currently-done task (see menu_select_long_click, send_finish_day, and
+// handleFinishDay in index.js); plain Select is a no-op on this row, same
+// as it's always been - Finish Day is a deliberate, not-easily-undone
+// action, so it uses this app's existing "long-select is the more
+// deliberate gesture" convention (task/habit time tracking) rather than
+// the single-tap Select every other primary action uses. When the list is
 // empty, section 0 doubles as the empty/error screen's retry target and
-// there are no further sections (no version footer on that screen either).
+// there are no further sections (no Finish Day row on that screen either -
+// there's nothing to have finished).
 typedef enum {
   SECTION0_ROW_RESYNC,
   SECTION0_ROW_HABITS,
@@ -490,7 +499,7 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
   }
   int group_idx = (int)section_index - 1;
   if (group_idx == s_group_count) {
-    return 1; // version-footer row
+    return 1; // Finish Day row
   }
   if (group_idx > s_group_count) {
     return 0;
@@ -795,16 +804,43 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     return;
   }
   if ((int)cell_index->section - 1 == s_group_count) {
-    // Static version-footer row, always last - ignores is_selected (never
-    // inverts like a real row would) and menu_select_click/long_click
-    // already no-op here since resolve_task_at returns NULL for a
-    // group_idx past s_group_count, so this never behaves like a task row.
+#ifndef PBL_PLATFORM_APLITE
+    // Finish Day row, always last - long-select archives every currently-
+    // done task (menu_select_long_click); plain Select is a no-op here,
+    // same as it's always been (resolve_task_at returns NULL for a
+    // group_idx past s_group_count). Inverts on selection like a real row
+    // now (it wasn't interactive before this existed), matching the same
+    // black-selected/white-text convention plain task rows use below.
+    // Compiled out on aplite (see MAX_HABITS/s_tracking_habit_id's own
+    // comments for the same reasoning) - the version-only footer this row
+    // used to be stays exactly as it was there instead.
+    bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
+                        menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
+    GRect bounds = layer_get_bounds(cell_layer);
+    GColor bg = is_selected ? GColorBlack : GColorWhite;
+    GColor fg = is_selected ? GColorWhite : GColorBlack;
+    graphics_context_set_fill_color(ctx, bg);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    graphics_context_set_text_color(ctx, fg);
+    GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
+    graphics_draw_text(ctx, "Finish Day", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    // Version text moves down to a subtitle instead of being the row's sole
+    // content - this is the same footer slot the version display has always
+    // lived in (v0.6.5), just no longer alone here.
+    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
+    graphics_draw_text(ctx, "v" APP_VERSION, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+#else
+    // Plain version-only footer, unchanged from before Finish Day existed -
+    // no tap/long-select action on aplite (see the #ifndef branch above).
     GRect bounds = layer_get_bounds(cell_layer);
     graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorBlack);
     graphics_draw_text(ctx, "v" APP_VERSION, fonts_get_system_font(FONT_KEY_GOTHIC_14), bounds,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+#endif
     return;
   }
   Task *task = resolve_task_at(*cell_index);
@@ -953,6 +989,24 @@ static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
   dict_write_int32(iter, KEY_TRACKED_MS, tracked_ms);
   app_message_outbox_send();
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// No extra keys - the watch has no way to build a full-fidelity archive
+// payload itself (its own Task struct is a trimmed display projection, not
+// the real task's full field set other real clients need to persist into
+// their own permanent archive), so this is a bare trigger; the phone's own
+// state.task cache already has everything needed - see handleFinishDay in
+// index.js. Compiled out on aplite along with the rest of the Finish Day
+// row (see menu_draw_row's own comment) - nothing calls this there.
+static void send_finish_day(void) {
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+    return;
+  }
+  dict_write_int32(iter, KEY_MSG_TYPE, MSG_FINISH_DAY);
+  app_message_outbox_send();
+}
+#endif
 
 #ifndef PBL_PLATFORM_APLITE
 static void send_task_add(const char *title) {
@@ -1117,6 +1171,17 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
   if (s_error_overlay_active || s_task_count == 0 || cell_index->section == 0) {
     return;
   }
+#ifndef PBL_PLATFORM_APLITE
+  if ((int)cell_index->section - 1 == s_group_count) {
+    // Finish Day row - see its own comment in menu_draw_row. No optimistic
+    // local change here (unlike task-toggle/habit-adjust/time-tracking) -
+    // archiving needs the phone's own full-fidelity state.task cache, which
+    // the watch doesn't have; this is a pure fire-and-forget trigger, and
+    // the phone pushes an updated task list back once it's actually done.
+    send_finish_day();
+    return;
+  }
+#endif
   Task *task = resolve_task_at(*cell_index);
   if (!task || task->done) {
     // Tracking a completed task isn't a real scenario - not worth a

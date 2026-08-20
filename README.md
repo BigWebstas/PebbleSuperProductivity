@@ -33,6 +33,7 @@ Productivity's own **SuperSync** server.
 
 ## Changelog
 
+- **v0.6.13** — add a "Finish Day" row (long-select, always last in the task list) that archives every currently-done task; not available on aplite (RAM constraints)
 - **v0.6.12** — StopWatch-type habits now show a live timer (long-select to start/stop), formatted like a task's spent/estimate subtitle; not available on aplite (RAM constraints)
 - **v0.6.11** — change the Add Task row's icon from a mic glyph to a plus sign
 - **v0.6.10** — fix watch-uploaded task/time/habit ops silently failing to apply on desktop (missing `entityChanges` on the op payload)
