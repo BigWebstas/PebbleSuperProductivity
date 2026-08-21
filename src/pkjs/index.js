@@ -35,12 +35,20 @@ var STATUS_ERROR = 3;
 // the ceiling the most generous platform actually uses; no need to know
 // which platform is paired.
 var MAX_TASKS = 50;
-// Matches the generous (non-aplite) MAX_HABITS in main.c - aplite compiles
-// with a smaller one and safely clamps/ignores anything beyond its own
-// array bound (see MAX_HABITS's own comment there), so this can just be the
-// ceiling every other platform actually uses; no need to know which
-// platform is paired.
-var MAX_HABITS = 8;
+// Matches the generous (emery) MAX_HABITS in main.c - every other platform
+// compiles with a smaller one and safely clamps/ignores anything beyond its
+// own array bound (see MAX_HABITS's own comment there), so this can just be
+// the ceiling the most generous platform actually uses; no need to know
+// which platform is paired. This used to be stuck at 8 (the pre-emery-bump
+// ceiling) after main.c's own MAX_HABITS went to 16 for emery - silently
+// truncating the habit list to 8 THIS side, before it was ever sent to the
+// watch, regardless of what the watch itself could display. A habit whose
+// title happened to sort past position 8 (e.g. one starting late in the
+// alphabet) would vanish the moment total habit count crossed 8, with
+// nothing on the watch even hinting why - confirmed as a real, reported bug
+// ("Water" going missing once enough other habits existed, unrelated to any
+// watch-side limit).
+var MAX_HABITS = 16;
 
 // Matches the real client's CURRENT_SCHEMA_VERSION (schema-version.ts) at
 // time of writing. The server only validates this field's range when it's
@@ -197,19 +205,63 @@ function sendStatus(code, message) {
   });
 }
 
+// Sends one AppMessage dict, retrying a few times (short delay) before
+// giving up - Pebble.sendAppMessage's own failure callback fires on the
+// same kind of transient watch-inbox congestion the C-side begin_send()/
+// outbox_failed_handler retry (see main.c) exists to paper over, just in
+// the phone->watch direction instead. This matters far more here than it
+// would for a one-off message: sendTaskAt/sendHabitAt below used to just
+// skip straight to the next index on a dropped item instead of retrying
+// it, which - since the watch keeps its whole habit list in a single
+// reused buffer (s_habits in main.c, not double-buffered the way tasks
+// are) - left that item's watch-side slot holding whatever was there from
+// the PREVIOUS sync while HABIT_TOTAL still claimed the full new count.
+// Reported live as a habit going missing (or showing stale data) that got
+// MORE likely the more habits were being sent in one burst (more back-to-
+// back sends, more chances for one to be dropped) and went away entirely
+// once there were fewer total habits to send - exactly the "goes missing
+// when I add habits, comes back when I remove them" symptom this fixes.
+var ITEM_SEND_RETRIES = 3;
+var ITEM_SEND_RETRY_DELAY_MS = 400;
+function sendWithRetry(dict, onSuccess, onGiveUp, attemptsLeft) {
+  if (attemptsLeft === undefined) {
+    attemptsLeft = ITEM_SEND_RETRIES;
+  }
+  Pebble.sendAppMessage(dict, onSuccess, function (e) {
+    if (attemptsLeft > 0) {
+      setTimeout(function () {
+        sendWithRetry(dict, onSuccess, onGiveUp, attemptsLeft - 1);
+      }, ITEM_SEND_RETRY_DELAY_MS);
+    } else {
+      onGiveUp(e);
+    }
+  });
+}
+
+// Every give-up path below aborts the rest of THIS list send (does not
+// move on to the next index, does not send SYNC_END) rather than pushing
+// a partial/corrupt list - the watch just keeps showing whatever it had
+// before, which is stale but at least internally consistent, and the next
+// triggered sync (interval timer, manual Resync, or the follow-up sync any
+// watch-initiated action already triggers) gets a clean run at the whole
+// list again. Surfaced via sendStatus so it's visible on the watch, same
+// "every failure should be visible" reasoning as the watch's own
+// outbox_failed_handler.
 function sendTaskListToWatch(tasks) {
   var start = { MSG_TYPE: MSG_TASK_SYNC_START, TASK_TOTAL: tasks.length };
-  Pebble.sendAppMessage(start, function () {
+  sendWithRetry(start, function () {
     sendTaskAt(tasks, 0);
   }, function (e) {
-    console.log('[pkjs] failed to send TASK_SYNC_START: ' + JSON.stringify(e));
+    console.log('[pkjs] giving up on TASK_SYNC_START after retries: ' + JSON.stringify(e));
+    sendStatus(STATUS_ERROR, 'task sync interrupted, will retry');
   });
 }
 
 function sendTaskAt(tasks, index) {
   if (index >= tasks.length) {
-    Pebble.sendAppMessage({ MSG_TYPE: MSG_TASK_SYNC_END }, function () {}, function (e) {
-      console.log('[pkjs] failed to send TASK_SYNC_END: ' + JSON.stringify(e));
+    sendWithRetry({ MSG_TYPE: MSG_TASK_SYNC_END }, function () {}, function (e) {
+      console.log('[pkjs] giving up on TASK_SYNC_END after retries: ' + JSON.stringify(e));
+      sendStatus(STATUS_ERROR, 'task sync interrupted, will retry');
     });
     return;
   }
@@ -240,28 +292,29 @@ function sendTaskAt(tasks, index) {
   if (t.timeEstimate) {
     dict.TASK_TIME_ESTIMATE_MS = Math.min(t.timeEstimate, 2000000000);
   }
-  Pebble.sendAppMessage(dict, function () {
+  sendWithRetry(dict, function () {
     sendTaskAt(tasks, index + 1);
   }, function (e) {
-    console.log('[pkjs] failed to send TASK_ITEM ' + index + ': ' + JSON.stringify(e));
-    // Keep going rather than stalling the whole sync on one dropped message.
-    sendTaskAt(tasks, index + 1);
+    console.log('[pkjs] giving up on TASK_ITEM ' + index + ' after retries: ' + JSON.stringify(e));
+    sendStatus(STATUS_ERROR, 'task sync interrupted, will retry');
   });
 }
 
 function sendHabitListToWatch(habits) {
   var start = { MSG_TYPE: MSG_HABIT_SYNC_START, HABIT_TOTAL: habits.length };
-  Pebble.sendAppMessage(start, function () {
+  sendWithRetry(start, function () {
     sendHabitAt(habits, 0);
   }, function (e) {
-    console.log('[pkjs] failed to send HABIT_SYNC_START: ' + JSON.stringify(e));
+    console.log('[pkjs] giving up on HABIT_SYNC_START after retries: ' + JSON.stringify(e));
+    sendStatus(STATUS_ERROR, 'habit sync interrupted, will retry');
   });
 }
 
 function sendHabitAt(habits, index) {
   if (index >= habits.length) {
-    Pebble.sendAppMessage({ MSG_TYPE: MSG_HABIT_SYNC_END }, function () {}, function (e) {
-      console.log('[pkjs] failed to send HABIT_SYNC_END: ' + JSON.stringify(e));
+    sendWithRetry({ MSG_TYPE: MSG_HABIT_SYNC_END }, function () {}, function (e) {
+      console.log('[pkjs] giving up on HABIT_SYNC_END after retries: ' + JSON.stringify(e));
+      sendStatus(STATUS_ERROR, 'habit sync interrupted, will retry');
     });
     return;
   }
@@ -281,11 +334,11 @@ function sendHabitAt(habits, index) {
   if (h.isCountdown && h.countdownMs) {
     dict.HABIT_COUNTDOWN_MS = Math.min(h.countdownMs, 2000000000);
   }
-  Pebble.sendAppMessage(dict, function () {
+  sendWithRetry(dict, function () {
     sendHabitAt(habits, index + 1);
   }, function (e) {
-    console.log('[pkjs] failed to send HABIT_ITEM ' + index + ': ' + JSON.stringify(e));
-    sendHabitAt(habits, index + 1);
+    console.log('[pkjs] giving up on HABIT_ITEM ' + index + ' after retries: ' + JSON.stringify(e));
+    sendStatus(STATUS_ERROR, 'habit sync interrupted, will retry');
   });
 }
 

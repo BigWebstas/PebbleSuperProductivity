@@ -1033,6 +1033,20 @@ check('getActiveHabits defaults countdownMs to 0 for a ClickCounter/StopWatch ro
   assert.strictEqual(rows.find((r) => r.id === 'h2').countdownMs, 0);
 });
 
+check('getActiveHabits sorts plain alphabetically by title, done and not-done interleaved', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Water', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: { [today]: 1 } }), // done
+      addCounter({ id: 'h2', title: 'Apple', isEnabled: true, type: 'ClickCounter', streakMinValue: 3, countOnDay: {} }),
+      addCounter({ id: 'h3', title: 'Meditate', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: { [today]: 1 } }), // done
+      addCounter({ id: 'h4', title: 'banana', isEnabled: true, type: 'ClickCounter', streakMinValue: 3, countOnDay: {} }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(habits(state).map((r) => r.title), ['Apple', 'Meditate', 'Water', 'banana']);
+});
+
 check('[SimpleCounter] Set SimpleCounter Counter Today replaces (not adds to) today\'s count', () => {
   const state = store.emptyState();
   store.applyOperations(

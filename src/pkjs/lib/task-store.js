@@ -840,10 +840,12 @@ function getActiveHabits(state, limit) {
         countdownMs: isCountdown ? (c.countdownDuration || 0) : 0,
       };
     });
+  // Plain alphabetical by title - done/not-done no longer splits the list
+  // into two blocks (that was the original ordering; a habit's position
+  // used to jump around as soon as it crossed its goal for the day, which
+  // made a specific habit harder to find at a glance than a fixed
+  // alphabetical spot does).
   rows.sort(function (a, b) {
-    if (!!a.done !== !!b.done) {
-      return a.done ? 1 : -1;
-    }
     return titleCompare(a.title, b.title);
   });
   return rows.slice(0, limit);
