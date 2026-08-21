@@ -297,6 +297,18 @@ static AppTimer *s_tracking_tick_timer = NULL;
 static char s_tracking_habit_id[MAX_HABIT_ID_LEN] = "";
 static time_t s_tracking_habit_start_epoch = 0;
 static AppTimer *s_habit_tracking_tick_timer = NULL;
+// Select pauses/resumes an in-progress RepeatedCountdownReminder round
+// (long-select still cancels it outright, same as it already does for a
+// StopWatch) - meaningless for a StopWatch's open-ended up-count, so this
+// only ever applies when s_tracking_habit_id refers to an is_countdown
+// habit. While paused, s_tracking_habit_start_epoch stops mattering (the
+// tick timer itself is stopped - see toggle_habit_countdown_pause) and
+// s_habit_countdown_frozen_elapsed_ms holds the total elapsed so far;
+// while running, it holds everything accumulated BEFORE the current
+// running segment, with s_tracking_habit_start_epoch marking where that
+// segment began - see countdown_elapsed_ms().
+static bool s_habit_countdown_paused = false;
+static int s_habit_countdown_frozen_elapsed_ms = 0;
 #endif
 
 static Task s_tasks[MAX_TASKS];
@@ -445,18 +457,28 @@ static void load_tracking(void) {
 #ifndef PBL_PLATFORM_APLITE
 static const uint32_t PERSIST_KEY_HABIT_TRACKING_ID = 130;
 static const uint32_t PERSIST_KEY_HABIT_TRACKING_START = 131;
+static const uint32_t PERSIST_KEY_HABIT_COUNTDOWN_PAUSED = 132;
+static const uint32_t PERSIST_KEY_HABIT_COUNTDOWN_FROZEN_MS = 133;
 
-// Mirrors save_tracking()/load_tracking() above, for a tracked StopWatch
-// habit instead of a tracked task - see s_tracking_habit_id's own comment
-// on why this is a separate slot rather than reusing the task one, and on
-// why this whole block is compiled out on aplite.
+// Mirrors save_tracking()/load_tracking() above, for a tracked StopWatch/
+// countdown habit instead of a tracked task - see s_tracking_habit_id's own
+// comment on why this is a separate slot rather than reusing the task one,
+// and on why this whole block is compiled out on aplite. The pause fields
+// are only ever meaningful for an is_countdown session (see
+// s_habit_countdown_paused's own comment) but are harmless to persist
+// unconditionally alongside it - StopWatch sessions just always save/load
+// paused: false.
 static void save_habit_tracking(void) {
   if (s_tracking_habit_id[0] != '\0') {
     persist_write_string(PERSIST_KEY_HABIT_TRACKING_ID, s_tracking_habit_id);
     persist_write_int(PERSIST_KEY_HABIT_TRACKING_START, (int)s_tracking_habit_start_epoch);
+    persist_write_int(PERSIST_KEY_HABIT_COUNTDOWN_PAUSED, s_habit_countdown_paused ? 1 : 0);
+    persist_write_int(PERSIST_KEY_HABIT_COUNTDOWN_FROZEN_MS, s_habit_countdown_frozen_elapsed_ms);
   } else {
     persist_delete(PERSIST_KEY_HABIT_TRACKING_ID);
     persist_delete(PERSIST_KEY_HABIT_TRACKING_START);
+    persist_delete(PERSIST_KEY_HABIT_COUNTDOWN_PAUSED);
+    persist_delete(PERSIST_KEY_HABIT_COUNTDOWN_FROZEN_MS);
   }
 }
 
@@ -464,6 +486,10 @@ static void load_habit_tracking(void) {
   if (persist_exists(PERSIST_KEY_HABIT_TRACKING_ID)) {
     persist_read_string(PERSIST_KEY_HABIT_TRACKING_ID, s_tracking_habit_id, sizeof(s_tracking_habit_id));
     s_tracking_habit_start_epoch = (time_t)persist_read_int(PERSIST_KEY_HABIT_TRACKING_START);
+    s_habit_countdown_paused = persist_exists(PERSIST_KEY_HABIT_COUNTDOWN_PAUSED) &&
+                                persist_read_int(PERSIST_KEY_HABIT_COUNTDOWN_PAUSED) != 0;
+    s_habit_countdown_frozen_elapsed_ms = persist_exists(PERSIST_KEY_HABIT_COUNTDOWN_FROZEN_MS) ?
+                                           persist_read_int(PERSIST_KEY_HABIT_COUNTDOWN_FROZEN_MS) : 0;
   }
 }
 #endif
@@ -1032,7 +1058,121 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   }
 }
 
+// ---------- outbound send retry ----------
+// A watch->phone send (task toggle, resync request, ...) can fail
+// transiently - APP_MSG_SEND_TIMEOUT ("the other end did not confirm
+// receiving the sent data with an (n)ack in time", per pebble.h) is the
+// single most common real-world cause, reported live as a "Couldn't reach
+// phone app" error that clears up on its own a moment later (Bluetooth
+// momentarily congested, or the phone app briefly backgrounded/relaunching
+// - not an actual pairing problem). There's no public API to extend
+// AppMessage's own internal ack-wait duration, so this retries the exact
+// same message automatically, with a short backoff, before ever surfacing
+// the fullscreen error overlay - see is_retryable_failure()/
+// outbox_failed_handler() below for which failures actually get retried.
+// Every watch-initiated send funnels through begin_send() (not a direct
+// app_message_outbox_begin/send pair of its own) specifically so there's
+// one single place that knows how to rebuild and resend the last message -
+// AppMessage has no "resend this same dictionary" API, so retrying means
+// reconstructing it from scratch from whatever this stashed.
+//
+// aplite-excluded (#ifndef, same MAX_HABITS/StopWatch-timer precedent
+// elsewhere in this file): s_retry_str alone needs to be MAX_ID_LEN (96
+// bytes, for a long calendar-task id) to retry every message type this
+// sends, which alone blows past aplite's ~10-byte margin several times
+// over. aplite keeps its original immediate-error behavior (see the
+// #ifdef PBL_PLATFORM_APLITE bodies of send_task_toggle/
+// send_track_time_stop/request_sync/send_habit_adjust below, and
+// outbox_failed_handler's own aplite branch) - a real regression in
+// resilience there specifically, but a working, honest one: an aplite user
+// still sees the same accurate error and can just manually Resync/retry
+// their action, same as every platform did before this.
+#ifndef PBL_PLATFORM_APLITE
+#define MAX_SEND_RETRIES 3
+#define RETRY_BACKOFF_BASE_MS 1000
+static int s_retry_msg_type = 0; // 0 = no message to retry if this send fails
+// Sized for the largest of what this ever holds: a task id (MAX_ID_LEN, the
+// biggest - calendar-integration ids), a habit id (MAX_HABIT_ID_LEN), or a
+// dictated task title (MAX_TITLE_LEN) - MSG_REQUEST_SYNC/MSG_FINISH_DAY
+// need neither and leave this empty.
+static char s_retry_str[MAX_ID_LEN];
+static int32_t s_retry_int = 0; // TASK_DONE / TRACKED_MS / HABIT_DELTA, whichever s_retry_msg_type needs
+static int s_retry_count = 0;
+static AppTimer *s_retry_timer = NULL;
+
+static void clear_pending_retry(void) {
+  s_retry_msg_type = 0;
+  s_retry_count = 0;
+  if (s_retry_timer) {
+    app_timer_cancel(s_retry_timer);
+    s_retry_timer = NULL;
+  }
+}
+
+// Rebuilds and (re)sends whatever message s_retry_msg_type/str/int describe
+// - the single source of truth for every outbound send's actual wire
+// format, used both for a message's first attempt (via begin_send) and any
+// retry of it, so the two can never drift out of sync with each other.
+static void send_pending_retry(void) {
+  DictionaryIterator *iter;
+  if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+    return;
+  }
+  dict_write_int32(iter, KEY_MSG_TYPE, s_retry_msg_type);
+  switch (s_retry_msg_type) {
+    case MSG_TASK_TOGGLE:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_int32(iter, KEY_TASK_DONE, s_retry_int);
+      break;
+    case MSG_TRACK_TIME_STOP:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_int32(iter, KEY_TRACKED_MS, s_retry_int);
+      break;
+    case MSG_HABIT_ADJUST:
+      dict_write_cstring(iter, KEY_HABIT_ID, s_retry_str);
+      dict_write_int32(iter, KEY_HABIT_DELTA, s_retry_int);
+      break;
+    case MSG_TASK_ADD:
+      dict_write_cstring(iter, KEY_TASK_TITLE, s_retry_str);
+      break;
+    case MSG_HABIT_TRACK_STOP:
+      dict_write_cstring(iter, KEY_HABIT_ID, s_retry_str);
+      dict_write_int32(iter, KEY_TRACKED_MS, s_retry_int);
+      break;
+    case MSG_FINISH_DAY:
+    case MSG_REQUEST_SYNC:
+    default:
+      break; // no extra keys
+  }
+  app_message_outbox_send();
+}
+
+// Every watch-initiated send starts here: stash what it takes to rebuild
+// this exact message (for a possible retry - see send_pending_retry), reset
+// the retry count for this new attempt, and cancel any older still-pending
+// retry timer so a stale retry for a since-superseded message (e.g. this
+// same row toggled again before its first attempt's retry ever fired)
+// doesn't also fire and resend outdated data.
+static void begin_send(int msg_type, const char *str_val, int32_t int_val) {
+  if (s_retry_timer) {
+    app_timer_cancel(s_retry_timer);
+    s_retry_timer = NULL;
+  }
+  s_retry_msg_type = msg_type;
+  if (str_val) {
+    strncpy(s_retry_str, str_val, sizeof(s_retry_str) - 1);
+    s_retry_str[sizeof(s_retry_str) - 1] = '\0';
+  } else {
+    s_retry_str[0] = '\0';
+  }
+  s_retry_int = int_val;
+  s_retry_count = 0;
+  send_pending_retry();
+}
+#endif
+
 static void send_task_toggle(Task *task) {
+#ifdef PBL_PLATFORM_APLITE
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
     return;
@@ -1041,9 +1181,13 @@ static void send_task_toggle(Task *task) {
   dict_write_cstring(iter, KEY_TASK_ID, task->id);
   dict_write_int32(iter, KEY_TASK_DONE, task->done ? 1 : 0);
   app_message_outbox_send();
+#else
+  begin_send(MSG_TASK_TOGGLE, task->id, task->done ? 1 : 0);
+#endif
 }
 
 static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
+#ifdef PBL_PLATFORM_APLITE
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
     return;
@@ -1052,6 +1196,9 @@ static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
   dict_write_cstring(iter, KEY_TASK_ID, task_id);
   dict_write_int32(iter, KEY_TRACKED_MS, tracked_ms);
   app_message_outbox_send();
+#else
+  begin_send(MSG_TRACK_TIME_STOP, task_id, tracked_ms);
+#endif
 }
 
 #ifndef PBL_PLATFORM_APLITE
@@ -1076,24 +1223,13 @@ static bool s_close_after_finish_day_sent = false;
 // index.js. Compiled out on aplite along with the rest of the Finish Day
 // row (see menu_draw_row's own comment) - nothing calls this there.
 static void send_finish_day(void) {
-  DictionaryIterator *iter;
-  if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
-    return;
-  }
-  dict_write_int32(iter, KEY_MSG_TYPE, MSG_FINISH_DAY);
-  app_message_outbox_send();
+  begin_send(MSG_FINISH_DAY, NULL, 0);
 }
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
 static void send_task_add(const char *title) {
-  DictionaryIterator *iter;
-  if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
-    return;
-  }
-  dict_write_int32(iter, KEY_MSG_TYPE, MSG_TASK_ADD);
-  dict_write_cstring(iter, KEY_TASK_TITLE, title);
-  app_message_outbox_send();
+  begin_send(MSG_TASK_ADD, title, 0);
 }
 
 // Fires when dictation finishes (success, cancel, or failure). Only ever
@@ -1444,12 +1580,16 @@ static void hide_error_overlay(void) {
 // ---------- AppMessage ----------
 
 static void request_sync(void) {
+#ifdef PBL_PLATFORM_APLITE
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
     return;
   }
   dict_write_int32(iter, KEY_MSG_TYPE, MSG_REQUEST_SYNC);
   app_message_outbox_send();
+#else
+  begin_send(MSG_REQUEST_SYNC, NULL, 0);
+#endif
 }
 
 static void inbox_received_handler(DictionaryIterator *iterator, void *context) {
@@ -1633,12 +1773,44 @@ static void inbox_dropped_handler(AppMessageResult reason, void *context) {
 // Fires once the phone-side OS layer actually confirms delivery (not just
 // "queued") of ANY outbound message - only closes the app when the
 // Finish Day send is what just succeeded, tracked via
-// s_close_after_finish_day_sent (see its own comment).
+// s_close_after_finish_day_sent (see its own comment). Also the success
+// half of the outbound-send-retry mechanism (see its own top comment) -
+// clears whatever begin_send() stashed so a later, unrelated failure can't
+// mistakenly retry a message that already went through.
 static void outbox_sent_handler(DictionaryIterator *iterator, void *context) {
+  clear_pending_retry();
   if (s_close_after_finish_day_sent) {
     s_close_after_finish_day_sent = false;
     window_stack_pop_all(true);
   }
+}
+
+// Only these AppMessageResult reasons describe something transient - a
+// momentarily busy/backgrounded phone side or Bluetooth link that a short
+// retry has a real chance of working around, per each one's own doc
+// comment in pebble.h. Deliberately excludes reasons that describe a
+// structural problem with the call/message itself (APP_MSG_INVALID_ARGS,
+// APP_MSG_OUT_OF_MEMORY, APP_MSG_CLOSED, APP_MSG_INTERNAL_ERROR,
+// APP_MSG_INVALID_STATE, APP_MSG_ALREADY_RELEASED, the CALLBACK_* pair) -
+// retrying those would just fail identically every time and delay the
+// (still accurate) error for no benefit.
+static bool is_retryable_failure(AppMessageResult reason) {
+  switch (reason) {
+    case APP_MSG_SEND_TIMEOUT:
+    case APP_MSG_SEND_REJECTED:
+    case APP_MSG_NOT_CONNECTED:
+    case APP_MSG_APP_NOT_RUNNING:
+    case APP_MSG_BUSY:
+    case APP_MSG_BUFFER_OVERFLOW:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static void retry_timer_callback(void *data) {
+  s_retry_timer = NULL;
+  send_pending_retry();
 }
 #endif
 
@@ -1648,6 +1820,18 @@ static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult
   // Don't leave the flag armed for some later, unrelated successful send to
   // wrongly close the app - see s_close_after_finish_day_sent's own comment.
   s_close_after_finish_day_sent = false;
+  // Retry the exact same message (short backoff) before ever surfacing the
+  // error overlay - see this file's "outbound send retry" section for why.
+  // Only for failures that look transient, and only up to MAX_SEND_RETRIES
+  // times - a genuinely unreachable phone still ends up at the same error
+  // it always did, just a few seconds later instead of on the first hiccup.
+  if (s_retry_msg_type != 0 && is_retryable_failure(reason) && s_retry_count < MAX_SEND_RETRIES) {
+    s_retry_count++;
+    uint32_t delay_ms = (uint32_t)RETRY_BACKOFF_BASE_MS << (s_retry_count - 1); // 1s, 2s, 4s
+    s_retry_timer = app_timer_register(delay_ms, retry_timer_callback, NULL);
+    return;
+  }
+  clear_pending_retry();
 #endif
   // Previously silent (log-only): a watch->phone send (task toggle, track-
   // time-stop, resync request) that fails here - e.g. the phone app is
@@ -1655,6 +1839,8 @@ static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult
   // on-screen feedback, indistinguishable from "worked fine". Routing it
   // through the same fullscreen overlay as a phone->watch sync error makes
   // every send failure visible instead of just this one class of them.
+  // Reached immediately on aplite (no retry there - see this file's
+  // "outbound send retry" section) or once every retry above is exhausted.
   s_status_code = STATUS_ERROR;
   strncpy(s_status_msg, "Couldn't reach phone app", MAX_STATUS_MSG_LEN - 1);
   s_status_msg[MAX_STATUS_MSG_LEN - 1] = '\0';
@@ -1696,6 +1882,7 @@ static Habit *resolve_habit_at(MenuIndex index) {
 }
 
 static void send_habit_adjust(Habit *habit, int32_t delta) {
+#ifdef PBL_PLATFORM_APLITE
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
     return;
@@ -1704,6 +1891,9 @@ static void send_habit_adjust(Habit *habit, int32_t delta) {
   dict_write_cstring(iter, KEY_HABIT_ID, habit->id);
   dict_write_int32(iter, KEY_HABIT_DELTA, delta);
   app_message_outbox_send();
+#else
+  begin_send(MSG_HABIT_ADJUST, habit->id, delta);
+#endif
 }
 
 // Everything from here through stop_habit_tracking_and_report is the
@@ -1714,14 +1904,7 @@ static void send_habit_adjust(Habit *habit, int32_t delta) {
 // StopWatch habit still displays its progress read-only on aplite.
 #ifndef PBL_PLATFORM_APLITE
 static void send_habit_track_stop(const char *habit_id, int32_t tracked_ms) {
-  DictionaryIterator *iter;
-  if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
-    return;
-  }
-  dict_write_int32(iter, KEY_MSG_TYPE, MSG_HABIT_TRACK_STOP);
-  dict_write_cstring(iter, KEY_HABIT_ID, habit_id);
-  dict_write_int32(iter, KEY_TRACKED_MS, tracked_ms);
-  app_message_outbox_send();
+  begin_send(MSG_HABIT_TRACK_STOP, habit_id, tracked_ms);
 }
 
 static void stop_habit_tracking_tick(void) {
@@ -1729,6 +1912,20 @@ static void stop_habit_tracking_tick(void) {
     app_timer_cancel(s_habit_tracking_tick_timer);
     s_habit_tracking_tick_timer = NULL;
   }
+}
+
+// Total elapsed ms for the CURRENT countdown session, whether paused or
+// running - see s_habit_countdown_paused's own comment on how the two
+// fields it's built from divide up the work. Only meaningful while
+// s_tracking_habit_id refers to an is_countdown habit; callers already know
+// that from context (only ever called from is_countdown-guarded code).
+static int countdown_elapsed_ms(void) {
+  if (s_habit_countdown_paused) {
+    return s_habit_countdown_frozen_elapsed_ms;
+  }
+  time_t elapsed_s = time(NULL) - s_tracking_habit_start_epoch;
+  int running_ms = elapsed_s > 0 ? (int)elapsed_s * 1000 : 0;
+  return s_habit_countdown_frozen_elapsed_ms + running_ms;
 }
 
 // A RepeatedCountdownReminder's timer reaching zero - the on-watch
@@ -1749,6 +1946,8 @@ static void stop_habit_tracking_tick(void) {
 static void complete_habit_countdown(Habit *habit) {
   s_tracking_habit_id[0] = '\0';
   s_tracking_habit_start_epoch = 0;
+  s_habit_countdown_paused = false;
+  s_habit_countdown_frozen_elapsed_ms = 0;
   save_habit_tracking();
   stop_habit_tracking_tick();
   habit->value += 1;
@@ -1772,8 +1971,7 @@ static void habit_tracking_tick_callback(void *data) {
   if (s_tracking_habit_id[0] != '\0') {
     Habit *tracked_habit = find_habit_by_id(s_tracking_habit_id);
     if (tracked_habit && tracked_habit->is_countdown) {
-      time_t elapsed_s = time(NULL) - s_tracking_habit_start_epoch;
-      int remaining_ms = tracked_habit->countdown_ms - (int)elapsed_s * 1000;
+      int remaining_ms = tracked_habit->countdown_ms - countdown_elapsed_ms();
       if (remaining_ms <= 0) {
         complete_habit_countdown(tracked_habit); // re-registers nothing - this round is over
         return;
@@ -1796,8 +1994,34 @@ static void start_habit_tracking(Habit *habit) {
   strncpy(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN - 1);
   s_tracking_habit_id[MAX_HABIT_ID_LEN - 1] = '\0';
   s_tracking_habit_start_epoch = time(NULL);
+  // Reset any pause state left over from a previous, since-finished session
+  // - a fresh round always starts running, never paused.
+  s_habit_countdown_paused = false;
+  s_habit_countdown_frozen_elapsed_ms = 0;
   save_habit_tracking();
   start_habit_tracking_tick();
+}
+
+// Select on an is_countdown row that's currently tracking (running or
+// paused) toggles between the two - long-select still ends the round
+// outright (stop_habit_tracking_and_report). Not offered for a StopWatch
+// habit (habits_menu_select_click never calls this for one) - "pause"
+// isn't a meaningful state for an open-ended up-count timer the way it is
+// for a fixed-length countdown.
+static void toggle_habit_countdown_pause(void) {
+  if (s_habit_countdown_paused) {
+    s_habit_countdown_paused = false;
+    s_tracking_habit_start_epoch = time(NULL); // fresh running segment; frozen_elapsed_ms already holds everything before it
+    start_habit_tracking_tick();
+  } else {
+    s_habit_countdown_frozen_elapsed_ms = countdown_elapsed_ms(); // fold the just-finished running segment in before flipping the flag
+    s_habit_countdown_paused = true;
+    stop_habit_tracking_tick(); // nothing left to tick while frozen
+  }
+  save_habit_tracking();
+  if (s_habits_menu_layer) {
+    menu_layer_reload_data(s_habits_menu_layer);
+  }
 }
 
 // Stops whatever StopWatch/countdown habit is currently being tracked (a
@@ -1829,6 +2053,8 @@ static void stop_habit_tracking_and_report(void) {
   }
   s_tracking_habit_id[0] = '\0';
   s_tracking_habit_start_epoch = 0;
+  s_habit_countdown_paused = false;
+  s_habit_countdown_frozen_elapsed_ms = 0;
   save_habit_tracking();
   stop_habit_tracking_tick();
 }
@@ -1924,21 +2150,21 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     // While its timer is running: remaining time counting down to zero,
     // format_duration_ms's "> " running-prefix doubling as "this is live"
     // same as it does for a StopWatch habit (it doesn't distinguish
-    // counting up from counting down, just static-vs-live). Otherwise: a
+    // counting up from counting down, just static-vs-live) - dropped while
+    // paused, since a frozen number isn't "live" anymore. Otherwise: a
     // plain completed-rounds count, identical in shape to a ClickCounter's
     // own value/goal - a RepeatedCountdownReminder's countOnDay is rounds
     // completed today, not ms, unlike a StopWatch's.
     bool is_tracking_this = s_tracking_habit_id[0] != '\0' &&
                              strncmp(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN) == 0;
     if (is_tracking_this) {
-      time_t elapsed_s = time(NULL) - s_tracking_habit_start_epoch;
-      int remaining_ms = habit->countdown_ms - (int)elapsed_s * 1000;
+      int remaining_ms = habit->countdown_ms - countdown_elapsed_ms();
       if (remaining_ms < 0) {
         remaining_ms = 0;
       }
       char time_text[20];
-      format_duration_ms(remaining_ms, true, time_text, sizeof(time_text));
-      snprintf(subtitle, sizeof(subtitle), "%s left", time_text);
+      format_duration_ms(remaining_ms, !s_habit_countdown_paused, time_text, sizeof(time_text));
+      snprintf(subtitle, sizeof(subtitle), s_habit_countdown_paused ? "%s left - Paused" : "%s left", time_text);
     } else if (habit->done) {
       snprintf(subtitle, sizeof(subtitle), "%d/%d - Done", habit->value, habit->goal);
     } else {
@@ -1983,6 +2209,23 @@ static void adjust_habit(MenuIndex index, int32_t delta) {
 
 static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   Habit *habit = resolve_habit_at(*cell_index);
+#ifndef PBL_PLATFORM_APLITE
+  // Select pauses/resumes an is_countdown habit's timer while IT's the one
+  // currently tracking (long-select still ends the round outright, same as
+  // it always has) - not offered for a StopWatch, since "pause" isn't a
+  // meaningful state for its open-ended up-count. If nothing (or a
+  // different habit) is tracking this row, falls through to the same
+  // no-op every other StopWatch/countdown Select already was - long-select
+  // is still what starts a fresh round.
+  if (habit && habit->is_countdown) {
+    bool is_tracking_this = s_tracking_habit_id[0] != '\0' &&
+                             strncmp(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN) == 0;
+    if (is_tracking_this) {
+      toggle_habit_countdown_pause();
+    }
+    return;
+  }
+#endif
   // is_countdown is never true on aplite (see MSG_HABIT_ITEM's own comment)
   // - checking is_stopwatch alone there saves the few bytes an always-false
   // "|| is_countdown" would otherwise cost against aplite's especially
@@ -2077,12 +2320,15 @@ static void habits_window_load(Window *window) {
   update_habits_empty_layer();
 
 #ifndef PBL_PLATFORM_APLITE
-  // Resumes a StopWatch habit's live-ticking redraw if one was already being
-  // tracked (elapsed time itself is derived from the persisted start
-  // timestamp regardless - see load_habit_tracking() in init() - this is
-  // just about getting the redraw going again), same reasoning as
-  // window_load's own equivalent for task tracking.
-  if (s_tracking_habit_id[0] != '\0') {
+  // Resumes a StopWatch/countdown habit's live-ticking redraw if one was
+  // already being tracked (elapsed time itself is derived from the
+  // persisted start timestamp regardless - see load_habit_tracking() in
+  // init() - this is just about getting the redraw going again), same
+  // reasoning as window_load's own equivalent for task tracking. Not while
+  // paused, though - a paused countdown has nothing left to tick (see
+  // toggle_habit_countdown_pause), so this would just be a wasted timer
+  // ticking a frozen display.
+  if (s_tracking_habit_id[0] != '\0' && !s_habit_countdown_paused) {
     start_habit_tracking_tick();
   }
 #endif
