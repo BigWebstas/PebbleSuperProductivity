@@ -832,8 +832,12 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName, hideDone) {
 // included, matching selectEnabledSimpleCounters. doneLast (from the
 // pairing page's "Show completed habits last" setting, off by default)
 // restores the original not-done-before-done grouping - see the sort's own
-// comment for why plain alphabetical is the default instead.
-function getActiveHabits(state, limit, doneLast) {
+// comment for why plain alphabetical is the default instead. hideDone (from
+// "Hide completed habits", also off by default) drops a habit once it's
+// done for the day, mirroring getActiveTasks' own hideDone - the two are
+// independent settings; hideDone just makes doneLast moot, since there's
+// nothing done left for it to push anywhere.
+function getActiveHabits(state, limit, doneLast, hideDone) {
   var counters = state.simpleCounter || {};
   var today = todayStr();
   var rows = Object.keys(counters)
@@ -853,7 +857,8 @@ function getActiveHabits(state, limit, doneLast) {
         isCountdown: isCountdown,
         countdownMs: isCountdown ? (c.countdownDuration || 0) : 0,
       };
-    });
+    })
+    .filter(function (row) { return !hideDone || !row.done; });
   // Plain alphabetical by title, by default - done/not-done no longer
   // splits the list into two blocks (that was the original ordering; a
   // habit's position used to jump around as soon as it crossed its goal

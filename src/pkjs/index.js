@@ -488,7 +488,7 @@ function doSync() {
       var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks);
       sendTaskListToWatch(tasks);
       if (config.enableHabits !== false) {
-        var habits = store.getActiveHabits(state, MAX_HABITS, !!config.habitSortDoneLast);
+        var habits = store.getActiveHabits(state, MAX_HABITS, !!config.habitSortDoneLast, !!config.hideDoneHabits);
         sendHabitListToWatch(habits);
       }
       sendStatus(STATUS_OK);
@@ -1151,6 +1151,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableHabits: config.enableHabits !== false,
       enableAddTask: config.enableAddTask !== false,
       habitSortDoneLast: !!config.habitSortDoneLast,
+      hideDoneHabits: !!config.hideDoneHabits,
     }
   );
   Pebble.openURL(url);
@@ -1209,6 +1210,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableAddTask: !!result.enableAddTask,
     autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
     habitSortDoneLast: !!result.habitSortDoneLast,
+    hideDoneHabits: !!result.hideDoneHabits,
   };
   saveConfig(newConfig);
   scheduleAutoSync(newConfig);

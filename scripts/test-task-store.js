@@ -78,8 +78,8 @@ function addCounter(simpleCounter) {
   return counterEntry('[SimpleCounter] Add SimpleCounter', { simpleCounter: simpleCounter });
 }
 
-function habits(state, limit, doneLast) {
-  return store.getActiveHabits(state, limit == null ? 30 : limit, doneLast);
+function habits(state, limit, doneLast, hideDone) {
+  return store.getActiveHabits(state, limit == null ? 30 : limit, doneLast, hideDone);
 }
 
 check('addTask then updateTask builds a merged task', () => {
@@ -1092,6 +1092,27 @@ check('getActiveHabits(doneLast=true) groups not-done before done, alphabetical 
     state
   );
   assert.deepStrictEqual(habits(state, 30, true).map((r) => r.title), ['Apple', 'banana', 'Meditate', 'Water']);
+});
+
+check('getActiveHabits(hideDone=true) excludes a habit that has reached its goal for today', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Water', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: { [today]: 1 } }), // done
+      addCounter({ id: 'h2', title: 'Apple', isEnabled: true, type: 'ClickCounter', streakMinValue: 3, countOnDay: {} }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(habits(state, 30, false, true).map((r) => r.title), ['Apple']);
+});
+
+check('getActiveHabits(hideDone=false) keeps showing a done habit (marked done, not hidden)', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Water', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: { [today]: 1 } })],
+    state
+  );
+  assert.deepStrictEqual(habits(state).map((r) => r.title), ['Water']);
 });
 
 check('[SimpleCounter] Set SimpleCounter Counter Today replaces (not adds to) today\'s count', () => {
