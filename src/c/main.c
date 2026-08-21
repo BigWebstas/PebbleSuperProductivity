@@ -60,7 +60,16 @@ enum {
   STATUS_ERROR = 3,
 };
 
+// emery (Pebble Time 2) has far more free RAM than the rest of the lineup
+// (~106KB vs ~41KB on basalt/chalk/diorite, and aplite well under 1KB after
+// MAX_ID_LEN's own bump - see MAX_HABITS' comment below for the same split)
+// so it alone gets a higher cap rather than raising the shared default and
+// risking the tighter platforms.
+#ifdef PBL_PLATFORM_EMERY
+#define MAX_TASKS 50
+#else
 #define MAX_TASKS 30
+#endif
 #define MAX_TITLE_LEN 64
 // Plain generated task ids are ~21 chars, but calendar-integration ids
 // (generateCalendarTaskId: `cal_${issueProviderId}_${calendarEventId}`) have

@@ -29,7 +29,12 @@ var STATUS_SYNCING = 1;
 var STATUS_NOT_PAIRED = 2;
 var STATUS_ERROR = 3;
 
-var MAX_TASKS = 30;
+// Matches the generous (emery) MAX_TASKS in main.c - every other platform
+// compiles with a smaller one and safely clamps/ignores anything beyond its
+// own array bound (see MAX_TASKS's own comment there), so this can just be
+// the ceiling the most generous platform actually uses; no need to know
+// which platform is paired.
+var MAX_TASKS = 50;
 // Matches the generous (non-aplite) MAX_HABITS in main.c - aplite compiles
 // with a smaller one and safely clamps/ignores anything beyond its own
 // array bound (see MAX_HABITS's own comment there), so this can just be the
