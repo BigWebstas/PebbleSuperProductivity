@@ -78,8 +78,8 @@ function addCounter(simpleCounter) {
   return counterEntry('[SimpleCounter] Add SimpleCounter', { simpleCounter: simpleCounter });
 }
 
-function habits(state, limit) {
-  return store.getActiveHabits(state, limit == null ? 30 : limit);
+function habits(state, limit, doneLast) {
+  return store.getActiveHabits(state, limit == null ? 30 : limit, doneLast);
 }
 
 check('addTask then updateTask builds a merged task', () => {
@@ -1045,6 +1045,20 @@ check('getActiveHabits sorts plain alphabetically by title, done and not-done in
     state
   );
   assert.deepStrictEqual(habits(state).map((r) => r.title), ['Apple', 'Meditate', 'Water', 'banana']);
+});
+
+check('getActiveHabits(doneLast=true) groups not-done before done, alphabetical within each group', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Water', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: { [today]: 1 } }), // done
+      addCounter({ id: 'h2', title: 'Apple', isEnabled: true, type: 'ClickCounter', streakMinValue: 3, countOnDay: {} }),
+      addCounter({ id: 'h3', title: 'Meditate', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: { [today]: 1 } }), // done
+      addCounter({ id: 'h4', title: 'banana', isEnabled: true, type: 'ClickCounter', streakMinValue: 3, countOnDay: {} }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(habits(state, 30, true).map((r) => r.title), ['Apple', 'banana', 'Meditate', 'Water']);
 });
 
 check('[SimpleCounter] Set SimpleCounter Counter Today replaces (not adds to) today\'s count', () => {

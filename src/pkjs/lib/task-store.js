@@ -818,8 +818,11 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
 // StopWatch's ms-valued countOnDay works. countdownMs carries
 // countdownDuration (the configured length of one round) for exactly that
 // timer - 0/absent for every other type. Only isEnabled counters are
-// included, matching selectEnabledSimpleCounters.
-function getActiveHabits(state, limit) {
+// included, matching selectEnabledSimpleCounters. doneLast (from the
+// pairing page's "Show completed habits last" setting, off by default)
+// restores the original not-done-before-done grouping - see the sort's own
+// comment for why plain alphabetical is the default instead.
+function getActiveHabits(state, limit, doneLast) {
   var counters = state.simpleCounter || {};
   var today = todayStr();
   var rows = Object.keys(counters)
@@ -840,12 +843,16 @@ function getActiveHabits(state, limit) {
         countdownMs: isCountdown ? (c.countdownDuration || 0) : 0,
       };
     });
-  // Plain alphabetical by title - done/not-done no longer splits the list
-  // into two blocks (that was the original ordering; a habit's position
-  // used to jump around as soon as it crossed its goal for the day, which
-  // made a specific habit harder to find at a glance than a fixed
-  // alphabetical spot does).
+  // Plain alphabetical by title, by default - done/not-done no longer
+  // splits the list into two blocks (that was the original ordering; a
+  // habit's position used to jump around as soon as it crossed its goal
+  // for the day, which made a specific habit harder to find at a glance
+  // than a fixed alphabetical spot does). doneLast opts back into that
+  // original grouping for anyone who preferred it.
   rows.sort(function (a, b) {
+    if (doneLast && !!a.done !== !!b.done) {
+      return a.done ? 1 : -1;
+    }
     return titleCompare(a.title, b.title);
   });
   return rows.slice(0, limit);

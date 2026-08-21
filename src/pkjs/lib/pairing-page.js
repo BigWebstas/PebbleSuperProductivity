@@ -26,6 +26,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var projects = options.projects || [];
   var enableHabits = options.enableHabits !== false;
   var enableAddTask = options.enableAddTask !== false;
+  var habitSortDoneLast = !!options.habitSortDoneLast;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
     : 'Only used to decrypt on this phone - never sent anywhere';
@@ -153,6 +154,17 @@ projectOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="habitSortDoneLast" type="checkbox"' + (habitSortDoneLast ? ' checked' : '') + '>\n' +
+'    <label for="habitSortDoneLast">Show completed habits last</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    By default habits sort alphabetically regardless of today\'s progress.\n' +
+'    Turn this on to group not-yet-done habits before done ones (each group\n' +
+'    still alphabetical) - a habit\'s position will jump once it hits its\n' +
+'    goal for the day.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableAddTask" type="checkbox"' + (enableAddTask ? ' checked' : '') + '>\n' +
 '    <label for="enableAddTask">Enable Add Task (voice)</label>\n' +
 '  </div>\n' +
@@ -242,7 +254,8 @@ autoSyncIntervalOptions + '\n' +
 '      autoSyncIntervalMin: parseInt(document.getElementById(\'autoSyncIntervalMin\').value, 10) || 0,\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
-'      enableAddTask: document.getElementById(\'enableAddTask\').checked\n' +
+'      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
+'      habitSortDoneLast: document.getElementById(\'habitSortDoneLast\').checked\n' +
 '    });\n' +
 '  });\n' +
 '\n' +

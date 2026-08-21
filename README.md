@@ -33,6 +33,7 @@ Productivity's own **SuperSync** server.
 
 ## Changelog
 
+- **v0.6.15** — raise the task/habit limits to 50/16 on emery (Pebble Time 2); add RepeatedCountdownReminder habit support with its own long-select-to-start/stop timer (Select pauses/resumes it) - not available on aplite; add a background auto-sync-on-a-timer setting; retry a failed watch↔phone send a few times before showing a sync error, instead of failing on the first hiccup; fix a habit list silently truncated to 8 even on platforms that could show more; habits now sort alphabetically by default, with a setting to restore the old not-done-before-done grouping
 - **v0.6.14** — close the app automatically once Finish Day's archive send is confirmed; bigger subtitle text on task/habit rows; habit-page text stays black when selected; subtask marker changed from `~` to `»`
 - **v0.6.13** — add a "Finish Day" row (long-select, always last in the task list) that archives every currently-done task; not available on aplite (RAM constraints)
 - **v0.6.12** — StopWatch-type habits now show a live timer (long-select to start/stop), formatted like a task's spent/estimate subtitle; not available on aplite (RAM constraints)
