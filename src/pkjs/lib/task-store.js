@@ -687,7 +687,7 @@ function taskIsPlannedForToday(t, today) {
 // deadlineDay/deadlineWithTime or explicit tag assignment - not a full
 // port, just enough to match what the desktop's Today page actually shows
 // for the common case.
-function getActiveTasks(state, limit, groupByProject, todayOnly) {
+function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
   var allTasks = state.task || {};
   var today = todayStr();
   var mainTasks = Object.keys(allTasks)
@@ -703,6 +703,13 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
     // surface as a literal "(untitled)" row in "No Project" (see
     // pushTaskAndSubtasks, which no longer substitutes placeholder text).
     .filter(function (t) { return t && t.title && isMainTask(t); })
+    // Hiding a done MAIN task hides its whole subtask block along with it
+    // (pushTaskAndSubtasks is never called for a task that's filtered out
+    // here) - same "the subtask has nowhere to nest" reasoning already
+    // used for todayOnly above. A done SUBTASK under a still-open parent is
+    // handled separately, per-subtask, in pushTaskAndSubtasks - the parent
+    // staying visible is exactly the case that reasoning doesn't apply to.
+    .filter(function (t) { return !hideDone || !t.isDone; })
     .filter(function (t) {
       if (!todayOnly) {
         // Mirrors project.taskIds vs project.backlogTaskIds
@@ -754,13 +761,13 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
     Object.keys(byProject).sort(titleCompare).forEach(function (name) {
       byProject[name].sort(withinGroupSort);
       byProject[name].forEach(function (t) {
-        pushTaskAndSubtasks(rows, allTasks, t, name);
+        pushTaskAndSubtasks(rows, allTasks, t, name, hideDone);
       });
     });
   } else {
     mainTasks.sort(withinGroupSort);
     mainTasks.forEach(function (t) {
-      pushTaskAndSubtasks(rows, allTasks, t, '');
+      pushTaskAndSubtasks(rows, allTasks, t, '', hideDone);
     });
   }
 
@@ -781,17 +788,21 @@ function getActiveTasks(state, limit, groupByProject, todayOnly) {
 // (~) for exactly that reason, before this was re-tested more thoroughly.
 var SUBTASK_PREFIX = '    » ';
 
-function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
+function pushTaskAndSubtasks(rows, allTasks, t, groupName, hideDone) {
   // t is already guaranteed a real title here - getActiveTasks filters
   // ghost (title-less) records out of mainTasks before this is ever
-  // called. Subtasks aren't filtered upstream (pulled straight from
-  // allTasks by id), so a ghost subtask - same "update referenced an id
-  // this replay never saw a create for" cause as a ghost main task - is
-  // skipped here instead of surfacing as a placeholder-titled row.
+  // called (hideDone's own done-main-task filtering happens there too, for
+  // the same reason - see its comment). Subtasks aren't filtered upstream
+  // (pulled straight from allTasks by id), so a ghost subtask - same
+  // "update referenced an id this replay never saw a create for" cause as
+  // a ghost main task - is skipped here instead of surfacing as a
+  // placeholder-titled row; a done one is skipped here too when hideDone
+  // is on, independently of whatever state its (necessarily not-done, or
+  // this whole block would never run) parent is in.
   rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
-    if (sub && sub.title) {
+    if (sub && sub.title && !(hideDone && sub.isDone)) {
       rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
     }
   });

@@ -66,8 +66,8 @@ function transferTask(taskId, prevDay, newDay) {
   });
 }
 
-function active(state, limit, groupByProject, todayOnly) {
-  return store.getActiveTasks(state, limit == null ? 30 : limit, !!groupByProject, !!todayOnly);
+function active(state, limit, groupByProject, todayOnly, hideDone) {
+  return store.getActiveTasks(state, limit == null ? 30 : limit, !!groupByProject, !!todayOnly, !!hideDone);
 }
 
 function counterEntry(actionType, actionPayload) {
@@ -813,6 +813,39 @@ check('getActiveTasks nests subtasks under their main task, indented', () => {
   assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1', 'sub2']);
   assert.strictEqual(tasks[1].title, '    » Book flights');
   assert.strictEqual(tasks[2].title, '    » Book hotel');
+});
+
+check('getActiveTasks(hideDone=true) excludes a done main task and its whole subtask block', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'main', title: 'Plan trip', isDone: true, subTaskIds: ['sub1', 'sub2'] }),
+      addTask({ id: 'sub1', title: 'Book flights', isDone: false, parentId: 'main' }),
+      addTask({ id: 'sub2', title: 'Book hotel', isDone: true, parentId: 'main' }),
+      addTask({ id: 'other', title: 'Buy milk', isDone: false }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(active(state, 30, false, false, true).map((t) => t.id), ['other']);
+});
+
+check('getActiveTasks(hideDone=true) hides only a done SUBTASK, keeping its still-open parent and siblings', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'main', title: 'Plan trip', isDone: false, subTaskIds: ['sub1', 'sub2'] }),
+      addTask({ id: 'sub1', title: 'Book flights', isDone: false, parentId: 'main' }),
+      addTask({ id: 'sub2', title: 'Book hotel', isDone: true, parentId: 'main' }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(active(state, 30, false, false, true).map((t) => t.id), ['main', 'sub1']);
+});
+
+check('getActiveTasks(hideDone=false) keeps showing done tasks (dimmed on the watch, not hidden)', () => {
+  const state = store.emptyState();
+  store.applyOperations([addTask({ id: 't1', title: 'Buy milk', isDone: true })], state);
+  assert.deepStrictEqual(active(state).map((t) => t.id), ['t1']);
 });
 
 check('getActiveTasks never lists a subtask as a top-level row on its own', () => {

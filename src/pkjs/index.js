@@ -485,7 +485,7 @@ function doSync() {
       saveState(state);
       saveLastSeq(lastSeq);
       saveVectorClock(vectorClock);
-      var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly);
+      var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks);
       sendTaskListToWatch(tasks);
       if (config.enableHabits !== false) {
         var habits = store.getActiveHabits(state, MAX_HABITS, !!config.habitSortDoneLast);
@@ -944,7 +944,7 @@ function handleAddTask(title) {
   // never seen on its own - push the updated list right away rather than
   // waiting for uploadSingleOp/runAutoSyncAfterOp's follow-up sync to
   // eventually get around to it.
-  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly));
+  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
 
   var crypto = getCrypto();
   var clientId = getOrCreateClientId();
@@ -1040,7 +1040,7 @@ function handleFinishDay() {
   // Unlike toggle/habit-adjust, archived tasks vanish from the list rather
   // than just changing in place - push the updated list right away rather
   // than waiting for uploadSingleOp/runAutoSyncAfterOp's follow-up sync.
-  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly));
+  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
 
   var crypto = getCrypto();
   // entityChanges required for the same isMultiEntityPayload() unwrap
@@ -1129,6 +1129,7 @@ Pebble.addEventListener('showConfiguration', function () {
     {
       groupByProject: !!config.groupByProject,
       todayOnly: !!config.todayOnly,
+      hideDoneTasks: !!config.hideDoneTasks,
       // Undefined (never configured before) defaults to on - see the
       // matching comment in handleTaskToggle for why.
       autoSyncOnComplete: config.autoSyncOnComplete !== false,
@@ -1198,6 +1199,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     jwt: newJwt,
     groupByProject: !!result.groupByProject,
     todayOnly: !!result.todayOnly,
+    hideDoneTasks: !!result.hideDoneTasks,
     autoSyncOnComplete: !!result.autoSyncOnComplete,
     // saveConfig() is a full replace, not a merge - every field the app
     // wants persisted has to be listed here explicitly, or it silently

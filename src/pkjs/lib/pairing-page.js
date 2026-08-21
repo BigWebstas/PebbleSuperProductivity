@@ -18,6 +18,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   options = options || {};
   var groupByProject = !!options.groupByProject;
   var todayOnly = !!options.todayOnly;
+  var hideDoneTasks = !!options.hideDoneTasks;
   var autoSyncOnComplete = !!options.autoSyncOnComplete;
   var autoSyncIntervalMin = options.autoSyncIntervalMin || 0;
   var hasPassword = !!options.hasPassword;
@@ -131,6 +132,17 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  <p class="hint">\n' +
 '    Only shows tasks planned for today - hides undated, overdue, and\n' +
 '    future-dated tasks.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="hideDoneTasks" type="checkbox"' + (hideDoneTasks ? ' checked' : '') + '>\n' +
+'    <label for="hideDoneTasks">Hide completed tasks</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Removes a completed task from the watch\'s list entirely instead of\n' +
+'    showing it dimmed. A completed subtask under a still-open task is\n' +
+'    hidden the same way; a completed task with subtasks is hidden along\n' +
+'    with all of them.\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="defaultProjectId">Default project for "Add Task"</label>\n' +
@@ -250,6 +262,7 @@ autoSyncIntervalOptions + '\n' +
 '      jwt: jwt,\n' +
 '      groupByProject: document.getElementById(\'groupByProject\').checked,\n' +
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
+'      hideDoneTasks: document.getElementById(\'hideDoneTasks\').checked,\n' +
 '      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked,\n' +
 '      autoSyncIntervalMin: parseInt(document.getElementById(\'autoSyncIntervalMin\').value, 10) || 0,\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
