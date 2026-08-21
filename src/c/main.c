@@ -166,6 +166,23 @@ static TextLayer *s_habits_empty_layer;
 static StatusBarLayer *s_habits_status_bar;
 static StatusBarLayer *s_status_bar;
 static TextLayer *s_empty_layer;
+// Small subtitle beneath s_empty_layer's title, used only while the initial
+// (no-cached-list-yet) sync is in progress - shows the sync-progress
+// percentage (see syncing_timer_callback) or, while it's not yet available,
+// the "may take a few minutes" heads-up. Kept as its own layer rather than
+// folded into s_empty_layer's own text so the title itself ("Syncing...")
+// can use a larger font without that longer, wrapping hint text blowing
+// past the available height at the same size. aplite-excluded (#ifndef, not
+// a runtime check - same MAX_HABITS/mic-dictation precedent elsewhere in
+// this file): a second TextLayer struct overflowed aplite's already-tight
+// APP region by 120 bytes even before accounting for anything else. aplite
+// keeps the combined single-layer/single-font text it always had (see the
+// #ifdef PBL_PLATFORM_APLITE branches in start_syncing_animation/
+// syncing_timer_callback/stop_syncing_animation below) - percentage still
+// shows there, just inline rather than as a separate bigger-font title.
+#ifndef PBL_PLATFORM_APLITE
+static TextLayer *s_sync_progress_layer;
+#endif
 static BitmapLayer *s_logo_layer;
 static GBitmap *s_logo_bitmap;
 // Icons drawn directly into the Resync/Habits rows (menu_draw_row, not a
@@ -1239,26 +1256,78 @@ static void stop_syncing_animation(void) {
     app_timer_cancel(s_syncing_timer);
     s_syncing_timer = NULL;
   }
+#ifndef PBL_PLATFORM_APLITE
+  // Restores s_empty_layer to the plain font every other empty-state
+  // message (not-paired/error/no-tasks) actually uses, and hides the
+  // percent/hint subtitle - both are only ever populated while syncing.
+  text_layer_set_font(s_empty_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  layer_set_hidden(text_layer_get_layer(s_sync_progress_layer), true);
+#endif
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// Refreshes s_sync_progress_layer's text from the latest s_status_msg -
+// "NN%" while a multi-page sync is in progress (index.js's pullPage()
+// computes this from res.latestSeq, the account's high-water mark, vs how
+// far the current page has gotten), or the "may take a few minutes"
+// heads-up before any percentage is available (e.g. still on the first
+// page, or a single-page sync that finishes before this would ever show).
+static void update_sync_progress_text(void) {
+  if (s_status_msg[0] != '\0') {
+    text_layer_set_text(s_sync_progress_layer, s_status_msg);
+  } else {
+    text_layer_set_text(s_sync_progress_layer, "This may take a few minutes");
+  }
+}
+#endif
 
 static void syncing_timer_callback(void *data) {
   s_syncing_dots = (s_syncing_dots + 1) % 4;
-  static char s_syncing_text[64];
-  // A first sync can genuinely take a few minutes on a large/old account
-  // (replaying its whole op-log history) with no way to give an accurate
-  // percentage worth trusting - a plain heads-up reads better than a
-  // number that's either absent for most of the wait or jumps around.
-  snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing%.*s\n\nThis may take a few minutes", s_syncing_dots, "...");
+#ifdef PBL_PLATFORM_APLITE
+  // No spare TextLayer here (see s_sync_progress_layer's own comment) - the
+  // percentage, when available, rides on the same single line/font as
+  // everything else instead of a separate subtitle.
+  static char s_syncing_text[MAX_STATUS_MSG_LEN + 16];
+  if (s_status_msg[0] != '\0') {
+    snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing %s%.*s", s_status_msg, s_syncing_dots, "...");
+  } else {
+    snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing%.*s\n\nThis may take a few minutes", s_syncing_dots, "...");
+  }
   text_layer_set_text(s_empty_layer, s_syncing_text);
+#else
+  static char s_syncing_text[16];
+  snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing%.*s", s_syncing_dots, "...");
+  text_layer_set_text(s_empty_layer, s_syncing_text);
+  update_sync_progress_text();
+#endif
   s_syncing_timer = app_timer_register(SYNCING_ANIM_INTERVAL_MS, syncing_timer_callback, NULL);
 }
 
 static void start_syncing_animation(void) {
+#ifndef PBL_PLATFORM_APLITE
+  // Bigger than every other empty-state message's font (see
+  // stop_syncing_animation's restore) - safe to go large here specifically
+  // because the title text itself is always short ("Syncing..."), unlike
+  // the not-paired/error messages that share this same layer and can run
+  // to a full wrapped sentence.
+  text_layer_set_font(s_empty_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
+  layer_set_hidden(text_layer_get_layer(s_sync_progress_layer), false);
+  if (s_syncing_timer) {
+    update_sync_progress_text(); // a status push (new percent) mid-sync - timer's already running
+    return;
+  }
+#else
   if (s_syncing_timer) {
     return;
   }
+#endif
   s_syncing_dots = 0;
+#ifdef PBL_PLATFORM_APLITE
   text_layer_set_text(s_empty_layer, "Syncing\n\nThis may take a few minutes");
+#else
+  text_layer_set_text(s_empty_layer, "Syncing");
+  update_sync_progress_text();
+#endif
   s_syncing_timer = app_timer_register(SYNCING_ANIM_INTERVAL_MS, syncing_timer_callback, NULL);
 }
 
@@ -1951,6 +2020,23 @@ static void window_load(Window *window) {
   text_layer_set_font(s_empty_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   layer_add_child(window_layer, text_layer_get_layer(s_empty_layer));
 
+#ifndef PBL_PLATFORM_APLITE
+  // Bottom slice of the same text area, reserved for s_sync_progress_layer
+  // (see its own comment) - sized off empty_text_bounds so it scales with
+  // whatever room each platform's screen actually has, same as
+  // empty_text_bounds itself. Hidden by default; only shown while the
+  // initial sync's title is up above it in the larger font.
+  #define SYNC_PROGRESS_HEIGHT 36
+  GRect sync_progress_bounds = GRect(empty_text_bounds.origin.x,
+                                      empty_text_bounds.origin.y + empty_text_bounds.size.h - SYNC_PROGRESS_HEIGHT,
+                                      empty_text_bounds.size.w, SYNC_PROGRESS_HEIGHT);
+  s_sync_progress_layer = text_layer_create(sync_progress_bounds);
+  text_layer_set_text_alignment(s_sync_progress_layer, GTextAlignmentCenter);
+  text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  layer_set_hidden(text_layer_get_layer(s_sync_progress_layer), true);
+  layer_add_child(window_layer, text_layer_get_layer(s_sync_progress_layer));
+#endif
+
   GRect logo_bounds = GRect(content_bounds.origin.x + (content_bounds.size.w - LOGO_SIZE) / 2,
                              content_bounds.origin.y + content_bounds.size.h - LOGO_STRIP_HEIGHT,
                              LOGO_SIZE, LOGO_SIZE);
@@ -2015,6 +2101,9 @@ static void window_unload(Window *window) {
   stop_syncing_animation();
   menu_layer_destroy(s_menu_layer);
   text_layer_destroy(s_empty_layer);
+#ifndef PBL_PLATFORM_APLITE
+  text_layer_destroy(s_sync_progress_layer);
+#endif
   text_layer_destroy(s_error_layer);
   bitmap_layer_destroy(s_logo_layer);
   gbitmap_destroy(s_logo_bitmap);
