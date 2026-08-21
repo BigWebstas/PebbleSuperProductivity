@@ -91,6 +91,7 @@
       "HABIT_GOAL",
       "HABIT_DELTA",
       "HABIT_TYPE",
+      "HABIT_COUNTDOWN_MS",
       "HABITS_ENABLED",
       "ADD_TASK_ENABLED"
     ]

@@ -804,11 +804,21 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName) {
 // EMPTY_SIMPLE_COUNTER's own default): goal defaults to 1 when
 // streakMinValue is unset, done means countOnDay[today] >= goal - this
 // holds for StopWatch-type counters too (value/goal are both milliseconds
-// there, not a plain count), which the watch now shows with a live-ticking
+// there, not a plain count), which the watch shows with a live-ticking
 // timer (long-select to start/stop) instead of the Select/long-select
-// increment/decrement ClickCounter/RepeatedCountdownReminder rows use - see
-// isStopwatch below and main.c's habits_menu_select_long_click. Only
-// isEnabled counters are included, matching selectEnabledSimpleCounters.
+// increment/decrement a plain ClickCounter row uses - see isStopwatch below
+// and main.c's habits_menu_select_long_click. A RepeatedCountdownReminder
+// counter (isCountdown) gets its own long-select-to-start/stop countdown
+// timer too, but its value/goal stay a plain completed-rounds count, same
+// units as ClickCounter - confirmed against the real
+// simple-counter-button.component.ts: toggleStopwatch() (its click handler,
+// shared with StopWatch) only starts/stops the countdown; the count itself
+// only advances via countUpAndNextRepeatCountdownSession(), fired when the
+// countdown reaches zero, not by any per-tick accumulation the way a
+// StopWatch's ms-valued countOnDay works. countdownMs carries
+// countdownDuration (the configured length of one round) for exactly that
+// timer - 0/absent for every other type. Only isEnabled counters are
+// included, matching selectEnabledSimpleCounters.
 function getActiveHabits(state, limit) {
   var counters = state.simpleCounter || {};
   var today = todayStr();
@@ -818,6 +828,7 @@ function getActiveHabits(state, limit) {
     .map(function (c) {
       var goal = c.streakMinValue || 1;
       var value = (c.countOnDay && c.countOnDay[today]) || 0;
+      var isCountdown = c.type === 'RepeatedCountdownReminder';
       return {
         id: c.id,
         title: c.title,
@@ -825,6 +836,8 @@ function getActiveHabits(state, limit) {
         goal: goal,
         done: value >= goal,
         isStopwatch: c.type === 'StopWatch',
+        isCountdown: isCountdown,
+        countdownMs: isCountdown ? (c.countdownDuration || 0) : 0,
       };
     });
   rows.sort(function (a, b) {

@@ -274,8 +274,13 @@ function sendHabitAt(habits, index) {
     HABIT_DONE: h.done ? 1 : 0,
     HABIT_VALUE: h.value,
     HABIT_GOAL: h.goal,
-    HABIT_TYPE: h.isStopwatch ? 1 : 0,
+    // 0 = ClickCounter, 1 = StopWatch, 2 = RepeatedCountdownReminder - keep
+    // in sync with main.c's MSG_HABIT_ITEM parsing.
+    HABIT_TYPE: h.isStopwatch ? 1 : (h.isCountdown ? 2 : 0),
   };
+  if (h.isCountdown && h.countdownMs) {
+    dict.HABIT_COUNTDOWN_MS = Math.min(h.countdownMs, 2000000000);
+  }
   Pebble.sendAppMessage(dict, function () {
     sendHabitAt(habits, index + 1);
   }, function (e) {
@@ -287,6 +292,27 @@ function sendHabitAt(habits, index) {
 // ---------------- sync engine ----------------
 
 var syncInFlight = false;
+var autoSyncTimerId = null;
+
+// (Re)starts the periodic background sync timer from config.autoSyncIntervalMin
+// (minutes; 0/unset means off - this is an opt-in feature, so an existing
+// user who's never touched this setting shouldn't suddenly start polling
+// the server in the background). Always clears any previously running timer
+// first, since this is called both at startup and after every settings
+// save - a stale timer from a since-changed (or since-disabled) interval
+// would otherwise keep firing alongside, or instead of, the new one.
+function scheduleAutoSync(config) {
+  if (autoSyncTimerId) {
+    clearInterval(autoSyncTimerId);
+    autoSyncTimerId = null;
+  }
+  var minutes = config && config.autoSyncIntervalMin;
+  if (minutes > 0) {
+    autoSyncTimerId = setInterval(function () {
+      doSync();
+    }, minutes * 60 * 1000);
+  }
+}
 
 function doSync() {
   if (syncInFlight) {
@@ -1006,6 +1032,7 @@ function handleFinishDay() {
 Pebble.addEventListener('ready', function () {
   console.log('[pkjs] ready');
   doSync();
+  scheduleAutoSync(loadConfig());
 });
 
 Pebble.addEventListener('appmessage', function (e) {
@@ -1052,6 +1079,10 @@ Pebble.addEventListener('showConfiguration', function () {
       // Undefined (never configured before) defaults to on - see the
       // matching comment in handleTaskToggle for why.
       autoSyncOnComplete: config.autoSyncOnComplete !== false,
+      // Minutes between background syncs; 0 means off - see
+      // scheduleAutoSync's own comment for why this defaults to off rather
+      // than mirroring autoSyncOnComplete's default-on.
+      autoSyncIntervalMin: config.autoSyncIntervalMin || 0,
       // Lets the pairing page leave the password/token fields blank on a
       // settings-only visit instead of demanding they be re-pasted - see
       // webviewclosed below for the other half of this.
@@ -1107,7 +1138,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
   var jwtChanged = !!result.jwt && result.jwt !== existingConfig.jwt;
   var passwordChanged = !!result.password && result.password !== previousPassword;
 
-  saveConfig({
+  var newConfig = {
     baseUrl: result.baseUrl || supersync.DEFAULT_BASE_URL,
     email: result.email,
     jwt: newJwt,
@@ -1120,7 +1151,10 @@ Pebble.addEventListener('webviewclosed', function (e) {
     defaultProjectId: result.defaultProjectId || '',
     enableHabits: !!result.enableHabits,
     enableAddTask: !!result.enableAddTask,
-  });
+    autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
+  };
+  saveConfig(newConfig);
+  scheduleAutoSync(newConfig);
 
   if (result.password) {
     localStorage.setItem('sp_password', result.password);

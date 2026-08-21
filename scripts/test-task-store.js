@@ -930,7 +930,7 @@ check('getActiveHabits includes an enabled click-counter, not done below goal', 
     state
   );
   const rows = habits(state);
-  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, isStopwatch: false }]);
+  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, isStopwatch: false, isCountdown: false, countdownMs: 0 }]);
 });
 
 check('getActiveHabits marks done once today\'s count reaches goal', () => {
@@ -993,6 +993,44 @@ check('getActiveHabits tags a ClickCounter row isStopwatch: false', () => {
     state
   );
   assert.strictEqual(habits(state)[0].isStopwatch, false);
+});
+
+check('getActiveHabits tags a RepeatedCountdownReminder row isCountdown, value/goal a plain count', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Stretch break', isEnabled: true, type: 'RepeatedCountdownReminder', streakMinValue: 2, countdownDuration: 300000, countOnDay: { [today]: 1 } })],
+    state
+  );
+  const row = habits(state)[0];
+  assert.strictEqual(row.isCountdown, true);
+  assert.strictEqual(row.isStopwatch, false);
+  assert.strictEqual(row.value, 1);
+  assert.strictEqual(row.goal, 2);
+  assert.strictEqual(row.countdownMs, 300000);
+  assert.strictEqual(row.done, false);
+});
+
+check('getActiveHabits marks a RepeatedCountdownReminder row done once completed rounds reach goal', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Stretch break', isEnabled: true, type: 'RepeatedCountdownReminder', streakMinValue: 2, countdownDuration: 300000, countOnDay: { [today]: 2 } })],
+    state
+  );
+  assert.strictEqual(habits(state)[0].done, true);
+});
+
+check('getActiveHabits defaults countdownMs to 0 for a ClickCounter/StopWatch row', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Pushups', isEnabled: true, type: 'ClickCounter', countOnDay: {} }),
+      addCounter({ id: 'h2', title: 'Deep work', isEnabled: true, type: 'StopWatch', countOnDay: {} }),
+    ],
+    state
+  );
+  const rows = habits(state);
+  assert.strictEqual(rows.find((r) => r.id === 'h1').countdownMs, 0);
+  assert.strictEqual(rows.find((r) => r.id === 'h2').countdownMs, 0);
 });
 
 check('[SimpleCounter] Set SimpleCounter Counter Today replaces (not adds to) today\'s count', () => {

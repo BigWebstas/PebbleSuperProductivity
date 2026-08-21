@@ -19,6 +19,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var groupByProject = !!options.groupByProject;
   var todayOnly = !!options.todayOnly;
   var autoSyncOnComplete = !!options.autoSyncOnComplete;
+  var autoSyncIntervalMin = options.autoSyncIntervalMin || 0;
   var hasPassword = !!options.hasPassword;
   var hasToken = !!options.hasToken;
   var defaultProjectId = options.defaultProjectId || '';
@@ -38,6 +39,16 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var projectOptions = projects.map(function (p) {
     var selected = p.id === defaultProjectId ? ' selected' : '';
     return '<option value="' + escapeHtmlAttr(p.id) + '"' + selected + '>' + escapeHtmlAttr(p.title) + '</option>';
+  }).join('\n');
+  var autoSyncIntervalOptions = [
+    [0, 'Off'],
+    [5, 'Every 5 minutes'],
+    [15, 'Every 15 minutes'],
+    [30, 'Every 30 minutes'],
+    [60, 'Every hour'],
+  ].map(function (opt) {
+    var selected = opt[0] === autoSyncIntervalMin ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var html = '<!doctype html>\n' +
 '<html lang="en">\n' +
@@ -163,6 +174,18 @@ projectOptions + '\n' +
 '    battery/data per action.\n' +
 '  </p>\n' +
 '\n' +
+'  <label for="autoSyncIntervalMin">Sync automatically on a timer</label>\n' +
+'  <select id="autoSyncIntervalMin">\n' +
+autoSyncIntervalOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">\n' +
+'    Syncs on this schedule in the background, in addition to any manual\n' +
+'    Resync and the "after a watch change" option above. Only runs while\n' +
+'    the Pebble app is able to run in the background - it\'s not a\n' +
+'    guaranteed-exact schedule. Uses more battery/data the more often it\'s\n' +
+'    set to run.\n' +
+'  </p>\n' +
+'\n' +
 '  <h2>Danger zone</h2>\n' +
 '  <p class="hint">\n' +
 '    Wipes this watch/phone\'s locally cached task list and resync position,\n' +
@@ -216,6 +239,7 @@ projectOptions + '\n' +
 '      groupByProject: document.getElementById(\'groupByProject\').checked,\n' +
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
 '      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked,\n' +
+'      autoSyncIntervalMin: parseInt(document.getElementById(\'autoSyncIntervalMin\').value, 10) || 0,\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked\n' +
