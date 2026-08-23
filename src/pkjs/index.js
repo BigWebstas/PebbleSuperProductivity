@@ -196,6 +196,23 @@ function sendStatus(code, message) {
     // webviewclosed triggers right after every settings save).
     HABITS_ENABLED: config.enableHabits !== false ? 1 : 0,
     ADD_TASK_ENABLED: config.enableAddTask !== false ? 1 : 0,
+    // 0 = system default, -1 = always on, N>0 = relight-and-hold for N
+    // seconds after any button press - see main.c's own s_backlight_mode
+    // comment. Always included (not conditionally), same reasoning as the
+    // two flags above: this is what lets a settings change reach the watch
+    // within the very next sync cycle for free, since this message already
+    // fires at both ends of every doSync().
+    BACKLIGHT_MODE: config.backlightMode || 0,
+    // Minutes between syncs, 0 = off - same field this pairing setting has
+    // always stored, but now also drives the watch's own
+    // schedule_next_wakeup() (main.c): PebbleKit JS only runs while this
+    // watchapp is the one currently open, so the setInterval in
+    // scheduleAutoSync() below can't fire once the watch has moved on to
+    // the watchface or another app - the watch waking itself back up
+    // periodically (via Pebble's wakeup_schedule API) is what makes this
+    // setting actually work while the app is closed, not just while it's
+    // open. Always included, same reasoning as the two fields above.
+    AUTO_SYNC_INTERVAL_MIN: config.autoSyncIntervalMin || 0,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -291,6 +308,14 @@ function sendTaskAt(tasks, index) {
   }
   if (t.timeEstimate) {
     dict.TASK_TIME_ESTIMATE_MS = Math.min(t.timeEstimate, 2000000000);
+  }
+  if (t.notes) {
+    // Watch-side MAX_NOTES_LEN is 200 (see main.c) - truncate to match
+    // rather than let AppMessage's own dictionary-size limit silently drop
+    // the whole TASK_ITEM if a very long note pushed it over. Notes can run
+    // to many paragraphs of markdown in the real app; this is a glance-
+    // sized preview only (see show_notes_overlay), not a full reader.
+    dict.TASK_NOTES = String(t.notes).slice(0, 199);
   }
   sendWithRetry(dict, function () {
     sendTaskAt(tasks, index + 1);
@@ -578,6 +603,42 @@ function runAutoSyncAfterOp(config, failureMsg) {
   }
 }
 
+var hideDoneSweepTimerId = null;
+
+// Only relevant when hideDoneTasks is on: getActiveTasks' own grace period
+// (HIDE_DONE_GRACE_MS in task-store.js) keeps a just-completed task visible
+// for a few seconds so marking it done on the watch doesn't make it vanish
+// before the user can see it happen - but nothing else proactively re-
+// checks that window once it elapses. Without this, a user who doesn't
+// trigger another sync in the meantime (manual Resync, another watch
+// action, the periodic timer) would keep seeing the done task indefinitely.
+// Coalesces bursts of toggles into a single sweep timed off the LAST one
+// rather than one timer per toggle - the sweep re-derives the list from
+// whatever's actually in state at fire time, so an earlier toggle's sweep
+// being superseded here just avoids a redundant push, not a correctness
+// issue.
+function scheduleHideDoneSweep(config) {
+  if (!config.hideDoneTasks) {
+    return;
+  }
+  if (hideDoneSweepTimerId) {
+    clearTimeout(hideDoneSweepTimerId);
+  }
+  // +100ms padding past the grace period itself - setTimeout only
+  // guarantees firing at or after the requested delay, so this is cheap
+  // insurance against the sweep landing a hair before getActiveTasks'
+  // own >= check would actually exclude the task yet.
+  hideDoneSweepTimerId = setTimeout(function () {
+    hideDoneSweepTimerId = null;
+    var config2 = loadConfig();
+    if (!config2 || !config2.hideDoneTasks) {
+      return; // Setting was turned off while this sweep was pending.
+    }
+    var tasks = store.getActiveTasks(loadState(), MAX_TASKS, !!config2.groupByProject, !!config2.todayOnly, true);
+    sendTaskListToWatch(tasks);
+  }, store.HIDE_DONE_GRACE_MS + 100);
+}
+
 function handleTaskToggle(taskId, done) {
   var config = loadConfig();
   if (!config || !config.jwt) {
@@ -586,8 +647,20 @@ function handleTaskToggle(taskId, done) {
   }
 
   var state = loadState();
-  state.task[taskId] = Object.assign({}, state.task[taskId], { isDone: done });
+  // doneOn mirrors the real reducer's own side effect (task.reducer.util.ts:
+  // marking a task done stamps doneOn with Date.now() when the caller
+  // doesn't supply one, and clears it back to undefined on undone -
+  // task.service.ts's own toggle call never supplies one either, so this is
+  // exactly what a real client's local state would show right after this
+  // exact toggle). Needed here specifically so getActiveTasks' hideDone
+  // grace period (see HIDE_DONE_GRACE_MS in task-store.js) has an accurate
+  // completion timestamp to measure from - not uploaded as part of the op
+  // payload, matching the real app's own action shape.
+  state.task[taskId] = Object.assign({}, state.task[taskId], { isDone: done, doneOn: done ? Date.now() : undefined });
   saveState(state);
+  if (done) {
+    scheduleHideDoneSweep(config);
+  }
 
   var crypto = getCrypto();
   // Matches the real wire shape confirmed by decrypting live ops: the
@@ -1152,6 +1225,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableAddTask: config.enableAddTask !== false,
       habitSortDoneLast: !!config.habitSortDoneLast,
       hideDoneHabits: !!config.hideDoneHabits,
+      backlightMode: config.backlightMode || 0,
     }
   );
   Pebble.openURL(url);
@@ -1211,6 +1285,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
     habitSortDoneLast: !!result.habitSortDoneLast,
     hideDoneHabits: !!result.hideDoneHabits,
+    backlightMode: parseInt(result.backlightMode, 10) || 0,
   };
   saveConfig(newConfig);
   scheduleAutoSync(newConfig);

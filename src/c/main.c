@@ -34,6 +34,9 @@
 #define KEY_HABIT_COUNTDOWN_MS MESSAGE_KEY_HABIT_COUNTDOWN_MS
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
+#define KEY_BACKLIGHT_MODE MESSAGE_KEY_BACKLIGHT_MODE
+#define KEY_TASK_NOTES MESSAGE_KEY_TASK_NOTES
+#define KEY_AUTO_SYNC_INTERVAL_MIN MESSAGE_KEY_AUTO_SYNC_INTERVAL_MIN
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -83,6 +86,22 @@ enum {
 // correctly - completely invisible until you act on that specific task.
 #define MAX_ID_LEN 96
 #define MAX_PROJECT_LEN 32
+// A task's notes can be many paragraphs of markdown in the real app, but
+// this is a glance-sized preview (see show_notes_overlay), not a reader -
+// kept short deliberately, both because nothing here scrolls past what one
+// screen can show and because this field is carried by EVERY Task in the
+// double-buffered s_tasks/s_incoming arrays (MAX_TASKS * 2 copies), unlike
+// the one-time-cost overlay text itself. #ifndef PBL_PLATFORM_APLITE-gated
+// entirely, same reasoning as the backlight feature above: aplite has no
+// RAM budget left for a whole extra per-task field (confirmed via pebble
+// build's own memory report - see BACKLIGHT_MODE_ALWAYS_ON's comment for
+// the exact numbers), and without it there'd be nothing to show anyway, so
+// aplite keeps the plain instant single-click toggle it's always had
+// rather than paying a universal double-click commit delay for a feature
+// it can't display.
+#ifndef PBL_PLATFORM_APLITE
+#define MAX_NOTES_LEN 200
+#endif
 
 typedef struct {
   char id[MAX_ID_LEN];
@@ -92,6 +111,9 @@ typedef struct {
   int due_min;       // minutes since local midnight, or -1 when the task has no dueWithTime
   int time_spent_ms; // total tracked time (all days, all devices), 0 if none
   int time_estimate_ms; // 0 if none
+#ifndef PBL_PLATFORM_APLITE
+  char notes[MAX_NOTES_LEN]; // '' when the task has no notes
+#endif
 } Task;
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
@@ -262,6 +284,27 @@ static bool s_dictation_pending;
 // been read. Only an explicit Select dismisses it (see menu_select_click).
 static TextLayer *s_error_layer;
 static bool s_error_overlay_active = false;
+#ifndef PBL_PLATFORM_APLITE
+static TextLayer *s_notes_layer;
+static bool s_notes_overlay_active = false;
+// Double-click detection on Select: a single click doesn't commit its
+// task-done toggle immediately - it starts this timer instead, so a
+// second click on the SAME task arriving before it fires can cancel the
+// toggle and show notes instead of committing it. Tracked by id (not a
+// raw Task*) because a background sync can fully rebuild s_tasks out from
+// under a still-pending click (see pending_toggle_timer_callback's own
+// find_task_by_id lookup) - a stale pointer into the old array would be
+// undefined behavior, a stale id just fails to resolve and silently no-ops.
+static AppTimer *s_pending_toggle_timer = NULL;
+static char s_pending_toggle_task_id[MAX_ID_LEN] = "";
+// Matches the SDK's own multi-click doc ("a value of 0 means to use the
+// system default 300ms") - this app can't use window_multi_click_subscribe
+// directly (MenuLayerCallbacks has no multi-click hook, and
+// menu_layer_set_click_config_onto_window owns the window's whole click
+// config already), so this timestamp-based approach reimplements the same
+// timing convention by hand.
+#define DOUBLE_CLICK_WINDOW_MS 300
+#endif
 
 // Time tracking: long-select on a task starts/stops tracking it (only one
 // task at a time, mirroring the real app's single global currentTaskId -
@@ -328,6 +371,66 @@ static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
 // keeps the Add Task row permanently absent there.
 static bool s_habits_enabled = true;
 static bool s_add_task_enabled = true;
+// Backlight override, same phone-settings mirroring convention as the two
+// flags above: 0 (system default) until the first sync says otherwise, so
+// an unconfigured/never-synced watch never touches the backlight API at
+// all - this app shipped for a long time with zero light_enable() calls
+// anywhere, and that stays the behavior unless the phone opts into
+// something else. A negative value (BACKLIGHT_MODE_ALWAYS_ON) forces the
+// backlight on for as long as the app stays open; a positive value is a
+// custom relight-and-hold duration in seconds, applied after any button
+// press - see backlight_touch()/apply_backlight_mode() below.
+//
+// #ifndef PBL_PLATFORM_APLITE-gated entirely, same as the StopWatch habit
+// timer above - confirmed via pebble build's own memory usage report that
+// aplite had all of 10 bytes of free RAM left BEFORE this feature existed
+// (every other platform: 37KB+), so anything added here has to cost
+// aplite exactly zero, not "a little". backlight_touch() becomes a no-op
+// macro on aplite (below) so none of its 8 call sites elsewhere in this
+// file need their own #ifdef.
+#ifndef PBL_PLATFORM_APLITE
+#define BACKLIGHT_MODE_ALWAYS_ON -1
+static int32_t s_backlight_mode = 0;
+static AppTimer *s_backlight_timer = NULL;
+#endif
+
+// Mirrors the phone's "Sync automatically on a timer" pairing setting
+// (config.autoSyncIntervalMin), same 0-until-first-sync-says-otherwise
+// convention as s_backlight_mode above. This is what schedule_next_wakeup()
+// uses to periodically relaunch the app via wakeup_schedule() so a sync can
+// happen even while the app is closed - PebbleKit JS (where all the actual
+// networking lives) only runs while THIS app is the one currently open, so
+// a phone-side setInterval alone (what this setting used to rely on
+// exclusively) never fires once the watch has moved on to the watchface or
+// another app. See schedule_next_wakeup()'s own comment for the rest of
+// the mechanism.
+//
+// #ifndef PBL_PLATFORM_APLITE-gated entirely, same reasoning (and the same
+// confirmed-via-pebble-build's-own-memory-report standard) as every other
+// aplite exclusion in this file: aplite was already at its ceiling before
+// this feature existed, and this alone overflowed it by 332 bytes. Aplite
+// keeps the setting's old, more limited behavior (only actually syncs on
+// this schedule while the app happens to be open) rather than gaining
+// wakeup-based background sync.
+#ifndef PBL_PLATFORM_APLITE
+static int32_t s_auto_sync_interval_min = 0;
+// Set once at init() from launch_reason() and never changed after - detects
+// whether THIS session exists because a wakeup fired (as opposed to the
+// user opening the app normally), which is what gates the auto-exit in
+// inbox_received_handler's MSG_SYNC_STATUS case below. A wakeup-launched
+// session's whole purpose is a quiet sync-and-return; a manually opened one
+// should behave exactly as it always has and stay open.
+static bool s_is_wakeup_launch = false;
+// Guards schedule_next_wakeup() from running on every single status push
+// this session (SYNCING, then OK/ERROR, plus one per watch-initiated
+// action) - only needed once the interval is first confirmed after launch,
+// and again if it later actually changes (e.g. a live settings save).
+static bool s_wakeup_rescheduled_this_launch = false;
+// Guards window_stack_pop_all() from firing more than once if multiple
+// terminal statuses arrive in the same wakeup-launched session (e.g. a
+// retried sync after an initial error).
+static bool s_wakeup_exit_triggered = false;
+#endif
 
 static TaskGroup s_groups[MAX_TASKS]; // worst case: every task its own group
 static int s_group_count = 0;
@@ -498,6 +601,16 @@ static void request_sync(void);
 static void hide_error_overlay(void);
 static void push_habits_window(void);
 static void update_habits_empty_layer(void);
+#ifndef PBL_PLATFORM_APLITE
+static void backlight_touch(void);
+#else
+#define backlight_touch() ((void)0)
+#endif
+#ifndef PBL_PLATFORM_APLITE
+static void show_notes_overlay(Task *task);
+static void hide_notes_overlay(void);
+static void pending_toggle_timer_callback(void *data);
+#endif
 #ifndef PBL_PLATFORM_APLITE
 static void start_add_task_dictation(void);
 #endif
@@ -783,7 +896,93 @@ static void refresh_scroll_state(bool reset_offset) {
 
 static void menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, MenuIndex old_index, void *context) {
   refresh_scroll_state(true);
+  backlight_touch();
 }
+
+#ifndef PBL_PLATFORM_APLITE
+static void backlight_timer_callback(void *data) {
+  s_backlight_timer = NULL;
+  // Hands control back to the system's own automatic backlight behavior -
+  // NOT "force off". Since this fires with no real button press happening
+  // at that exact instant, automatic control has nothing to keep it lit
+  // for, so in practice this is what makes the "custom timeout" duration
+  // real: the light goes dark right as this timer expires instead of
+  // lingering under whichever duration the user's own watch Settings
+  // happen to specify.
+  light_enable(false);
+}
+
+// Called on every button interaction relevant to whichever menu is
+// visible (select/long-select clicks and up/down scroll - see call sites
+// in both windows' click callbacks below) - NOT on a settings change
+// itself, see apply_backlight_mode() for that. A mode of 0 (system
+// default) is a deliberate no-op: this app goes back to never touching the
+// backlight API at all unless the phone has explicitly opted into one of
+// the other two modes, same as every other watch-side feature toggle
+// defaulting to inert.
+static void backlight_touch(void) {
+  if (s_backlight_timer) {
+    app_timer_cancel(s_backlight_timer);
+    s_backlight_timer = NULL;
+  }
+  if (s_backlight_mode == 0) {
+    return;
+  }
+  light_enable(true);
+  if (s_backlight_mode == BACKLIGHT_MODE_ALWAYS_ON) {
+    return; // Stays on until the mode itself changes - see apply_backlight_mode().
+  }
+  s_backlight_timer = app_timer_register(s_backlight_mode * 1000, backlight_timer_callback, NULL);
+}
+
+// Reacts to s_backlight_mode itself changing (a settings save that arrives
+// while the app is already open, via MSG_SYNC_STATUS below) - not to user
+// interaction, see backlight_touch() for that. Leaving always-on needs an
+// explicit light_enable(false) here since nothing else ever calls it:
+// backlight_touch() only ever turns the light ON, the timeout timer is the
+// only thing that turns it back off, and that timer never runs in
+// always-on mode.
+static void apply_backlight_mode(void) {
+  if (s_backlight_mode == 0) {
+    if (s_backlight_timer) {
+      app_timer_cancel(s_backlight_timer);
+      s_backlight_timer = NULL;
+    }
+    light_enable(false);
+    return;
+  }
+  backlight_touch();
+}
+#endif // !PBL_PLATFORM_APLITE
+
+#ifndef PBL_PLATFORM_APLITE
+// (Re)arms the single wakeup event this app ever uses, relative to NOW -
+// called once per launch as soon as s_auto_sync_interval_min is confirmed
+// by a sync status, and again whenever it actually changes (see
+// inbox_received_handler's MSG_SYNC_STATUS case). wakeup_cancel_all() first
+// is deliberate and safe: this is the only feature in this app that uses
+// the wakeup API at all, so there's never a second, unrelated wakeup to
+// preserve - and re-arming "interval minutes from whatever just happened"
+// on every confirmed sync (manual open, watch-initiated action, or a prior
+// wakeup's own sync) means the NEXT background wakeup is always exactly
+// one full interval past the most recent real activity, never sooner.
+// notify_if_missed is false: this is a quiet resync, not a reminder the
+// user needs a "you missed N notifications while your watch was off" alert
+// for if it doesn't fire exactly on time.
+static void schedule_next_wakeup(void) {
+  wakeup_cancel_all();
+  if (s_auto_sync_interval_min <= 0) {
+    return;
+  }
+  time_t next = time(NULL) + s_auto_sync_interval_min * 60;
+  WakeupId id = wakeup_schedule(next, 0, false);
+  if (id < 0) {
+    APP_LOG(APP_LOG_LEVEL_WARNING, "wakeup_schedule failed: %d", (int)id);
+  } else {
+    APP_LOG(APP_LOG_LEVEL_INFO, "wakeup scheduled for +%ld min (id %d)", (long)s_auto_sync_interval_min, (int)id);
+  }
+}
+#endif // !PBL_PLATFORM_APLITE
 
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
   if (s_task_count == 0) {
@@ -1334,6 +1533,13 @@ static void stop_tracking_and_report(void) {
 }
 
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  backlight_touch();
+#ifndef PBL_PLATFORM_APLITE
+  if (s_notes_overlay_active) {
+    hide_notes_overlay();
+    return;
+  }
+#endif
   if (s_error_overlay_active) {
     // Click routing goes through MenuLayer's own config regardless of
     // whether its layer is currently hidden (same mechanism the empty-
@@ -1368,10 +1574,35 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
   if (!task) {
     return;
   }
+#ifndef PBL_PLATFORM_APLITE
+  // Double-click (a second Select click on this SAME task before the
+  // pending single-click toggle below has committed) shows notes instead
+  // of toggling - see pending_toggle_timer_callback and MAX_NOTES_LEN's
+  // own comment for why this is compiled out on aplite entirely.
+  if (s_pending_toggle_timer && strncmp(s_pending_toggle_task_id, task->id, MAX_ID_LEN) == 0) {
+    app_timer_cancel(s_pending_toggle_timer);
+    s_pending_toggle_timer = NULL;
+    s_pending_toggle_task_id[0] = '\0';
+    show_notes_overlay(task);
+    return;
+  }
+  // A different task's toggle was still pending (the user scrolled and
+  // clicked again before it committed) - it's clearly not getting
+  // double-clicked anymore, so let it through right away instead of
+  // silently dropping it, then start a fresh pending window for this click.
+  if (s_pending_toggle_timer) {
+    app_timer_cancel(s_pending_toggle_timer);
+    pending_toggle_timer_callback(NULL);
+  }
+  strncpy(s_pending_toggle_task_id, task->id, MAX_ID_LEN - 1);
+  s_pending_toggle_task_id[MAX_ID_LEN - 1] = '\0';
+  s_pending_toggle_timer = app_timer_register(DOUBLE_CLICK_WINDOW_MS, pending_toggle_timer_callback, NULL);
+#else
   task->done = !task->done;
   save_tasks();
   menu_layer_reload_data(s_menu_layer);
   send_task_toggle(task);
+#endif
 }
 
 // Long-select toggles time tracking on the highlighted task: starts it if
@@ -1381,6 +1612,7 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
 // mirrors the real app's single global "current task", not a per-task
 // independent timer each.
 static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  backlight_touch();
   if (s_error_overlay_active || s_task_count == 0 || cell_index->section == 0) {
     return;
   }
@@ -1524,6 +1756,14 @@ static void update_empty_layer(void) {
   // retry's own TASK_SYNC_END) would un-hide the menu or empty layer right
   // out from under the overlay via the calls below, even though the
   // overlay's own layer would still be showing on top of it too.
+#ifndef PBL_PLATFORM_APLITE
+  // Same reasoning as the error-overlay guard directly below, for the
+  // notes overlay (see show_notes_overlay) - it also owns menu-layer
+  // visibility while it's up.
+  if (s_notes_overlay_active) {
+    return;
+  }
+#endif
   if (s_error_overlay_active) {
     return;
   }
@@ -1577,6 +1817,55 @@ static void hide_error_overlay(void) {
   update_empty_layer();
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// Shows a task's notes (double-click Select on it - see
+// pending_toggle_timer_callback/menu_select_click), same overlay-over-the-
+// menu mechanism as show_error_overlay above. Unlike that one, the text
+// doesn't need a static buffer copy of task->notes itself (task->notes is
+// already stable storage for as long as the task stays in s_tasks) - only
+// the "Notes:\n\n" prefix needs building, hence the snprintf into a
+// separate buffer rather than pointing text_layer_set_text at task->notes
+// directly.
+static void show_notes_overlay(Task *task) {
+  s_notes_overlay_active = true;
+  static char s_notes_overlay_text[MAX_NOTES_LEN + 48];
+  if (task->notes[0] != '\0') {
+    snprintf(s_notes_overlay_text, sizeof(s_notes_overlay_text), "Notes:\n\n%s", task->notes);
+  } else {
+    snprintf(s_notes_overlay_text, sizeof(s_notes_overlay_text), "(No notes for this task)");
+  }
+  text_layer_set_text(s_notes_layer, s_notes_overlay_text);
+  layer_set_hidden(text_layer_get_layer(s_notes_layer), false);
+  layer_set_hidden(menu_layer_get_layer(s_menu_layer), true);
+}
+
+// Dismisses the notes overlay (Select, see menu_select_click) - same
+// unguarded update_empty_layer() hand-back as hide_error_overlay above.
+static void hide_notes_overlay(void) {
+  s_notes_overlay_active = false;
+  layer_set_hidden(text_layer_get_layer(s_notes_layer), true);
+  update_empty_layer();
+}
+
+// Commits a single-click task-done toggle once the double-click window has
+// passed with no second click - see menu_select_click. Looks the task back
+// up by id rather than trusting a stashed pointer: a background sync can
+// fully rebuild s_tasks (double-buffered commit on TASK_SYNC_END) while
+// this timer is still pending, which would leave a raw Task* dangling.
+static void pending_toggle_timer_callback(void *data) {
+  s_pending_toggle_timer = NULL;
+  Task *task = find_task_by_id(s_pending_toggle_task_id);
+  s_pending_toggle_task_id[0] = '\0';
+  if (!task) {
+    return; // The list changed underneath the pending click - nothing to commit.
+  }
+  task->done = !task->done;
+  save_tasks();
+  menu_layer_reload_data(s_menu_layer);
+  send_task_toggle(task);
+}
+#endif
+
 // ---------- AppMessage ----------
 
 static void request_sync(void) {
@@ -1617,6 +1906,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *due_min_tuple = dict_find(iterator, KEY_TASK_DUE_MIN);
       Tuple *time_spent_tuple = dict_find(iterator, KEY_TASK_TIME_SPENT_MS);
       Tuple *time_estimate_tuple = dict_find(iterator, KEY_TASK_TIME_ESTIMATE_MS);
+#ifndef PBL_PLATFORM_APLITE
+      Tuple *notes_tuple = dict_find(iterator, KEY_TASK_NOTES);
+#endif
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -1640,6 +1932,12 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_incoming[idx].time_spent_ms = time_spent_tuple ? time_spent_tuple->value->int32 : 0;
       // Absent means "no timeEstimate" - same convention as time_spent_ms.
       s_incoming[idx].time_estimate_ms = time_estimate_tuple ? time_estimate_tuple->value->int32 : 0;
+#ifndef PBL_PLATFORM_APLITE
+      // Absent means "no notes" - same convention as due_min/time_spent_ms
+      // above. See sendTaskAt() in index.js for the phone-side truncation.
+      strncpy(s_incoming[idx].notes, notes_tuple ? notes_tuple->value->cstring : "", MAX_NOTES_LEN - 1);
+      s_incoming[idx].notes[MAX_NOTES_LEN - 1] = '\0';
+#endif
       break;
     }
     case MSG_TASK_SYNC_END: {
@@ -1747,6 +2045,33 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (add_task_enabled_tuple) {
         s_add_task_enabled = add_task_enabled_tuple->value->int32 != 0;
       }
+      // Same optional/absent-means-unchanged pattern as the two flags above,
+      // but only re-applied (apply_backlight_mode()) when the value actually
+      // changed - this field is sent on EVERY status push, including the
+      // routine ones a background auto-sync fires every few minutes, and
+      // re-triggering the backlight on each of those (rather than just on an
+      // actual settings save) would defeat a custom timeout's whole point.
+#ifndef PBL_PLATFORM_APLITE
+      Tuple *backlight_mode_tuple = dict_find(iterator, KEY_BACKLIGHT_MODE);
+      if (backlight_mode_tuple && backlight_mode_tuple->value->int32 != s_backlight_mode) {
+        s_backlight_mode = backlight_mode_tuple->value->int32;
+        apply_backlight_mode();
+      }
+#endif
+#ifndef PBL_PLATFORM_APLITE
+      // Re-arms the background-wakeup schedule (see schedule_next_wakeup())
+      // the first time this launch confirms the interval, and again if it
+      // actually changes mid-session - not on every status push, which
+      // would otherwise fire on every SYNCING/OK tick of a single sync and
+      // on every watch-initiated action's own follow-up status.
+      Tuple *auto_sync_interval_tuple = dict_find(iterator, KEY_AUTO_SYNC_INTERVAL_MIN);
+      if (auto_sync_interval_tuple &&
+          (auto_sync_interval_tuple->value->int32 != s_auto_sync_interval_min || !s_wakeup_rescheduled_this_launch)) {
+        s_auto_sync_interval_min = auto_sync_interval_tuple->value->int32;
+        schedule_next_wakeup();
+        s_wakeup_rescheduled_this_launch = true;
+      }
+#endif
       // update_empty_layer() only redraws the empty-state text layer, which
       // stays hidden while s_task_count > 0 - reload_data is what actually
       // refreshes the Resync row's status subtitle in that case. Both are
@@ -1758,6 +2083,27 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (s_status_code == STATUS_ERROR) {
         show_error_overlay();
       }
+#ifndef PBL_PLATFORM_APLITE
+      // A wakeup-launched session exists purely to sync quietly and get
+      // back out of the way - once the sync has actually concluded (success,
+      // failure, or "not paired", as opposed to the SYNCING status that
+      // fires first), pop back to whatever was on screen before this app
+      // was auto-launched. A manually opened session (s_is_wakeup_launch
+      // false) never takes this branch and behaves exactly as it always
+      // has. Guarded so a retried sync's own second terminal status in the
+      // same session can't pop an already-empty window stack.
+      if (s_is_wakeup_launch && !s_wakeup_exit_triggered &&
+          (s_status_code == STATUS_OK || s_status_code == STATUS_ERROR || s_status_code == STATUS_NOT_PAIRED)) {
+        s_wakeup_exit_triggered = true;
+        APP_LOG(APP_LOG_LEVEL_INFO, "wakeup sync done (status %d), exiting", (int)s_status_code);
+        // Tells the system this exit was a deliberate, completed action
+        // (not the user backing out) - without this, exiting can land the
+        // user in the app launcher menu instead of back on their watchface,
+        // which would make a quiet background sync anything but quiet.
+        exit_reason_set(APP_EXIT_ACTION_PERFORMED_SUCCESSFULLY);
+        window_stack_pop_all(true);
+      }
+#endif
       break;
     }
     default:
@@ -2208,6 +2554,7 @@ static void adjust_habit(MenuIndex index, int32_t delta) {
 }
 
 static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  backlight_touch();
   Habit *habit = resolve_habit_at(*cell_index);
 #ifndef PBL_PLATFORM_APLITE
   // Select pauses/resumes an is_countdown habit's timer while IT's the one
@@ -2252,6 +2599,7 @@ static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
 // difference between the two timer types (upload elapsed ms vs. a silent
 // cancel - see its own comment), so this code doesn't need to.
 static void habits_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  backlight_touch();
   Habit *habit = resolve_habit_at(*cell_index);
   // Same aplite-only is_stopwatch-alone shortcut as habits_menu_select_click
   // above - see its comment.
@@ -2289,9 +2637,17 @@ static void update_habits_empty_layer(void) {
   layer_set_hidden(menu_layer_get_layer(s_habits_menu_layer), show_empty);
 }
 
+#ifndef PBL_PLATFORM_APLITE
+static void habits_menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, MenuIndex old_index, void *context) {
+  backlight_touch();
+}
+#endif
+
 static void habits_window_load(Window *window) {
   Layer *window_layer = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(window_layer);
+
+  backlight_touch();
 
   const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
   s_habits_status_bar = status_bar_layer_create();
@@ -2307,6 +2663,9 @@ static void habits_window_load(Window *window) {
     .draw_row = habits_menu_draw_row,
     .select_click = habits_menu_select_click,
     .select_long_click = habits_menu_select_long_click,
+#ifndef PBL_PLATFORM_APLITE
+    .selection_changed = habits_menu_selection_changed,
+#endif
   });
   menu_layer_set_click_config_onto_window(s_habits_menu_layer, window);
   layer_add_child(window_layer, menu_layer_get_layer(s_habits_menu_layer));
@@ -2370,6 +2729,8 @@ static void push_habits_window(void) {
 static void window_load(Window *window) {
   Layer *window_layer = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(window_layer);
+
+  backlight_touch();
 
   const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
   s_status_bar = status_bar_layer_create();
@@ -2466,6 +2827,24 @@ static void window_load(Window *window) {
   layer_set_hidden(text_layer_get_layer(s_error_layer), true);
   layer_add_child(window_layer, text_layer_get_layer(s_error_layer));
 
+#ifndef PBL_PLATFORM_APLITE
+  // Same full-content-area overlay approach as s_error_layer above, for a
+  // double-clicked task's notes (see show_notes_overlay). Left-aligned and
+  // top-anchored (unlike the centered, short status text s_error_layer
+  // shows) since this is body text, not a status message - word-wrap fills
+  // top-down from there. A smaller font than the error layer's bold 18pt:
+  // notes can run to MAX_NOTES_LEN characters, several times longer than
+  // any error message this app ever shows.
+  s_notes_layer = text_layer_create(content_bounds);
+  text_layer_set_text_alignment(s_notes_layer, GTextAlignmentLeft);
+  text_layer_set_font(s_notes_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_background_color(s_notes_layer, GColorWhite);
+  text_layer_set_text_color(s_notes_layer, GColorBlack);
+  text_layer_set_overflow_mode(s_notes_layer, GTextOverflowModeWordWrap);
+  layer_set_hidden(text_layer_get_layer(s_notes_layer), true);
+  layer_add_child(window_layer, text_layer_get_layer(s_notes_layer));
+#endif
+
   update_empty_layer();
   request_sync();
 
@@ -2492,6 +2871,13 @@ static void window_unload(Window *window) {
   text_layer_destroy(s_sync_progress_layer);
 #endif
   text_layer_destroy(s_error_layer);
+#ifndef PBL_PLATFORM_APLITE
+  text_layer_destroy(s_notes_layer);
+  if (s_pending_toggle_timer) {
+    app_timer_cancel(s_pending_toggle_timer);
+    s_pending_toggle_timer = NULL;
+  }
+#endif
   bitmap_layer_destroy(s_logo_layer);
   gbitmap_destroy(s_logo_bitmap);
   gbitmap_destroy(s_check_bitmap);
@@ -2507,6 +2893,15 @@ static void window_unload(Window *window) {
 }
 
 static void init(void) {
+#ifndef PBL_PLATFORM_APLITE
+  // Detects a session that exists purely because schedule_next_wakeup()'s
+  // wakeup fired, as opposed to the user opening the app - see
+  // s_is_wakeup_launch's own comment for what this gates.
+  s_is_wakeup_launch = launch_reason() == APP_LAUNCH_WAKEUP;
+  if (s_is_wakeup_launch) {
+    APP_LOG(APP_LOG_LEVEL_INFO, "launched by wakeup event");
+  }
+#endif
   load_tasks();
   load_habits();
   load_tracking();
@@ -2532,6 +2927,18 @@ static void init(void) {
 }
 
 static void deinit(void) {
+#ifndef PBL_PLATFORM_APLITE
+  // Relinquish the backlight back to automatic control before exiting -
+  // otherwise an always-on or mid-timeout override from this session would
+  // otherwise persist past the app's own lifetime, per light_enable()'s own
+  // docs warning about battery drain from leaving it forced on.
+  if (s_backlight_timer) {
+    app_timer_cancel(s_backlight_timer);
+  }
+  if (s_backlight_mode != 0) {
+    light_enable(false);
+  }
+#endif
   window_destroy(s_main_window);
   if (s_habits_window) {
     window_destroy(s_habits_window);

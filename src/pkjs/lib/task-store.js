@@ -673,6 +673,35 @@ function taskIsPlannedForToday(t, today) {
   return t.dueDay === today;
 }
 
+// A task marked done stays visible for this long after completion even
+// with hideDone on, so completing it on the watch doesn't make it vanish
+// before the user can see it happen - the very next auto-sync
+// (runAutoSyncAfterOp, on by default) used to land within a second or two
+// of the toggle and immediately exclude it. Only meaningful for a task
+// completed VIA THE WATCH: doneOn is stamped by handleTaskToggle's own
+// optimistic update in index.js, which is the only place this replay path
+// sets it reliably - a real op from another client (task.service.ts's own
+// `update(id, { isDone: true })` call, confirmed via the real source,
+// never includes doneOn in the dispatched changes; the real reducer
+// computes ITS OWN Date.now() fallback at replay time, which this app's
+// generic mergeTaskChanges() doesn't replicate) generally won't carry a
+// fresh-enough doneOn through this app's own replay to matter here - which
+// is also the right scope: nobody's watching the watch in real time for a
+// completion that happened on a different device.
+var HIDE_DONE_GRACE_MS = 5000;
+
+// Shared by getActiveTasks' own main-task filter and pushTaskAndSubtasks'
+// per-subtask filter below - a done task/subtask with no doneOn at all
+// (never set - e.g. done before this grace period existed, or done by
+// another client per the comment above) hides immediately, same as this
+// app's original behavior, rather than being treated as "just completed".
+function isHiddenDone(t, hideDone) {
+  if (!hideDone || !t.isDone) {
+    return false;
+  }
+  return !t.doneOn || Date.now() - t.doneOn >= HIDE_DONE_GRACE_MS;
+}
+
 // When todayOnly is true, tasks are further restricted to ones actually
 // planned for today (see taskIsPlannedForToday) - not undated, overdue, or
 // future-dated ones. This mirrors the real app's virtual TODAY_TAG, whose
@@ -709,7 +738,7 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
     // used for todayOnly above. A done SUBTASK under a still-open parent is
     // handled separately, per-subtask, in pushTaskAndSubtasks - the parent
     // staying visible is exactly the case that reasoning doesn't apply to.
-    .filter(function (t) { return !hideDone || !t.isDone; })
+    .filter(function (t) { return !isHiddenDone(t, hideDone); })
     .filter(function (t) {
       if (!todayOnly) {
         // Mirrors project.taskIds vs project.backlogTaskIds
@@ -799,11 +828,11 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName, hideDone) {
   // placeholder-titled row; a done one is skipped here too when hideDone
   // is on, independently of whatever state its (necessarily not-done, or
   // this whole block would never run) parent is in.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, notes: t.notes || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
-    if (sub && sub.title && !(hideDone && sub.isDone)) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
+    if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, notes: sub.notes || undefined });
     }
   });
 }
@@ -881,4 +910,5 @@ module.exports = {
   getActiveTasks: getActiveTasks,
   getActiveHabits: getActiveHabits,
   todayStr: todayStr,
+  HIDE_DONE_GRACE_MS: HIDE_DONE_GRACE_MS,
 };

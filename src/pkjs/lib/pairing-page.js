@@ -29,6 +29,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var enableAddTask = options.enableAddTask !== false;
   var habitSortDoneLast = !!options.habitSortDoneLast;
   var hideDoneHabits = !!options.hideDoneHabits;
+  var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
     : 'Only used to decrypt on this phone - never sent anywhere';
@@ -51,6 +52,17 @@ function buildPairingPageUrl(baseUrl, email, options) {
     [60, 'Every hour'],
   ].map(function (opt) {
     var selected = opt[0] === autoSyncIntervalMin ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
+  var backlightOptions = [
+    [0, 'System default'],
+    [5, '5 seconds after a button press'],
+    [15, '15 seconds after a button press'],
+    [30, '30 seconds after a button press'],
+    [60, '60 seconds after a button press'],
+    [-1, 'Always on (uses much more battery)'],
+  ].map(function (opt) {
+    var selected = opt[0] === backlightMode ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var html = '<!doctype html>\n' +
@@ -143,7 +155,24 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    Removes a completed task from the watch\'s list entirely instead of\n' +
 '    showing it dimmed. A completed subtask under a still-open task is\n' +
 '    hidden the same way; a completed task with subtasks is hidden along\n' +
-'    with all of them.\n' +
+'    with all of them. A task you complete on the watch itself stays\n' +
+'    visible for about 5 seconds first, so you can see it happen before it\n' +
+'    disappears.\n' +
+'  </p>\n' +
+'\n' +
+'  <label for="backlightMode">Backlight</label>\n' +
+'  <select id="backlightMode">\n' +
+backlightOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">\n' +
+'    "System default" never touches the backlight - it behaves exactly as\n' +
+'    your watch\'s own Settings say. Any other option overrides that while\n' +
+'    this app is open, relighting the screen on every button press (Select,\n' +
+'    long-select, or scrolling) and keeping it lit for the chosen duration\n' +
+'    (or indefinitely, for "Always on") before handing control back. Not\n' +
+'    available on original Pebble/Pebble Steel (aplite) - too little free\n' +
+'    memory left on that hardware for this; it always uses your watch\'s\n' +
+'    own Settings regardless of this option.\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="defaultProjectId">Default project for "Add Task"</label>\n' +
@@ -214,11 +243,13 @@ projectOptions + '\n' +
 autoSyncIntervalOptions + '\n' +
 '  </select>\n' +
 '  <p class="hint">\n' +
-'    Syncs on this schedule in the background, in addition to any manual\n' +
-'    Resync and the "after a watch change" option above. Only runs while\n' +
-'    the Pebble app is able to run in the background - it\'s not a\n' +
-'    guaranteed-exact schedule. Uses more battery/data the more often it\'s\n' +
-'    set to run.\n' +
+'    Keeps the watch\'s list fresh on this schedule even when the app isn\'t\n' +
+'    open, in addition to any manual Resync and the "after a watch change"\n' +
+'    option above. While the app IS open, this runs quietly on the phone\n' +
+'    side; while it\'s closed, the watch briefly wakes itself up, syncs,\n' +
+'    and returns you to whatever was on screen before - expect a short\n' +
+'    screen flash each time, not a fully invisible background refresh.\n' +
+'    Uses more battery the more often it\'s set to run.\n' +
 '  </p>\n' +
 '\n' +
 '  <h2>Danger zone</h2>\n' +
@@ -280,7 +311,8 @@ autoSyncIntervalOptions + '\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
 '      habitSortDoneLast: document.getElementById(\'habitSortDoneLast\').checked,\n' +
-'      hideDoneHabits: document.getElementById(\'hideDoneHabits\').checked\n' +
+'      hideDoneHabits: document.getElementById(\'hideDoneHabits\').checked,\n' +
+'      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +
 '  });\n' +
 '\n' +

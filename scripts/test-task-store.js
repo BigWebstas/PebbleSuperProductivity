@@ -848,6 +848,30 @@ check('getActiveTasks(hideDone=false) keeps showing done tasks (dimmed on the wa
   assert.deepStrictEqual(active(state).map((t) => t.id), ['t1']);
 });
 
+check('getActiveTasks(hideDone=true) keeps a just-completed task visible during its grace period', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addTask({ id: 't1', title: 'Buy milk', isDone: true, doneOn: Date.now() })],
+    state
+  );
+  assert.deepStrictEqual(active(state, 30, false, false, true).map((t) => t.id), ['t1']);
+});
+
+check('getActiveTasks(hideDone=true) hides a done task once its grace period has elapsed', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addTask({ id: 't1', title: 'Buy milk', isDone: true, doneOn: Date.now() - store.HIDE_DONE_GRACE_MS - 1 })],
+    state
+  );
+  assert.deepStrictEqual(active(state, 30, false, false, true).map((t) => t.id), []);
+});
+
+check('getActiveTasks(hideDone=true) hides a done task with no doneOn immediately (no grace period info)', () => {
+  const state = store.emptyState();
+  store.applyOperations([addTask({ id: 't1', title: 'Buy milk', isDone: true })], state);
+  assert.deepStrictEqual(active(state, 30, false, false, true).map((t) => t.id), []);
+});
+
 check('getActiveTasks never lists a subtask as a top-level row on its own', () => {
   const state = store.emptyState();
   store.applyOperations(

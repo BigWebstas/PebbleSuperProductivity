@@ -93,7 +93,10 @@
       "HABIT_TYPE",
       "HABIT_COUNTDOWN_MS",
       "HABITS_ENABLED",
-      "ADD_TASK_ENABLED"
+      "ADD_TASK_ENABLED",
+      "BACKLIGHT_MODE",
+      "TASK_NOTES",
+      "AUTO_SYNC_INTERVAL_MIN"
     ]
   }
 }
