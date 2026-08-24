@@ -300,6 +300,7 @@ static bool s_error_overlay_active = false;
 // watchface instead of returning to the task list).
 static Window *s_notes_window;
 static StatusBarLayer *s_notes_status_bar;
+static ScrollLayer *s_notes_scroll_layer;
 static TextLayer *s_notes_layer;
 static bool s_notes_overlay_active = false;
 // Which task the notes overlay is currently showing - a plain id copy (not
@@ -1970,6 +1971,34 @@ static void build_notes_overlay_text(Task *task) {
   }
 }
 
+// How tall s_notes_overlay_text lays out (word-wrapped) at the given width -
+// shared by notes_window_load (to size the TextLayer/ScrollLayer on first
+// open) and show_notes_overlay's live-refresh path (to resize them when a
+// note-append changes the text under an already-open overlay). Measured
+// against a generously tall test box: MAX_NOTES_LEN's worst case is still
+// only a few screens of wrapped text, nowhere near this ceiling.
+// Confirmed live on-device that this measurement runs short of what
+// TextLayer actually needs to avoid clipping its own last lines (a real note
+// measured at 198px rendered visibly cut off in a 208px-tall viewport, and
+// still stopped a line or two short of the true end after a flat +24px
+// margin) - the shortfall scales with content length rather than being a
+// fixed few px, so the margin below is proportional (10%) plus a flat
+// two-line floor, generous enough that even a long, heavily-appended note's
+// true last line is always reachable. A short note that already fit just
+// gets a bit of harmless extra scroll room past its actual end.
+#define NOTES_TEXT_HEIGHT_MARGIN_FLOOR 48
+
+static int16_t measure_notes_text_height(int16_t width) {
+  GSize size = graphics_text_layout_get_content_size(
+      s_notes_overlay_text, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(0, 0, width, 2000),
+      GTextOverflowModeWordWrap, GTextAlignmentLeft);
+  int16_t margin = size.h / 10;
+  if (margin < NOTES_TEXT_HEIGHT_MARGIN_FLOOR) {
+    margin = NOTES_TEXT_HEIGHT_MARGIN_FLOOR;
+  }
+  return size.h + margin;
+}
+
 // Shows a task's notes (double-click Select on it - see
 // pending_toggle_timer_callback/menu_select_click) in their own pushed
 // Window (see s_notes_window's own comment for why - Back's default pop
@@ -1985,6 +2014,21 @@ static void show_notes_overlay(Task *task) {
   build_notes_overlay_text(task);
   if (s_notes_layer) {
     text_layer_set_text(s_notes_layer, s_notes_overlay_text);
+    // The new text can be a different length than what was there before
+    // (that's the whole point of a live refresh - a note-append just
+    // landed) - resize the scrollable content to match and snap back to
+    // the top rather than leaving the scroll position mid-way through text
+    // that may no longer be there.
+    GRect scroll_bounds = layer_get_bounds(scroll_layer_get_layer(s_notes_scroll_layer));
+    int16_t text_height = measure_notes_text_height(scroll_bounds.size.w);
+    if (text_height < scroll_bounds.size.h) {
+      text_height = scroll_bounds.size.h;
+    }
+    GRect text_frame = layer_get_frame(text_layer_get_layer(s_notes_layer));
+    text_frame.size.h = text_height;
+    layer_set_frame(text_layer_get_layer(s_notes_layer), text_frame);
+    scroll_layer_set_content_size(s_notes_scroll_layer, GSize(scroll_bounds.size.w, text_height));
+    scroll_layer_set_content_offset(s_notes_scroll_layer, GPointZero, false);
     return;
   }
   push_notes_window();
@@ -2905,10 +2949,14 @@ static void notes_window_select_long_click_handler(ClickRecognizerRef recognizer
   start_note_append_dictation();
 }
 
-// A fresh click config, not menu_layer_set_click_config_onto_window - this
-// window has no MenuLayer to compose with (just a plain TextLayer), so
-// there's no existing UP/DOWN/SELECT wiring to preserve or risk breaking by
-// writing this by hand, unlike s_main_window's own click config.
+// Not menu_layer_set_click_config_onto_window - this window has no MenuLayer
+// to compose with. Installed onto the ScrollLayer (not the window directly)
+// via scroll_layer_set_click_config_onto_window/set_callbacks below, which
+// wires UP/DOWN to scrolling first and then calls this for SELECT - a note
+// long enough to need scrolling was exactly the un-openable case before the
+// ScrollLayer was added (word-wrapped text past screen height had no way to
+// bring the rest on screen; this app has no touchscreen on any supported
+// hardware, so UP/DOWN are the only way to move it).
 static void notes_window_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, notes_window_select_click_handler);
   window_long_click_subscribe(BUTTON_ID_SELECT, 0, notes_window_select_long_click_handler, NULL);
@@ -2927,12 +2975,29 @@ static void notes_window_load(Window *window) {
   GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
                                 bounds.size.w, bounds.size.h - status_bar_height);
 
+  // The TextLayer's own frame has to be sized to the FULL wrapped text
+  // height up front, not just the visible viewport - it clips its own
+  // content to its frame regardless of the ScrollLayer's (separate) content
+  // size, so a frame sized only to the viewport would still cut the text
+  // off even once the ScrollLayer itself knows there's more to scroll to.
+  int16_t text_height = measure_notes_text_height(content_bounds.size.w);
+  if (text_height < content_bounds.size.h) {
+    text_height = content_bounds.size.h;
+  }
+
+  s_notes_scroll_layer = scroll_layer_create(content_bounds);
+  scroll_layer_set_content_size(s_notes_scroll_layer, GSize(content_bounds.size.w, text_height));
+  scroll_layer_set_click_config_onto_window(s_notes_scroll_layer, window);
+  scroll_layer_set_callbacks(s_notes_scroll_layer, (ScrollLayerCallbacks) {
+    .click_config_provider = notes_window_click_config_provider,
+  });
+
   // Left-aligned and top-anchored (unlike the centered, short status text
   // s_error_layer uses) since this is body text, not a status message -
   // word-wrap fills top-down from there. A smaller font than the error
   // layer's bold 18pt: notes can run to MAX_NOTES_LEN characters, several
   // times longer than any error message this app ever shows.
-  s_notes_layer = text_layer_create(content_bounds);
+  s_notes_layer = text_layer_create(GRect(0, 0, content_bounds.size.w, text_height));
   text_layer_set_text_alignment(s_notes_layer, GTextAlignmentLeft);
   text_layer_set_font(s_notes_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_background_color(s_notes_layer, GColorWhite);
@@ -2943,14 +3008,16 @@ static void notes_window_load(Window *window) {
   // load handler synchronously, so the text has to already be sitting
   // somewhere this can read it back out from.
   text_layer_set_text(s_notes_layer, s_notes_overlay_text);
-  layer_add_child(window_layer, text_layer_get_layer(s_notes_layer));
+  scroll_layer_add_child(s_notes_scroll_layer, text_layer_get_layer(s_notes_layer));
 
-  window_set_click_config_provider(window, notes_window_click_config_provider);
+  layer_add_child(window_layer, scroll_layer_get_layer(s_notes_scroll_layer));
 }
 
 static void notes_window_unload(Window *window) {
   text_layer_destroy(s_notes_layer);
   s_notes_layer = NULL;
+  scroll_layer_destroy(s_notes_scroll_layer);
+  s_notes_scroll_layer = NULL;
   status_bar_layer_destroy(s_notes_status_bar);
   // The single source of truth for "is the notes window currently up" -
   // cleared here rather than in hide_notes_overlay() itself so a

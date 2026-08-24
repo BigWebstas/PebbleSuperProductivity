@@ -329,7 +329,11 @@ function sendTaskAt(tasks, index) {
     // the whole TASK_ITEM if a very long note pushed it over. Notes can run
     // to many paragraphs of markdown in the real app; this is a glance-
     // sized preview only (see show_notes_overlay), not a full reader.
-    dict.TASK_NOTES = String(t.notes).slice(0, 199);
+    var notesStr = String(t.notes);
+    // A silent mid-word cutoff read as a bug (confirmed live: "cut off mid
+    // word" with no signal it was intentional) - trailing "..." keeps the
+    // same 199-char wire budget while making the truncation visible.
+    dict.TASK_NOTES = notesStr.length > 199 ? notesStr.slice(0, 196) + '...' : notesStr;
   }
   sendWithRetry(dict, function () {
     sendTaskAt(tasks, index + 1);
@@ -443,7 +447,36 @@ function doSync() {
     // saveLastSeq() after each of our own uploads already keeps us from
     // requesting them again in the first place.
     return client.downloadOps(lastSeq, null, 500).then(function (res) {
-      store.applyOperations(res.ops || [], state, crypto);
+      // applyOperations() below is synchronous and, for an E2EE account,
+      // can be genuinely slow - each op's decrypt only reuses a cached
+      // Argon2id key if it shares a salt with one already seen this
+      // session, and other real clients don't necessarily share this
+      // client's own salt (see createCrypto's own comment on cost). On a
+      // first/full resync of a large account this can take a while with no
+      // other status update in between (the percent below is skipped
+      // entirely on the last page, since hasMore is already false by
+      // then) - without this, that stretch looked identical to a hang
+      // (confirmed live: "sits at 99%" on a full-clear resync of a large
+      // account). Gated on there actually being ops to decrypt so an
+      // empty/no-op page doesn't flicker the status for nothing.
+      //
+      // Throttled to every 10 percentage points (not every single op) -
+      // sendStatus() fires a real AppMessage each call, and a page can hold
+      // up to 500 ops; queuing one Bluetooth send per op would build a
+      // backlog that delays the eventual "done" status behind it, which is
+      // worse than the staleness this is trying to fix.
+      if (res.ops && res.ops.length) {
+        var decryptLastPercentSent = -1;
+        store.applyOperations(res.ops, state, crypto, function (done, total) {
+          var percent = Math.floor(100 * done / total);
+          if (percent >= decryptLastPercentSent + 10 || done === total) {
+            decryptLastPercentSent = percent;
+            sendStatus(STATUS_SYNCING, 'Decrypting ' + percent + '%');
+          }
+        });
+      } else {
+        store.applyOperations([], state, crypto);
+      }
       (res.ops || []).forEach(function (entry) {
         if (entry.op && entry.op.vectorClock) {
           vectorClock = mergeVectorClocks(vectorClock, entry.op.vectorClock);

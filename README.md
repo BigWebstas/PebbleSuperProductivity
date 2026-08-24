@@ -23,7 +23,7 @@ Productivity's own **SuperSync** server.
 * Select (Middle button)
     * Click once to toggle Done/In-progress
     * Long hold to start time tracking when on tasks and habits
-    * Long hold to add a note when on the notes screen
+    * Long hold to append a note when on the notes screen
     * Double click to show task and project notes
 * Back returns to the prior screen
 

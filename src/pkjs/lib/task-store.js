@@ -620,9 +620,15 @@ function applyOperation(entry, state, crypto) {
   }
 }
 
-function applyOperations(entries, state, crypto) {
-  entries.forEach(function (entry) {
+// onProgress, if given, is called after every entry as (doneCount, total) -
+// used by doSync()'s pullPage() to surface decrypt progress on a slow page
+// instead of leaving the watch's status frozen (see its own call site).
+function applyOperations(entries, state, crypto, onProgress) {
+  entries.forEach(function (entry, index) {
     applyOperation(entry, state, crypto);
+    if (onProgress) {
+      onProgress(index + 1, entries.length);
+    }
   });
 }
 
