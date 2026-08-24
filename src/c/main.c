@@ -1858,15 +1858,22 @@ static void stop_syncing_animation(void) {
 
 #ifndef PBL_PLATFORM_APLITE
 // Refreshes s_sync_progress_layer's text from the latest s_status_msg -
-// "NN%" while a multi-page sync is in progress (index.js's pullPage()
-// computes this from res.latestSeq, the account's high-water mark, vs how
-// far the current page has gotten), or the "may take a few minutes"
-// heads-up before any percentage is available (e.g. still on the first
-// page, or a single-page sync that finishes before this would ever show).
+// "Decrypting NN%" while a page of ops is being decrypted (index.js's
+// applyOperations() progress callback - see its own comment for why this
+// stretch needs a heads-up at all), or the "may take a few minutes"
+// fallback before any percentage is available yet (e.g. still fetching
+// the first page, or a page with nothing to decrypt).
+//
+// The percent message gets a bigger font than the fallback - it's the one
+// thing actually worth reading closely here, and short enough ("Decrypting
+// 100%" at its longest) to never wrap within this layer's fixed height the
+// way the longer fallback sentence would at the same size.
 static void update_sync_progress_text(void) {
   if (s_status_msg[0] != '\0') {
+    text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text(s_sync_progress_layer, s_status_msg);
   } else {
+    text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
     text_layer_set_text(s_sync_progress_layer, "This may take a few minutes");
   }
 }
