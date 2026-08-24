@@ -1846,6 +1846,23 @@ static void stop_syncing_animation(void) {
   if (s_syncing_timer) {
     app_timer_cancel(s_syncing_timer);
     s_syncing_timer = NULL;
+    // Hands the backlight back now that the sync which forced it on (see
+    // start_syncing_animation) has actually finished - only reachable here
+    // when the animation really was running, not on every incidental call
+    // (this function also fires harmlessly whenever the app is simply
+    // never in the initial-syncing state to begin with).
+#ifndef PBL_PLATFORM_APLITE
+    // ALWAYS_ON mode wants to stay lit regardless of this - nothing to
+    // undo there. Every other mode (system default, or a custom
+    // touch-based timeout) goes dark immediately rather than lingering,
+    // same "goes dark right as this timer expires" reasoning
+    // backlight_timer_callback's own comment gives for its own case.
+    if (s_backlight_mode != BACKLIGHT_MODE_ALWAYS_ON) {
+      light_enable(false);
+    }
+#else
+    light_enable(false);
+#endif
   }
 #ifndef PBL_PLATFORM_APLITE
   // Restores s_empty_layer to the plain font every other empty-state
@@ -1919,6 +1936,15 @@ static void start_syncing_animation(void) {
     return;
   }
 #endif
+  // Forces the backlight on for the whole initial sync, independent of
+  // s_backlight_mode's own touch-based rules (and unconditionally on
+  // aplite, which has no such mode to begin with - see its own comment
+  // further up) - this screen can sit for minutes on a large first sync
+  // with nothing for the user to press, and the watch's own normal
+  // auto-dim has no idea a sync driven entirely from the phone side is
+  // even happening. Handed back in stop_syncing_animation() once this
+  // actually finishes.
+  light_enable(true);
   s_syncing_dots = 0;
 #ifdef PBL_PLATFORM_APLITE
   text_layer_set_text(s_empty_layer, "Syncing\n\nThis may take a few minutes");
