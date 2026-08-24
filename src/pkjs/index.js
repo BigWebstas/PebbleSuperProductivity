@@ -801,6 +801,23 @@ function handleTaskToggle(taskId, done) {
   // and never reopens an already-completed parent when one's undone
   // later.
   var parentOp = done ? buildParentAutoCompleteOp(taskId, state, config, clientId) : null;
+  if (parentOp) {
+    // Without this, the parent's completion was invisible on the watch
+    // until the NEXT list push - which, with hideDoneTasks on, could
+    // easily be scheduleHideDoneSweep's own sweep (fired after
+    // HIDE_DONE_GRACE_MS specifically to exclude anything whose grace
+    // period has elapsed). The parent's doneOn is stamped within the same
+    // synchronous call as the subtask's own, so by the time that sweep
+    // fires its grace period has ALSO already elapsed - the parent would
+    // vanish from the list having never once been shown as done, unlike
+    // the subtask itself (whose "Done" flash comes from the watch's own
+    // local optimistic toggle on that same row, independent of any push -
+    // main.c's menu_select_click - which the parent has no equivalent of,
+    // since the watch has no idea a second, different row just changed).
+    // Pushed while still well within the grace window, so hideDoneTasks
+    // doesn't exclude it from this particular push either.
+    sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
+  }
 
   var uploads = [uploadSingleOp(op, config, clientId)];
   if (parentOp) {
