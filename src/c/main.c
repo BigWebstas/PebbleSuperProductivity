@@ -438,7 +438,17 @@ static Task s_tasks[MAX_TASKS];
 static int s_task_count = 0;      // tasks currently shown (committed)
 static int s_incoming_total = 0;  // total announced by the current sync batch
 static Task s_incoming[MAX_TASKS];
-static int s_status_code = STATUS_SYNCING;
+// -1, not STATUS_SYNCING (0-3, matching what actually goes over the wire) -
+// a sentinel meaning "no real status yet", never sent or matched by any
+// switch on this. Was hardcoded straight to STATUS_SYNCING before (this app
+// does show an immediate optimistic "Syncing..." screen before any phone
+// message ever arrives - see is_initial_syncing), but that bypassed
+// set_status_code() entirely: its own old-vs-new transition check saw
+// STATUS_SYNCING already equal to itself and never called light_enable(true)
+// for that very first, always-happens syncing state. init() now makes the
+// real STATUS_SYNCING transition explicit via set_status_code() itself,
+// same chokepoint every other status change already goes through.
+static int s_status_code = -1;
 #define MAX_STATUS_MSG_LEN 64
 static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
 // Phone-side settings, mirrored here via optional fields on MSG_SYNC_STATUS
@@ -3413,6 +3423,13 @@ static void window_unload(Window *window) {
 }
 
 static void init(void) {
+  // Establishes the real starting status through set_status_code() itself
+  // (see s_status_code's own comment for why this can't just be its static
+  // initializer) - this app always shows an immediate optimistic
+  // "Syncing..." screen before any phone message ever arrives, and this is
+  // what makes that first stretch force the backlight on same as every
+  // later one.
+  set_status_code(STATUS_SYNCING);
 #ifndef PBL_PLATFORM_APLITE
   // Detects a session that exists purely because schedule_next_wakeup()'s
   // wakeup fired, as opposed to the user opening the app - see
@@ -3452,12 +3469,22 @@ static void deinit(void) {
   // otherwise an always-on or mid-timeout override from this session would
   // otherwise persist past the app's own lifetime, per light_enable()'s own
   // docs warning about battery drain from leaving it forced on.
+  // ALWAYS_ON mode is itself documented as "for as long as the app stays
+  // open" - exiting is exactly the boundary that's supposed to end it, not
+  // an exception to it.
+  //
+  // Unconditional, not gated on s_backlight_mode != 0 (as this used to be) -
+  // set_status_code() can also force the backlight on for a mid-sync exit
+  // (a wakeup-launched session's own auto-close, or the user backing out
+  // while a resync is still in flight) independent of whatever
+  // s_backlight_mode says, and that override needs relinquishing here too.
+  // Harmless to call even when nothing this app did ever actually turned
+  // the backlight on - it just hands back whatever the system's own
+  // control already was.
   if (s_backlight_timer) {
     app_timer_cancel(s_backlight_timer);
   }
-  if (s_backlight_mode != 0) {
-    light_enable(false);
-  }
+  light_enable(false);
 #endif
   window_destroy(s_main_window);
   if (s_habits_window) {
