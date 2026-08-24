@@ -96,7 +96,8 @@
       "ADD_TASK_ENABLED",
       "BACKLIGHT_MODE",
       "TASK_NOTES",
-      "AUTO_SYNC_INTERVAL_MIN"
+      "AUTO_SYNC_INTERVAL_MIN",
+      "NOTE_TEXT"
     ]
   }
 }

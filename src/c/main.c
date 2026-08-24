@@ -37,6 +37,7 @@
 #define KEY_BACKLIGHT_MODE MESSAGE_KEY_BACKLIGHT_MODE
 #define KEY_TASK_NOTES MESSAGE_KEY_TASK_NOTES
 #define KEY_AUTO_SYNC_INTERVAL_MIN MESSAGE_KEY_AUTO_SYNC_INTERVAL_MIN
+#define KEY_NOTE_TEXT MESSAGE_KEY_NOTE_TEXT
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -54,6 +55,7 @@ enum {
   MSG_TASK_ADD = 12,        // watch -> phone: TASK_TITLE (new task's dictated title)
   MSG_HABIT_TRACK_STOP = 13, // watch -> phone: HABIT_ID + TRACKED_MS (this session's tracked ms, StopWatch-type only)
   MSG_FINISH_DAY = 14,      // watch -> phone: archive every currently-done task (no extra keys)
+  MSG_NOTE_APPEND = 15,     // watch -> phone: TASK_ID + NOTE_TEXT (dictated text to append to this task's notes)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -285,8 +287,34 @@ static bool s_dictation_pending;
 static TextLayer *s_error_layer;
 static bool s_error_overlay_active = false;
 #ifndef PBL_PLATFORM_APLITE
+// A task's notes are shown in their own pushed Window (not a layer toggled
+// on top of s_main_window, the way the error overlay is) specifically so
+// Back gets Pebble's own default "pop this window" behavior for free,
+// dismissing back to the task list - same reasoning, and same pattern, as
+// s_habits_window's own comment ("Back always pops this back off... no
+// click config needed here for it"). A layer-toggle overlay on the SAME
+// window doesn't get this: Back on s_main_window always falls through to
+// ITS default behavior (exit the app, since it's the bottom/only window),
+// regardless of which overlay layer happens to be drawn on top at the time
+// - this was a real, reported bug (Back on the notes overlay exited to the
+// watchface instead of returning to the task list).
+static Window *s_notes_window;
+static StatusBarLayer *s_notes_status_bar;
 static TextLayer *s_notes_layer;
 static bool s_notes_overlay_active = false;
+// Which task the notes overlay is currently showing - a plain id copy (not
+// a Task*), same reasoning as s_pending_toggle_task_id/s_tracking_task_id
+// below: a background sync can rebuild s_tasks out from under the overlay
+// while it's open. Needed by long-select's voice note-append (see
+// notes_window_select_long_click_handler/start_note_append_dictation) to
+// know which task to send the dictated text for.
+static char s_notes_overlay_task_id[MAX_ID_LEN] = "";
+// Distinguishes a dictation_status_callback firing for note-append (started
+// from the notes overlay's long-select) from one firing for Add Task
+// (started from the section-0 row) - both share the single s_dictation_session/
+// s_dictation_pending pair (see its own comment), since only one dictation
+// can ever be in flight at a time regardless of which triggered it.
+static bool s_dictation_is_note_append = false;
 // Double-click detection on Select: a single click doesn't commit its
 // task-done toggle immediately - it starts this timer instead, so a
 // second click on the SAME task arriving before it fires can cancel the
@@ -609,10 +637,12 @@ static void backlight_touch(void);
 #ifndef PBL_PLATFORM_APLITE
 static void show_notes_overlay(Task *task);
 static void hide_notes_overlay(void);
+static void push_notes_window(void);
 static void pending_toggle_timer_callback(void *data);
 #endif
 #ifndef PBL_PLATFORM_APLITE
 static void start_add_task_dictation(void);
+static void start_note_append_dictation(void);
 #endif
 
 // ---------- menu layer callbacks ----------
@@ -637,14 +667,36 @@ static void start_add_task_dictation(void);
 // action, so it uses this app's existing "long-select is the more
 // deliberate gesture" convention (task/habit time tracking) rather than
 // the single-tap Select every other primary action uses. When the list is
-// empty, section 0 doubles as the empty/error screen's retry target and
-// there are no further sections (no Finish Day row on that screen either -
-// there's nothing to have finished).
+// empty, there are no further sections (no Finish Day row on that screen
+// either - there's nothing to have finished): for STATUS_NOT_PAIRED/ERROR/
+// initial-syncing, section 0 doubles as the empty/error screen's single
+// phantom retry row (see menu_get_num_rows); for STATUS_OK (e.g. Today Only
+// with nothing due) on a platform ACTIONABLE_EMPTY_ACTIVE() allows, section 0
+// instead shows its normal Resync/Habits/Add Task rows with "No tasks for
+// today." as its header (see update_empty_layer's show_actionable_empty).
 typedef enum {
   SECTION0_ROW_RESYNC,
   SECTION0_ROW_HABITS,
   SECTION0_ROW_ADD_TASK,
 } Section0RowKind;
+
+// Whether the STATUS_OK/zero-tasks empty state (e.g. Today Only with
+// nothing due) shows section 0's normal, still-interactive rows (with a
+// header carrying the "No tasks for today." message) instead of the old
+// single hidden phantom retry row. Aplite unconditionally keeps the old
+// behavior - the extra header/row-count/click-routing logic this needs
+// pushed a debug build 176 bytes past aplite's combined flash+RAM "APP"
+// region even with no new persistent state, confirmed via pebble build's
+// own memory usage report (same tight-budget reasoning as MAX_HABITS/
+// MAX_ID_LEN's own comments). A compile-time-constant macro (same idiom as
+// the SDK's own PBL_IF_MICROPHONE_ELSE, already used above for Add Task)
+// rather than a runtime check, so the dead branches it guards are fully
+// eliminated on aplite instead of merely unreachable.
+#ifdef PBL_PLATFORM_APLITE
+#define ACTIONABLE_EMPTY_ACTIVE() false
+#else
+#define ACTIONABLE_EMPTY_ACTIVE() (s_status_code == STATUS_OK)
+#endif
 
 static int section0_row_count(void) {
   int count = 1; // Resync always present.
@@ -685,15 +737,17 @@ static uint16_t menu_get_num_sections(MenuLayer *menu_layer, void *context) {
 
 static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
-    // The menu layer is hidden whenever s_task_count is 0 (see
-    // update_empty_layer), but it still owns the window's click config, so
-    // it needs at least one reportable row for SELECT to be dispatched at
-    // all - otherwise "Select to retry" on the error screen is dead text.
-    // Never actually drawn in that state since the layer is hidden. This
-    // also means the Habits row (see below) isn't reachable while the list
-    // is empty/erroring - a deliberately narrow scope, not a full port of
-    // this screen's navigation.
-    return 1;
+    // STATUS_OK with zero tasks (e.g. Today Only filtering out everything
+    // due) is an "actionable" empty state - see update_empty_layer's
+    // show_actionable_empty - so the menu layer stays visible with its
+    // normal section-0 rows (Resync/Habits/Add Task) reachable, same as the
+    // populated list. Every other empty reason (not paired/error/initial
+    // syncing) keeps the menu hidden behind s_empty_layer, but it still owns
+    // the window's click config, so it needs at least one reportable row
+    // for SELECT to be dispatched at all - otherwise "Select to retry" on
+    // the error screen is dead text. Never actually drawn in that case
+    // since the layer is hidden.
+    return ACTIONABLE_EMPTY_ACTIVE() ? (uint16_t)section0_row_count() : 1;
   }
   if (section_index == 0) {
     return (uint16_t)section0_row_count();
@@ -709,7 +763,13 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
 }
 
 static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_index, void *context) {
-  if (s_task_count == 0 || section_index == 0) {
+  if (s_task_count == 0) {
+    // Actionable empty state only (see menu_get_num_rows) - the header is
+    // where "No tasks for today." itself lives once the menu takes over
+    // from s_empty_layer, sized the same as a project group's own header.
+    return (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) ? 40 : 0;
+  }
+  if (section_index == 0) {
     return 0;
   }
   int group_idx = (int)section_index - 1;
@@ -723,7 +783,22 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
 }
 
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
-  if (s_task_count == 0 || section_index == 0) {
+  if (s_task_count == 0) {
+    if (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) {
+      // Actionable empty state (see menu_get_num_rows/update_empty_layer) -
+      // the "No tasks for today." message that used to live alone on
+      // s_empty_layer now sits above the still-reachable Resync/Habits/Add
+      // Task rows instead.
+      GRect bounds = layer_get_bounds(cell_layer);
+      graphics_context_set_fill_color(ctx, GColorWhite);
+      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      graphics_context_set_text_color(ctx, GColorBlack);
+      graphics_draw_text(ctx, "No tasks for today.", fonts_get_system_font(FONT_KEY_GOTHIC_18),
+                          bounds, GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+    }
+    return;
+  }
+  if (section_index == 0) {
     return;
   }
   int group_idx = (int)section_index - 1;
@@ -985,7 +1060,13 @@ static void schedule_next_wakeup(void) {
 #endif // !PBL_PLATFORM_APLITE
 
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
-  if (s_task_count == 0) {
+  if (s_task_count == 0 && !ACTIONABLE_EMPTY_ACTIVE()) {
+    // Menu stays hidden for every empty reason except the actionable one
+    // (see menu_get_num_rows) - nothing to draw. In the actionable case,
+    // section 0's Resync/Habits/Add Task rows below draw exactly as they
+    // do for a populated list; menu_get_num_sections never reports more
+    // than section 0 while s_task_count is 0, so nothing past this branch
+    // is reachable here either way.
     return;
   }
   if (cell_index->section == 0) {
@@ -1295,6 +1376,12 @@ static int s_retry_msg_type = 0; // 0 = no message to retry if this send fails
 // dictated task title (MAX_TITLE_LEN) - MSG_REQUEST_SYNC/MSG_FINISH_DAY
 // need neither and leave this empty.
 static char s_retry_str[MAX_ID_LEN];
+// Second string payload, only ever populated for MSG_NOTE_APPEND (the one
+// message type that needs TWO strings at once - TASK_ID in s_retry_str
+// above, plus this, the dictated note text to append). Every other message
+// type leaves this empty; kept separate from s_retry_str rather than
+// repurposing it for a second role.
+static char s_retry_str2[MAX_NOTES_LEN];
 static int32_t s_retry_int = 0; // TASK_DONE / TRACKED_MS / HABIT_DELTA, whichever s_retry_msg_type needs
 static int s_retry_count = 0;
 static AppTimer *s_retry_timer = NULL;
@@ -1338,6 +1425,10 @@ static void send_pending_retry(void) {
       dict_write_cstring(iter, KEY_HABIT_ID, s_retry_str);
       dict_write_int32(iter, KEY_TRACKED_MS, s_retry_int);
       break;
+    case MSG_NOTE_APPEND:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str2);
+      break;
     case MSG_FINISH_DAY:
     case MSG_REQUEST_SYNC:
     default:
@@ -1351,8 +1442,10 @@ static void send_pending_retry(void) {
 // the retry count for this new attempt, and cancel any older still-pending
 // retry timer so a stale retry for a since-superseded message (e.g. this
 // same row toggled again before its first attempt's retry ever fired)
-// doesn't also fire and resend outdated data.
-static void begin_send(int msg_type, const char *str_val, int32_t int_val) {
+// doesn't also fire and resend outdated data. str_val2 is only ever
+// non-NULL for MSG_NOTE_APPEND - every other message type passes NULL and
+// leaves s_retry_str2 empty.
+static void begin_send(int msg_type, const char *str_val, const char *str_val2, int32_t int_val) {
   if (s_retry_timer) {
     app_timer_cancel(s_retry_timer);
     s_retry_timer = NULL;
@@ -1363,6 +1456,12 @@ static void begin_send(int msg_type, const char *str_val, int32_t int_val) {
     s_retry_str[sizeof(s_retry_str) - 1] = '\0';
   } else {
     s_retry_str[0] = '\0';
+  }
+  if (str_val2) {
+    strncpy(s_retry_str2, str_val2, sizeof(s_retry_str2) - 1);
+    s_retry_str2[sizeof(s_retry_str2) - 1] = '\0';
+  } else {
+    s_retry_str2[0] = '\0';
   }
   s_retry_int = int_val;
   s_retry_count = 0;
@@ -1381,7 +1480,7 @@ static void send_task_toggle(Task *task) {
   dict_write_int32(iter, KEY_TASK_DONE, task->done ? 1 : 0);
   app_message_outbox_send();
 #else
-  begin_send(MSG_TASK_TOGGLE, task->id, task->done ? 1 : 0);
+  begin_send(MSG_TASK_TOGGLE, task->id, NULL, task->done ? 1 : 0);
 #endif
 }
 
@@ -1396,7 +1495,7 @@ static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
   dict_write_int32(iter, KEY_TRACKED_MS, tracked_ms);
   app_message_outbox_send();
 #else
-  begin_send(MSG_TRACK_TIME_STOP, task_id, tracked_ms);
+  begin_send(MSG_TRACK_TIME_STOP, task_id, NULL, tracked_ms);
 #endif
 }
 
@@ -1422,23 +1521,33 @@ static bool s_close_after_finish_day_sent = false;
 // index.js. Compiled out on aplite along with the rest of the Finish Day
 // row (see menu_draw_row's own comment) - nothing calls this there.
 static void send_finish_day(void) {
-  begin_send(MSG_FINISH_DAY, NULL, 0);
+  begin_send(MSG_FINISH_DAY, NULL, NULL, 0);
 }
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
 static void send_task_add(const char *title) {
-  begin_send(MSG_TASK_ADD, title, 0);
+  begin_send(MSG_TASK_ADD, title, NULL, 0);
+}
+
+static void send_note_append(const char *task_id, const char *note_text) {
+  begin_send(MSG_NOTE_APPEND, task_id, note_text, 0);
 }
 
 // Fires when dictation finishes (success, cancel, or failure). Only ever
 // registered on mic-equipped platforms - compiled out entirely on aplite
-// (see s_mic_bitmap's own comment for why).
+// (see s_mic_bitmap's own comment for why). Shared by both Add Task and
+// note-append (see s_dictation_is_note_append's own comment) since only one
+// dictation session/flag pair exists for the app's whole lifetime.
 static void dictation_status_callback(DictationSession *session, DictationSessionStatus status,
                                        char *transcription, void *context) {
   s_dictation_pending = false;
   if (status == DictationSessionStatusSuccess) {
-    send_task_add(transcription);
+    if (s_dictation_is_note_append) {
+      send_note_append(s_notes_overlay_task_id, transcription);
+    } else {
+      send_task_add(transcription);
+    }
     return;
   }
   if (status == DictationSessionStatusFailureTranscriptionRejected) {
@@ -1466,6 +1575,22 @@ static void start_add_task_dictation(void) {
     // is itself gated by PBL_IF_MICROPHONE_ELSE).
     return;
   }
+  s_dictation_is_note_append = false;
+  s_dictation_pending = true;
+  dictation_session_start(s_dictation_session);
+}
+
+// Long-select on the notes overlay (see
+// notes_window_select_long_click_handler) - dictates text to append to the
+// currently-shown task's notes, same session/guard as start_add_task_dictation
+// above, just tagged for the callback to route differently.
+// s_notes_overlay_task_id is only valid while s_notes_window is the pushed/
+// visible window, which is the only way this ever gets called.
+static void start_note_append_dictation(void) {
+  if (s_dictation_pending || !s_dictation_session) {
+    return;
+  }
+  s_dictation_is_note_append = true;
   s_dictation_pending = true;
   dictation_session_start(s_dictation_session);
 }
@@ -1534,12 +1659,10 @@ static void stop_tracking_and_report(void) {
 
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
-#ifndef PBL_PLATFORM_APLITE
-  if (s_notes_overlay_active) {
-    hide_notes_overlay();
-    return;
-  }
-#endif
+  // No s_notes_overlay_active check here (unlike the error overlay below) -
+  // the notes overlay is a separate pushed Window (see s_notes_window's own
+  // comment), so this callback simply never fires while it's on top; the
+  // window stack itself keeps the two from ever overlapping.
   if (s_error_overlay_active) {
     // Click routing goes through MenuLayer's own config regardless of
     // whether its layer is currently hidden (same mechanism the empty-
@@ -1548,9 +1671,12 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     hide_error_overlay();
     return;
   }
-  if (s_task_count == 0) {
+  if (s_task_count == 0 && !ACTIONABLE_EMPTY_ACTIVE()) {
     // The empty/error screen's phantom row 0 (see menu_get_num_rows) lands
-    // here - this is what makes "Select to retry" actually retry.
+    // here - this is what makes "Select to retry" actually retry. The
+    // actionable empty state (STATUS_OK, zero tasks) falls through to the
+    // normal section-0 routing below instead, since it exposes the real
+    // Resync/Habits/Add Task rows rather than one phantom retry row.
     request_sync();
     return;
   }
@@ -1613,6 +1739,9 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
 // independent timer each.
 static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
+  // No s_notes_overlay_active check here - see menu_select_click's own
+  // comment; voice note-append is wired directly on s_notes_window's own
+  // click config now (notes_window_select_long_click_handler).
   if (s_error_overlay_active || s_task_count == 0 || cell_index->section == 0) {
     return;
   }
@@ -1756,21 +1885,28 @@ static void update_empty_layer(void) {
   // retry's own TASK_SYNC_END) would un-hide the menu or empty layer right
   // out from under the overlay via the calls below, even though the
   // overlay's own layer would still be showing on top of it too.
-#ifndef PBL_PLATFORM_APLITE
-  // Same reasoning as the error-overlay guard directly below, for the
-  // notes overlay (see show_notes_overlay) - it also owns menu-layer
-  // visibility while it's up.
-  if (s_notes_overlay_active) {
-    return;
-  }
-#endif
+  // No equivalent guard for the notes overlay - it's a separate pushed
+  // Window (s_notes_window) now, not a layer sharing s_main_window with the
+  // menu/empty layers this function touches, so it's unaffected either way
+  // (and invisible underneath while the notes window is on top), same as
+  // s_habits_window needs no such guard here either.
   if (s_error_overlay_active) {
     return;
   }
   bool show_empty = (s_task_count == 0);
-  layer_set_hidden(text_layer_get_layer(s_empty_layer), !show_empty);
-  layer_set_hidden(bitmap_layer_get_layer(s_logo_layer), !show_empty);
-  layer_set_hidden(menu_layer_get_layer(s_menu_layer), show_empty);
+  // STATUS_OK with zero tasks (e.g. Today Only filtering out everything due
+  // today) is an "actionable" empty state: rather than the standalone
+  // s_empty_layer/s_logo_layer pair every other empty reason uses, the menu
+  // layer itself stays visible, showing "No tasks for today." as section 0's
+  // header with the real Resync/Habits/Add Task rows still reachable below
+  // it - see menu_get_num_rows/menu_get_header_height/menu_draw_header/
+  // menu_draw_row/menu_select_click, which all key off this same
+  // ACTIONABLE_EMPTY_ACTIVE() check (always false on aplite - see its own
+  // comment).
+  bool show_actionable_empty = show_empty && ACTIONABLE_EMPTY_ACTIVE();
+  layer_set_hidden(text_layer_get_layer(s_empty_layer), !show_empty || show_actionable_empty);
+  layer_set_hidden(bitmap_layer_get_layer(s_logo_layer), !show_empty || show_actionable_empty);
+  layer_set_hidden(menu_layer_get_layer(s_menu_layer), show_empty && !show_actionable_empty);
 
   // Only the empty screen (no cached list yet at all - i.e. the very first
   // sync) gets the animation; a resync with a populated list already has
@@ -1782,27 +1918,24 @@ static void update_empty_layer(void) {
     stop_syncing_animation();
   }
 
-  if (!show_empty || is_initial_syncing) {
+  if (!show_empty || is_initial_syncing || show_actionable_empty) {
     return;
   }
 
   static char s_empty_text[MAX_STATUS_MSG_LEN + 32];
 
-  switch (s_status_code) {
-    case STATUS_NOT_PAIRED:
-      text_layer_set_text(s_empty_layer, "Open the app on\nyour phone to pair\nwith SuperSync.");
-      break;
-    case STATUS_ERROR:
-      if (s_status_msg[0] != '\0') {
-        snprintf(s_empty_text, sizeof(s_empty_text), "Sync error:\n%s\nSelect to retry.", s_status_msg);
-        text_layer_set_text(s_empty_layer, s_empty_text);
-      } else {
-        text_layer_set_text(s_empty_layer, "Sync error.\nSelect to retry.");
-      }
-      break;
-    default:
-      text_layer_set_text(s_empty_layer, "No tasks for today.");
-      break;
+  // Only STATUS_NOT_PAIRED and STATUS_ERROR ever reach here now -
+  // show_actionable_empty above already intercepted the STATUS_OK case,
+  // and is_initial_syncing already intercepted STATUS_SYNCING.
+  if (s_status_code == STATUS_NOT_PAIRED) {
+    text_layer_set_text(s_empty_layer, "Open the app on\nyour phone to pair\nwith SuperSync.");
+  } else {
+    if (s_status_msg[0] != '\0') {
+      snprintf(s_empty_text, sizeof(s_empty_text), "Sync error:\n%s\nSelect to retry.", s_status_msg);
+      text_layer_set_text(s_empty_layer, s_empty_text);
+    } else {
+      text_layer_set_text(s_empty_layer, "Sync error.\nSelect to retry.");
+    }
   }
 }
 
@@ -1818,33 +1951,53 @@ static void hide_error_overlay(void) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// Shows a task's notes (double-click Select on it - see
-// pending_toggle_timer_callback/menu_select_click), same overlay-over-the-
-// menu mechanism as show_error_overlay above. Unlike that one, the text
-// doesn't need a static buffer copy of task->notes itself (task->notes is
-// already stable storage for as long as the task stays in s_tasks) - only
-// the "Notes:\n\n" prefix needs building, hence the snprintf into a
-// separate buffer rather than pointing text_layer_set_text at task->notes
-// directly.
-static void show_notes_overlay(Task *task) {
-  s_notes_overlay_active = true;
-  static char s_notes_overlay_text[MAX_NOTES_LEN + 48];
+// Backing buffer for s_notes_layer's text - file-scope (not function-local
+// like show_notes_overlay's own version used to be) since notes_window_load
+// needs to read it too, at a later point in time (window_stack_push doesn't
+// invoke it synchronously - see push_notes_window). Only the "Notes:\n\n"
+// prefix needs building here, not a copy of task->notes itself, but this
+// still can't just point text_layer_set_text at task->notes directly since
+// that string lives in s_tasks, which a background sync can reallocate out
+// from under an already-open notes window (see s_notes_overlay_task_id's
+// own comment).
+static char s_notes_overlay_text[MAX_NOTES_LEN + 48];
+
+static void build_notes_overlay_text(Task *task) {
   if (task->notes[0] != '\0') {
     snprintf(s_notes_overlay_text, sizeof(s_notes_overlay_text), "Notes:\n\n%s", task->notes);
   } else {
     snprintf(s_notes_overlay_text, sizeof(s_notes_overlay_text), "(No notes for this task)");
   }
-  text_layer_set_text(s_notes_layer, s_notes_overlay_text);
-  layer_set_hidden(text_layer_get_layer(s_notes_layer), false);
-  layer_set_hidden(menu_layer_get_layer(s_menu_layer), true);
 }
 
-// Dismisses the notes overlay (Select, see menu_select_click) - same
-// unguarded update_empty_layer() hand-back as hide_error_overlay above.
+// Shows a task's notes (double-click Select on it - see
+// pending_toggle_timer_callback/menu_select_click) in their own pushed
+// Window (see s_notes_window's own comment for why - Back's default pop
+// behavior). Also doubles as a live refresh while that window is already
+// open (see the MSG_TASK_SYNC_END handler's own call site, after a
+// note-append round-trip lands): s_notes_layer is only non-NULL between
+// notes_window_load/unload, so that case just updates the already-visible
+// text in place instead of pushing a second copy of the window.
+static void show_notes_overlay(Task *task) {
+  s_notes_overlay_active = true;
+  strncpy(s_notes_overlay_task_id, task->id, MAX_ID_LEN - 1);
+  s_notes_overlay_task_id[MAX_ID_LEN - 1] = '\0';
+  build_notes_overlay_text(task);
+  if (s_notes_layer) {
+    text_layer_set_text(s_notes_layer, s_notes_overlay_text);
+    return;
+  }
+  push_notes_window();
+}
+
+// Dismisses the notes overlay (Select, see
+// notes_window_select_click_handler) - notes_window_unload clears
+// s_notes_overlay_active once the pop actually completes, same as it would
+// for a Back-triggered dismissal (Pebble's own default pop behavior, no
+// click config needed for that - see s_notes_window's own comment), so
+// both dismissal paths converge on the same cleanup.
 static void hide_notes_overlay(void) {
-  s_notes_overlay_active = false;
-  layer_set_hidden(text_layer_get_layer(s_notes_layer), true);
-  update_empty_layer();
+  window_stack_pop(true);
 }
 
 // Commits a single-click task-done toggle once the double-click window has
@@ -1877,7 +2030,7 @@ static void request_sync(void) {
   dict_write_int32(iter, KEY_MSG_TYPE, MSG_REQUEST_SYNC);
   app_message_outbox_send();
 #else
-  begin_send(MSG_REQUEST_SYNC, NULL, 0);
+  begin_send(MSG_REQUEST_SYNC, NULL, NULL, 0);
 #endif
 }
 
@@ -1947,6 +2100,19 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_status_code = STATUS_OK;
       recompute_groups();
       save_tasks();
+#ifndef PBL_PLATFORM_APLITE
+      if (s_notes_overlay_active) {
+        // A note-append (or any other resync) can change this task's notes
+        // while its overlay is still open - refresh the displayed text
+        // rather than leaving it showing whatever was true before this
+        // sync landed. No-op if the task's gone missing from this refresh
+        // (stays showing the last text it had).
+        Task *notes_task = find_task_by_id(s_notes_overlay_task_id);
+        if (notes_task) {
+          show_notes_overlay(notes_task);
+        }
+      }
+#endif
       menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
       // A refreshed list can change whether the (possibly now-different)
@@ -2238,7 +2404,7 @@ static void send_habit_adjust(Habit *habit, int32_t delta) {
   dict_write_int32(iter, KEY_HABIT_DELTA, delta);
   app_message_outbox_send();
 #else
-  begin_send(MSG_HABIT_ADJUST, habit->id, delta);
+  begin_send(MSG_HABIT_ADJUST, habit->id, NULL, delta);
 #endif
 }
 
@@ -2250,7 +2416,7 @@ static void send_habit_adjust(Habit *habit, int32_t delta) {
 // StopWatch habit still displays its progress read-only on aplite.
 #ifndef PBL_PLATFORM_APLITE
 static void send_habit_track_stop(const char *habit_id, int32_t tracked_ms) {
-  begin_send(MSG_HABIT_TRACK_STOP, habit_id, tracked_ms);
+  begin_send(MSG_HABIT_TRACK_STOP, habit_id, NULL, tracked_ms);
 }
 
 static void stop_habit_tracking_tick(void) {
@@ -2724,6 +2890,91 @@ static void push_habits_window(void) {
   window_stack_push(s_habits_window, true);
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// Select dismisses the notes window, same convention as every other
+// overlay's Select-to-dismiss in this app - Back also dismisses it, for
+// free, via Pebble's own default pop behavior (see s_notes_window's own
+// comment) rather than anything subscribed here.
+static void notes_window_select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  hide_notes_overlay();
+}
+
+// Long-select dictates text to append to the currently-shown task's notes
+// - see start_note_append_dictation.
+static void notes_window_select_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  start_note_append_dictation();
+}
+
+// A fresh click config, not menu_layer_set_click_config_onto_window - this
+// window has no MenuLayer to compose with (just a plain TextLayer), so
+// there's no existing UP/DOWN/SELECT wiring to preserve or risk breaking by
+// writing this by hand, unlike s_main_window's own click config.
+static void notes_window_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_SELECT, notes_window_select_click_handler);
+  window_long_click_subscribe(BUTTON_ID_SELECT, 0, notes_window_select_long_click_handler, NULL);
+}
+
+static void notes_window_load(Window *window) {
+  Layer *window_layer = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(window_layer);
+
+  backlight_touch();
+
+  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
+  s_notes_status_bar = status_bar_layer_create();
+  layer_add_child(window_layer, status_bar_layer_get_layer(s_notes_status_bar));
+
+  GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
+                                bounds.size.w, bounds.size.h - status_bar_height);
+
+  // Left-aligned and top-anchored (unlike the centered, short status text
+  // s_error_layer uses) since this is body text, not a status message -
+  // word-wrap fills top-down from there. A smaller font than the error
+  // layer's bold 18pt: notes can run to MAX_NOTES_LEN characters, several
+  // times longer than any error message this app ever shows.
+  s_notes_layer = text_layer_create(content_bounds);
+  text_layer_set_text_alignment(s_notes_layer, GTextAlignmentLeft);
+  text_layer_set_font(s_notes_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_background_color(s_notes_layer, GColorWhite);
+  text_layer_set_text_color(s_notes_layer, GColorBlack);
+  text_layer_set_overflow_mode(s_notes_layer, GTextOverflowModeWordWrap);
+  // s_notes_overlay_text was already populated by show_notes_overlay() just
+  // before this window was pushed - window_stack_push doesn't invoke this
+  // load handler synchronously, so the text has to already be sitting
+  // somewhere this can read it back out from.
+  text_layer_set_text(s_notes_layer, s_notes_overlay_text);
+  layer_add_child(window_layer, text_layer_get_layer(s_notes_layer));
+
+  window_set_click_config_provider(window, notes_window_click_config_provider);
+}
+
+static void notes_window_unload(Window *window) {
+  text_layer_destroy(s_notes_layer);
+  s_notes_layer = NULL;
+  status_bar_layer_destroy(s_notes_status_bar);
+  // The single source of truth for "is the notes window currently up" -
+  // cleared here rather than in hide_notes_overlay() itself so a
+  // Back-triggered dismissal (which never calls hide_notes_overlay - see
+  // its own comment) still clears this exactly the same way a
+  // Select-triggered one does.
+  s_notes_overlay_active = false;
+}
+
+// Created once and reused (pushed again on every visit), same reasoning as
+// push_habits_window above - only its layers are torn down/rebuilt each
+// time.
+static void push_notes_window(void) {
+  if (!s_notes_window) {
+    s_notes_window = window_create();
+    window_set_window_handlers(s_notes_window, (WindowHandlers) {
+      .load = notes_window_load,
+      .unload = notes_window_unload,
+    });
+  }
+  window_stack_push(s_notes_window, true);
+}
+#endif
+
 // ---------- window lifecycle ----------
 
 static void window_load(Window *window) {
@@ -2827,24 +3078,6 @@ static void window_load(Window *window) {
   layer_set_hidden(text_layer_get_layer(s_error_layer), true);
   layer_add_child(window_layer, text_layer_get_layer(s_error_layer));
 
-#ifndef PBL_PLATFORM_APLITE
-  // Same full-content-area overlay approach as s_error_layer above, for a
-  // double-clicked task's notes (see show_notes_overlay). Left-aligned and
-  // top-anchored (unlike the centered, short status text s_error_layer
-  // shows) since this is body text, not a status message - word-wrap fills
-  // top-down from there. A smaller font than the error layer's bold 18pt:
-  // notes can run to MAX_NOTES_LEN characters, several times longer than
-  // any error message this app ever shows.
-  s_notes_layer = text_layer_create(content_bounds);
-  text_layer_set_text_alignment(s_notes_layer, GTextAlignmentLeft);
-  text_layer_set_font(s_notes_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
-  text_layer_set_background_color(s_notes_layer, GColorWhite);
-  text_layer_set_text_color(s_notes_layer, GColorBlack);
-  text_layer_set_overflow_mode(s_notes_layer, GTextOverflowModeWordWrap);
-  layer_set_hidden(text_layer_get_layer(s_notes_layer), true);
-  layer_add_child(window_layer, text_layer_get_layer(s_notes_layer));
-#endif
-
   update_empty_layer();
   request_sync();
 
@@ -2872,7 +3105,6 @@ static void window_unload(Window *window) {
 #endif
   text_layer_destroy(s_error_layer);
 #ifndef PBL_PLATFORM_APLITE
-  text_layer_destroy(s_notes_layer);
   if (s_pending_toggle_timer) {
     app_timer_cancel(s_pending_toggle_timer);
     s_pending_toggle_timer = NULL;
@@ -2943,6 +3175,11 @@ static void deinit(void) {
   if (s_habits_window) {
     window_destroy(s_habits_window);
   }
+#ifndef PBL_PLATFORM_APLITE
+  if (s_notes_window) {
+    window_destroy(s_notes_window);
+  }
+#endif
 }
 
 int main(void) {

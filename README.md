@@ -18,7 +18,18 @@ Productivity's own **SuperSync** server.
 | ![Habits page](screenshots/habits.png) |
 | Habit tracking (Super Productivity's SimpleCounter feature) — increment/decrement with Select/long-Select |
 
+## Navigation and Functionality
+* Up and down buttons to scroll through the habits and task list
+* Select (Middle button)
+    * Click once to toggle Done/In-progress
+    * Long hold to start time tracking when on tasks and habits
+    * Long hold to add a note when on the notes screen
+    * Double click to show task and project notes
+* Back returns to the prior screen
 
+## App Settings
+
+* Pretty straight forward, all settings should have a subtext describing their function
 ## Pairing
 
 1. Install the watchapp, open the Pebble mobile app, find "Super

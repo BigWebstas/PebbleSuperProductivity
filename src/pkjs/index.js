@@ -23,6 +23,7 @@ var MSG_HABIT_ADJUST = 11; // watch -> phone: HABIT_ID + HABIT_DELTA (+1 or -1)
 var MSG_HABIT_TRACK_STOP = 13; // watch -> phone: HABIT_ID + TRACKED_MS (this session's tracked ms, StopWatch-type only)
 var MSG_FINISH_DAY = 14; // watch -> phone: archive every currently-done task (no extra keys)
 var MSG_TASK_ADD = 12; // watch -> phone: TASK_TITLE (new task's dictated title)
+var MSG_NOTE_APPEND = 15; // watch -> phone: TASK_ID + NOTE_TEXT (dictated text to append to this task's notes)
 
 var STATUS_OK = 0;
 var STATUS_SYNCING = 1;
@@ -49,6 +50,19 @@ var MAX_TASKS = 50;
 // ("Water" going missing once enough other habits existed, unrelated to any
 // watch-side limit).
 var MAX_HABITS = 16;
+
+// Separates a voice-dictated note append (see handleNoteAppend) from
+// whatever notes text already existed, both when re-read on the watch's own
+// notes overlay (TASK_NOTES, see sendTaskAt below) and on the real app's
+// desktop UI. U+2022 BULLET - confirmed live on-device (all platforms use
+// the same font resource) alongside ~, ∆ (U+2206 INCREMENT), § (U+00A7),
+// and ° (U+00B0), all rendering correctly on the notes overlay's system
+// font (FONT_KEY_GOTHIC_18); only ✓ (U+2713 CHECK MARK, Dingbats block)
+// came back as an empty missing-glyph box. Bullet reads more clearly as a
+// divider than a mark that could be confused for actual note content (~ or
+// literal punctuation) - same live-testing precedent as task-store.js's own
+// SUBTASK_PREFIX (» confirmed working, U+2514 BOX DRAWINGS confirmed not).
+var NOTE_APPEND_DIVIDER = '••••••••••••••••••••';
 
 // Matches the real client's CURRENT_SCHEMA_VERSION (schema-version.ts) at
 // time of writing. The server only validates this field's range when it's
@@ -1049,6 +1063,79 @@ function handleAddTask(title) {
     });
 }
 
+// Watch-dictated note append - long-select on the notes overlay (see
+// MSG_NOTE_APPEND in main.c/start_note_append_dictation). notes is a plain
+// string field, so this - like handleTaskToggle's isDone set, unlike
+// handleTrackTimeStop's additive delta - is a plain replace: applying the
+// same computed newNotes value twice (once optimistically here, once again
+// when this same op is later downloaded and replayed) is harmless, so the
+// optimistic local update below is safe.
+function handleNoteAppend(taskId, noteText) {
+  if (!taskId || !noteText || !String(noteText).trim()) {
+    return;
+  }
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task) {
+    // This phone's own state.task cache has no record of the task the watch
+    // thinks it's appending to (e.g. deleted elsewhere between opening the
+    // notes overlay and finishing dictation) - nothing sensible to append.
+    return;
+  }
+
+  var existingNotes = task.notes || '';
+  var dictated = String(noteText).trim();
+  var newNotes = existingNotes ? existingNotes + '\n\n' + NOTE_APPEND_DIVIDER + '\n\n' + dictated : dictated;
+
+  state.task[taskId] = Object.assign({}, task, { notes: newNotes });
+  saveState(state);
+
+  // Same "push the updated list right away" reasoning as handleAddTask -
+  // main.c's MSG_TASK_SYNC_END handler re-reads the notes overlay's text
+  // straight from this, so the user sees their dictated text appended
+  // without having to close and reopen the overlay.
+  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
+
+  var crypto = getCrypto();
+  // Same "[Task Shared] updateTask" / { id, changes } shape as
+  // handleTaskToggle's payload above, entityChanges required for the same
+  // isMultiEntityPayload() unwrap reason documented there.
+  var payload = { actionPayload: { task: { id: taskId, changes: { notes: newNotes } } }, entityChanges: [] };
+  var clientId = getOrCreateClientId();
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  var op = {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[Task Shared] updateTask',
+    entityType: 'TASK',
+    entityId: taskId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+
+  var noteFailureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      noteFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload note append: ' + noteFailureMsg);
+      sendStatus(STATUS_ERROR, noteFailureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, noteFailureMsg);
+    });
+}
+
 // Watch-triggered "Finish Day" - archives every currently-done task, the
 // one core data-mutating effect of the real app's Finish Day flow
 // (daily-summary.component.ts's finishDay() -> TaskService.moveToArchive()
@@ -1184,6 +1271,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_FINISH_DAY:
       handleFinishDay();
+      break;
+    case MSG_NOTE_APPEND:
+      handleNoteAppend(payload.TASK_ID, payload.NOTE_TEXT);
       break;
     default:
       break;
