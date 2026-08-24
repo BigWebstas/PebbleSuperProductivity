@@ -35,9 +35,10 @@
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
 #define KEY_BACKLIGHT_MODE MESSAGE_KEY_BACKLIGHT_MODE
-#define KEY_TASK_NOTES MESSAGE_KEY_TASK_NOTES
 #define KEY_AUTO_SYNC_INTERVAL_MIN MESSAGE_KEY_AUTO_SYNC_INTERVAL_MIN
 #define KEY_NOTE_TEXT MESSAGE_KEY_NOTE_TEXT
+#define KEY_NOTE_TOTAL_LEN MESSAGE_KEY_NOTE_TOTAL_LEN
+#define KEY_NOTE_CHUNK_TEXT MESSAGE_KEY_NOTE_CHUNK_TEXT
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -56,6 +57,10 @@ enum {
   MSG_HABIT_TRACK_STOP = 13, // watch -> phone: HABIT_ID + TRACKED_MS (this session's tracked ms, StopWatch-type only)
   MSG_FINISH_DAY = 14,      // watch -> phone: archive every currently-done task (no extra keys)
   MSG_NOTE_APPEND = 15,     // watch -> phone: TASK_ID + NOTE_TEXT (dictated text to append to this task's notes)
+  MSG_NOTE_REQUEST = 16,    // watch -> phone: TASK_ID (ask for this task's full notes, chunked reply)
+  MSG_NOTE_SYNC_START = 17, // phone -> watch: TASK_ID + NOTE_TOTAL_LEN (bytes about to follow, 0 = no notes)
+  MSG_NOTE_CHUNK = 18,      // phone -> watch: TASK_ID + NOTE_CHUNK_TEXT (append this chunk)
+  MSG_NOTE_SYNC_END = 19,   // phone -> watch: TASK_ID (all chunks sent, render now)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -88,22 +93,23 @@ enum {
 // correctly - completely invisible until you act on that specific task.
 #define MAX_ID_LEN 96
 #define MAX_PROJECT_LEN 32
-// A task's notes can be many paragraphs of markdown in the real app, but
-// this is a glance-sized preview (see show_notes_overlay), not a reader -
-// kept short deliberately, both because nothing here scrolls past what one
-// screen can show and because this field is carried by EVERY Task in the
-// double-buffered s_tasks/s_incoming arrays (MAX_TASKS * 2 copies), unlike
-// the one-time-cost overlay text itself. #ifndef PBL_PLATFORM_APLITE-gated
-// entirely, same reasoning as the backlight feature above: aplite has no
-// RAM budget left for a whole extra per-task field (confirmed via pebble
-// build's own memory report - see BACKLIGHT_MODE_ALWAYS_ON's comment for
-// the exact numbers), and without it there'd be nothing to show anyway, so
-// aplite keeps the plain instant single-click toggle it's always had
-// rather than paying a universal double-click commit delay for a feature
-// it can't display.
-#ifndef PBL_PLATFORM_APLITE
-#define MAX_NOTES_LEN 200
-#endif
+// A task's notes can be many paragraphs of markdown in the real app - too
+// big and too rarely-viewed to carry on every Task in the double-buffered
+// s_tasks/s_incoming arrays (MAX_TASKS * 2 copies) the way title/project/etc
+// do. This used to be a fixed MAX_NOTES_LEN-per-task field (hard-truncated,
+// glance-preview only) purely because of that multiplied cost - not because
+// notes are inherently short. Fetched on demand instead (MSG_NOTE_REQUEST/
+// MSG_NOTE_SYNC_START/MSG_NOTE_CHUNK/MSG_NOTE_SYNC_END, see
+// s_notes_full_text below) for only the one task whose notes overlay is
+// currently open, malloc'd to the exact size the phone reports up front -
+// no per-task cost, and no fixed ceiling on note length either.
+// #ifndef PBL_PLATFORM_APLITE-gated entirely, same reasoning as the
+// backlight feature above: aplite has no RAM budget left for this at all
+// (confirmed via pebble build's own memory report - see
+// BACKLIGHT_MODE_ALWAYS_ON's comment for the exact numbers), so aplite
+// keeps the plain instant single-click toggle it's always had rather than
+// paying a universal double-click commit delay for a feature it can't
+// display.
 
 typedef struct {
   char id[MAX_ID_LEN];
@@ -113,9 +119,6 @@ typedef struct {
   int due_min;       // minutes since local midnight, or -1 when the task has no dueWithTime
   int time_spent_ms; // total tracked time (all days, all devices), 0 if none
   int time_estimate_ms; // 0 if none
-#ifndef PBL_PLATFORM_APLITE
-  char notes[MAX_NOTES_LEN]; // '' when the task has no notes
-#endif
 } Task;
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
@@ -310,6 +313,54 @@ static bool s_notes_overlay_active = false;
 // notes_window_select_long_click_handler/start_note_append_dictation) to
 // know which task to send the dictated text for.
 static char s_notes_overlay_task_id[MAX_ID_LEN] = "";
+// Full notes text for whichever task s_notes_overlay_task_id names, fetched
+// on demand (MSG_NOTE_REQUEST/MSG_NOTE_SYNC_START/MSG_NOTE_CHUNK/
+// MSG_NOTE_SYNC_END) rather than carried on every Task in s_tasks/
+// s_incoming - see the removed MAX_NOTES_LEN field's own comment further up
+// for why. malloc'd to NOTES_HEADER's length plus the exact byte count the
+// phone reports in MSG_NOTE_SYNC_START (not a fixed ceiling), so it holds
+// "Notes:\n\n" followed by the chunks as they arrive; NULL whenever nothing
+// is currently owned (no notes to show, or ownership not yet established).
+// Freed and re-armed by every fresh show_notes_overlay() call and by
+// notes_window_unload - never left dangling across either.
+static char *s_notes_full_text = NULL;
+static int s_notes_full_len = 0;      // bytes written into s_notes_full_text so far
+static int s_notes_full_capacity = 0; // malloc'd size of s_notes_full_text, including its null terminator
+// What MSG_NOTE_SYNC_START actually told us, so MSG_NOTE_SYNC_END knows how
+// to render even when s_notes_full_text is NULL - which is legitimately
+// true both for "no notes" (nothing to malloc) and "malloc failed"/"START
+// never arrived" (a real failure), and those two need different text.
+typedef enum {
+  NOTES_FETCH_IDLE,    // no START seen yet for the current request
+  NOTES_FETCH_EMPTY,   // START reported zero-length notes
+  NOTES_FETCH_STARTED, // START malloc'd s_notes_full_text; chunks may still be arriving
+  NOTES_FETCH_FAILED,  // START reported real notes but malloc failed
+} NotesFetchState;
+static NotesFetchState s_notes_fetch_state = NOTES_FETCH_IDLE;
+// What's actually shown right now - either s_notes_full_text (once
+// MSG_NOTE_SYNC_END lands on a NOTES_FETCH_STARTED transfer) or one of the
+// literals below otherwise. Never itself owned/freed - only
+// s_notes_full_text is.
+static const char *s_notes_display_text = "";
+// Whether s_notes_display_text is currently the loading placeholder -
+// tracked separately rather than compared against the NOTES_LOADING_TEXT
+// pointer (string literal pointer comparison is unspecified behavior, and
+// GCC's -Werror=address rejects it outright). True from the moment
+// show_notes_overlay sets the placeholder until whatever resolves it
+// (a completed fetch, or the timeout below) replaces it with something else.
+static bool s_notes_is_loading = false;
+#define NOTES_LOADING_TEXT "Loading notes..."
+#define NOTES_EMPTY_TEXT "(No notes for this task)"
+#define NOTES_TIMEOUT_TEXT "Couldn't load notes - back out and try again."
+// Guards against a fetch that never completes (phone not paired, dropped
+// AppMessage past its own retry budget) leaving the overlay stuck on
+// NOTES_LOADING_TEXT forever with no signal anything went wrong - same
+// "every failure should be visible" standard the rest of this app holds
+// AppMessage failures to (see CLAUDE.md's "AppMessage send failures used to
+// be completely silent"). Canceled the moment a matching SYNC_START/END
+// actually arrives; started fresh on every new request.
+static AppTimer *s_notes_load_timeout_timer = NULL;
+#define NOTES_LOAD_TIMEOUT_MS 8000
 // Distinguishes a dictation_status_callback firing for note-append (started
 // from the notes overlay's long-select) from one firing for Add Task
 // (started from the section-0 row) - both share the single s_dictation_session/
@@ -1381,8 +1432,11 @@ static char s_retry_str[MAX_ID_LEN];
 // message type that needs TWO strings at once - TASK_ID in s_retry_str
 // above, plus this, the dictated note text to append). Every other message
 // type leaves this empty; kept separate from s_retry_str rather than
-// repurposing it for a second role.
-static char s_retry_str2[MAX_NOTES_LEN];
+// repurposing it for a second role. Sized to MAX_TITLE_LEN, not MAX_ID_LEN -
+// the dictated text this holds can never exceed the shared dictation
+// session's own buffer size (dictation_session_create(MAX_TITLE_LEN, ...)),
+// same session Add Task's title dictation uses.
+static char s_retry_str2[MAX_TITLE_LEN];
 static int32_t s_retry_int = 0; // TASK_DONE / TRACKED_MS / HABIT_DELTA, whichever s_retry_msg_type needs
 static int s_retry_count = 0;
 static AppTimer *s_retry_timer = NULL;
@@ -1429,6 +1483,9 @@ static void send_pending_retry(void) {
     case MSG_NOTE_APPEND:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str2);
+      break;
+    case MSG_NOTE_REQUEST:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       break;
     case MSG_FINISH_DAY:
     case MSG_REQUEST_SYNC:
@@ -1704,7 +1761,7 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
 #ifndef PBL_PLATFORM_APLITE
   // Double-click (a second Select click on this SAME task before the
   // pending single-click toggle below has committed) shows notes instead
-  // of toggling - see pending_toggle_timer_callback and MAX_NOTES_LEN's
+  // of toggling - see pending_toggle_timer_callback and s_notes_full_text's
   // own comment for why this is compiled out on aplite entirely.
   if (s_pending_toggle_timer && strncmp(s_pending_toggle_task_id, task->id, MAX_ID_LEN) == 0) {
     app_timer_cancel(s_pending_toggle_timer);
@@ -1952,45 +2009,30 @@ static void hide_error_overlay(void) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// Backing buffer for s_notes_layer's text - file-scope (not function-local
-// like show_notes_overlay's own version used to be) since notes_window_load
-// needs to read it too, at a later point in time (window_stack_push doesn't
-// invoke it synchronously - see push_notes_window). Only the "Notes:\n\n"
-// prefix needs building here, not a copy of task->notes itself, but this
-// still can't just point text_layer_set_text at task->notes directly since
-// that string lives in s_tasks, which a background sync can reallocate out
-// from under an already-open notes window (see s_notes_overlay_task_id's
-// own comment).
-static char s_notes_overlay_text[MAX_NOTES_LEN + 48];
+// "Notes:\n\n" is written straight into s_notes_full_text's malloc'd buffer
+// ahead of the fetched chunks (see the MSG_NOTE_SYNC_START handler) rather
+// than composed into a second buffer at render time - the note text itself
+// is already sized exactly to what the phone reported, so there's no
+// upper bound to size a second copy against.
+#define NOTES_HEADER "Notes:\n\n"
 
-static void build_notes_overlay_text(Task *task) {
-  if (task->notes[0] != '\0') {
-    snprintf(s_notes_overlay_text, sizeof(s_notes_overlay_text), "Notes:\n\n%s", task->notes);
-  } else {
-    snprintf(s_notes_overlay_text, sizeof(s_notes_overlay_text), "(No notes for this task)");
-  }
-}
-
-// How tall s_notes_overlay_text lays out (word-wrapped) at the given width -
-// shared by notes_window_load (to size the TextLayer/ScrollLayer on first
-// open) and show_notes_overlay's live-refresh path (to resize them when a
-// note-append changes the text under an already-open overlay). Measured
-// against a generously tall test box: MAX_NOTES_LEN's worst case is still
-// only a few screens of wrapped text, nowhere near this ceiling.
-// Confirmed live on-device that this measurement runs short of what
-// TextLayer actually needs to avoid clipping its own last lines (a real note
-// measured at 198px rendered visibly cut off in a 208px-tall viewport, and
-// still stopped a line or two short of the true end after a flat +24px
-// margin) - the shortfall scales with content length rather than being a
-// fixed few px, so the margin below is proportional (10%) plus a flat
-// two-line floor, generous enough that even a long, heavily-appended note's
-// true last line is always reachable. A short note that already fit just
-// gets a bit of harmless extra scroll room past its actual end.
+// How tall a block of text lays out (word-wrapped) at the given width -
+// shared by notes_window_load (first open) and render_notes_overlay_content
+// (every later re-render: loading placeholder -> full text, or a fresh
+// note-append). Confirmed live on-device that this measurement runs short
+// of what TextLayer actually needs to avoid clipping its own last lines (a
+// real note measured at 198px rendered visibly cut off in a 208px-tall
+// viewport, and still stopped a line or two short of the true end after a
+// flat +24px margin) - the shortfall scales with content length rather
+// than being a fixed few px, so the margin below is proportional (10%)
+// plus a flat two-line floor, generous enough that even a long note's true
+// last line is always reachable. A short note that already fit just gets
+// a bit of harmless extra scroll room past its actual end.
 #define NOTES_TEXT_HEIGHT_MARGIN_FLOOR 48
 
-static int16_t measure_notes_text_height(int16_t width) {
+static int16_t measure_notes_text_height(int16_t width, const char *text) {
   GSize size = graphics_text_layout_get_content_size(
-      s_notes_overlay_text, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(0, 0, width, 2000),
+      text, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(0, 0, width, 20000),
       GTextOverflowModeWordWrap, GTextAlignmentLeft);
   int16_t margin = size.h / 10;
   if (margin < NOTES_TEXT_HEIGHT_MARGIN_FLOOR) {
@@ -1999,36 +2041,105 @@ static int16_t measure_notes_text_height(int16_t width) {
   return size.h + margin;
 }
 
+// Applies s_notes_display_text to the already-created TextLayer/ScrollLayer
+// and resizes both to match - shared by notes_window_load (first open) and
+// every later update (a fetch landing, timing out, or a fresh note-append's
+// re-fetch). A no-op if the window isn't loaded yet (s_notes_layer is only
+// non-NULL between notes_window_load/unload) - notes_window_load itself
+// calls this once it creates the layers, picking up whatever
+// s_notes_display_text already holds at that point.
+static void render_notes_overlay_content(void) {
+  if (!s_notes_layer) {
+    return;
+  }
+  text_layer_set_text(s_notes_layer, s_notes_display_text);
+  // The new text can be a very different length than what was there before
+  // (a loading placeholder swapping for the real thing, or a fresh
+  // note-append) - resize the scrollable content to match and snap back to
+  // the top rather than leaving the scroll position mid-way through text
+  // that may no longer be there.
+  GRect scroll_bounds = layer_get_bounds(scroll_layer_get_layer(s_notes_scroll_layer));
+  int16_t text_height = measure_notes_text_height(scroll_bounds.size.w, s_notes_display_text);
+  if (text_height < scroll_bounds.size.h) {
+    text_height = scroll_bounds.size.h;
+  }
+  GRect text_frame = layer_get_frame(text_layer_get_layer(s_notes_layer));
+  text_frame.size.h = text_height;
+  layer_set_frame(text_layer_get_layer(s_notes_layer), text_frame);
+  scroll_layer_set_content_size(s_notes_scroll_layer, GSize(scroll_bounds.size.w, text_height));
+  scroll_layer_set_content_offset(s_notes_scroll_layer, GPointZero, false);
+}
+
+// Releases whatever s_notes_full_text currently owns (safe to call whether
+// or not anything is owned - free(NULL) is a no-op) and resets the fetch
+// state, ready for a new request. Does NOT touch s_notes_display_text -
+// callers set that themselves right after, to whatever's appropriate for
+// why they're resetting (a fresh "Loading notes...", an empty-notes
+// literal, etc).
+static void reset_notes_full_buffer(void) {
+  free(s_notes_full_text);
+  s_notes_full_text = NULL;
+  s_notes_full_len = 0;
+  s_notes_full_capacity = 0;
+  s_notes_fetch_state = NOTES_FETCH_IDLE;
+}
+
+static void cancel_notes_load_timeout(void) {
+  if (s_notes_load_timeout_timer) {
+    app_timer_cancel(s_notes_load_timeout_timer);
+    s_notes_load_timeout_timer = NULL;
+  }
+}
+
+// Fires when a note fetch has gone unanswered for NOTES_LOAD_TIMEOUT_MS -
+// see s_notes_load_timeout_timer's own comment. Only acts if the overlay
+// is still open and still actually waiting (the loading placeholder is
+// still showing) - a slow-but-eventually-successful fetch already
+// canceled this timer well before it would fire, and the user may have
+// since backed out entirely.
+static void notes_load_timeout_callback(void *data) {
+  s_notes_load_timeout_timer = NULL;
+  if (s_notes_overlay_active && s_notes_is_loading) {
+    s_notes_is_loading = false;
+    s_notes_display_text = NOTES_TIMEOUT_TEXT;
+    render_notes_overlay_content();
+  }
+}
+
+static void start_notes_load_timeout(void) {
+  cancel_notes_load_timeout();
+  s_notes_load_timeout_timer = app_timer_register(NOTES_LOAD_TIMEOUT_MS, notes_load_timeout_callback, NULL);
+}
+
+// Asks the phone for this task's full notes (MSG_NOTE_REQUEST) - the reply
+// arrives later as MSG_NOTE_SYNC_START/MSG_NOTE_CHUNK*/MSG_NOTE_SYNC_END
+// (see inbox_received_handler), matched back to s_notes_overlay_task_id
+// rather than trusting a stale in-flight request still being about the
+// task currently on screen.
+static void request_notes_full(const char *task_id) {
+  begin_send(MSG_NOTE_REQUEST, task_id, NULL, 0);
+  start_notes_load_timeout();
+}
+
 // Shows a task's notes (double-click Select on it - see
 // pending_toggle_timer_callback/menu_select_click) in their own pushed
 // Window (see s_notes_window's own comment for why - Back's default pop
 // behavior). Also doubles as a live refresh while that window is already
-// open (see the MSG_TASK_SYNC_END handler's own call site, after a
-// note-append round-trip lands): s_notes_layer is only non-NULL between
-// notes_window_load/unload, so that case just updates the already-visible
-// text in place instead of pushing a second copy of the window.
+// open (see handleNoteAppend in index.js, which re-triggers this same
+// fetch for whichever task's overlay is open after a successful append):
+// s_notes_layer is only non-NULL between notes_window_load/unload, so that
+// case just re-renders the already-visible window instead of pushing a
+// second copy of it.
 static void show_notes_overlay(Task *task) {
   s_notes_overlay_active = true;
   strncpy(s_notes_overlay_task_id, task->id, MAX_ID_LEN - 1);
   s_notes_overlay_task_id[MAX_ID_LEN - 1] = '\0';
-  build_notes_overlay_text(task);
+  reset_notes_full_buffer();
+  s_notes_display_text = NOTES_LOADING_TEXT;
+  s_notes_is_loading = true;
+  request_notes_full(task->id);
   if (s_notes_layer) {
-    text_layer_set_text(s_notes_layer, s_notes_overlay_text);
-    // The new text can be a different length than what was there before
-    // (that's the whole point of a live refresh - a note-append just
-    // landed) - resize the scrollable content to match and snap back to
-    // the top rather than leaving the scroll position mid-way through text
-    // that may no longer be there.
-    GRect scroll_bounds = layer_get_bounds(scroll_layer_get_layer(s_notes_scroll_layer));
-    int16_t text_height = measure_notes_text_height(scroll_bounds.size.w);
-    if (text_height < scroll_bounds.size.h) {
-      text_height = scroll_bounds.size.h;
-    }
-    GRect text_frame = layer_get_frame(text_layer_get_layer(s_notes_layer));
-    text_frame.size.h = text_height;
-    layer_set_frame(text_layer_get_layer(s_notes_layer), text_frame);
-    scroll_layer_set_content_size(s_notes_scroll_layer, GSize(scroll_bounds.size.w, text_height));
-    scroll_layer_set_content_offset(s_notes_scroll_layer, GPointZero, false);
+    render_notes_overlay_content();
     return;
   }
   push_notes_window();
@@ -2103,9 +2214,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *due_min_tuple = dict_find(iterator, KEY_TASK_DUE_MIN);
       Tuple *time_spent_tuple = dict_find(iterator, KEY_TASK_TIME_SPENT_MS);
       Tuple *time_estimate_tuple = dict_find(iterator, KEY_TASK_TIME_ESTIMATE_MS);
-#ifndef PBL_PLATFORM_APLITE
-      Tuple *notes_tuple = dict_find(iterator, KEY_TASK_NOTES);
-#endif
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -2129,12 +2237,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_incoming[idx].time_spent_ms = time_spent_tuple ? time_spent_tuple->value->int32 : 0;
       // Absent means "no timeEstimate" - same convention as time_spent_ms.
       s_incoming[idx].time_estimate_ms = time_estimate_tuple ? time_estimate_tuple->value->int32 : 0;
-#ifndef PBL_PLATFORM_APLITE
-      // Absent means "no notes" - same convention as due_min/time_spent_ms
-      // above. See sendTaskAt() in index.js for the phone-side truncation.
-      strncpy(s_incoming[idx].notes, notes_tuple ? notes_tuple->value->cstring : "", MAX_NOTES_LEN - 1);
-      s_incoming[idx].notes[MAX_NOTES_LEN - 1] = '\0';
-#endif
       break;
     }
     case MSG_TASK_SYNC_END: {
@@ -2144,19 +2246,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_status_code = STATUS_OK;
       recompute_groups();
       save_tasks();
-#ifndef PBL_PLATFORM_APLITE
-      if (s_notes_overlay_active) {
-        // A note-append (or any other resync) can change this task's notes
-        // while its overlay is still open - refresh the displayed text
-        // rather than leaving it showing whatever was true before this
-        // sync landed. No-op if the task's gone missing from this refresh
-        // (stays showing the last text it had).
-        Task *notes_task = find_task_by_id(s_notes_overlay_task_id);
-        if (notes_task) {
-          show_notes_overlay(notes_task);
-        }
-      }
-#endif
       menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
       // A refreshed list can change whether the (possibly now-different)
@@ -2316,6 +2405,90 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 #endif
       break;
     }
+#ifndef PBL_PLATFORM_APLITE
+    case MSG_NOTE_SYNC_START: {
+      Tuple *id_tuple = dict_find(iterator, KEY_TASK_ID);
+      Tuple *total_tuple = dict_find(iterator, KEY_NOTE_TOTAL_LEN);
+      if (!id_tuple || !total_tuple) {
+        break;
+      }
+      // A reply for a task whose overlay isn't (or is no longer) the one
+      // on screen - the user backed out and opened a different task, or
+      // this is a stale retry - is just discarded rather than clobbering
+      // whatever's currently showing.
+      if (strncmp(id_tuple->value->cstring, s_notes_overlay_task_id, MAX_ID_LEN) != 0) {
+        break;
+      }
+      reset_notes_full_buffer();
+      int32_t total_len = total_tuple->value->int32;
+      if (total_len <= 0) {
+        s_notes_fetch_state = NOTES_FETCH_EMPTY;
+        break; // No chunks will follow - MSG_NOTE_SYNC_END renders the empty-notes text.
+      }
+      s_notes_full_capacity = (int)strlen(NOTES_HEADER) + (int)total_len + 1;
+      s_notes_full_text = malloc((size_t)s_notes_full_capacity);
+      if (!s_notes_full_text) {
+        s_notes_full_capacity = 0;
+        s_notes_fetch_state = NOTES_FETCH_FAILED;
+        break;
+      }
+      memcpy(s_notes_full_text, NOTES_HEADER, strlen(NOTES_HEADER));
+      s_notes_full_len = (int)strlen(NOTES_HEADER);
+      s_notes_fetch_state = NOTES_FETCH_STARTED;
+      break;
+    }
+    case MSG_NOTE_CHUNK: {
+      Tuple *id_tuple = dict_find(iterator, KEY_TASK_ID);
+      Tuple *chunk_tuple = dict_find(iterator, KEY_NOTE_CHUNK_TEXT);
+      if (!id_tuple || !chunk_tuple || s_notes_fetch_state != NOTES_FETCH_STARTED) {
+        break;
+      }
+      if (strncmp(id_tuple->value->cstring, s_notes_overlay_task_id, MAX_ID_LEN) != 0) {
+        break;
+      }
+      const char *chunk = chunk_tuple->value->cstring;
+      int chunk_len = (int)strlen(chunk);
+      // Bounds-checked against the capacity MSG_NOTE_SYNC_START already
+      // malloc'd for the total the phone declared up front - a chunk that
+      // would overflow it (a phone/watch length-accounting mismatch) is
+      // dropped rather than overrunning the buffer.
+      if (s_notes_full_len + chunk_len < s_notes_full_capacity) {
+        memcpy(s_notes_full_text + s_notes_full_len, chunk, (size_t)chunk_len);
+        s_notes_full_len += chunk_len;
+      }
+      break;
+    }
+    case MSG_NOTE_SYNC_END: {
+      Tuple *id_tuple = dict_find(iterator, KEY_TASK_ID);
+      if (!id_tuple) {
+        break;
+      }
+      if (strncmp(id_tuple->value->cstring, s_notes_overlay_task_id, MAX_ID_LEN) != 0) {
+        break;
+      }
+      cancel_notes_load_timeout();
+      s_notes_is_loading = false;
+      switch (s_notes_fetch_state) {
+        case NOTES_FETCH_STARTED:
+          s_notes_full_text[s_notes_full_len] = '\0';
+          s_notes_display_text = s_notes_full_text;
+          break;
+        case NOTES_FETCH_EMPTY:
+          s_notes_display_text = NOTES_EMPTY_TEXT;
+          break;
+        case NOTES_FETCH_FAILED:
+        case NOTES_FETCH_IDLE:
+        default:
+          // Either malloc failed, or MSG_NOTE_SYNC_START for this request
+          // never arrived at all - a real failure, not a legitimately
+          // empty note (that's NOTES_FETCH_EMPTY, handled above).
+          s_notes_display_text = NOTES_TIMEOUT_TEXT;
+          break;
+      }
+      render_notes_overlay_content();
+      break;
+    }
+#endif
     default:
       break;
   }
@@ -2975,18 +3148,8 @@ static void notes_window_load(Window *window) {
   GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
                                 bounds.size.w, bounds.size.h - status_bar_height);
 
-  // The TextLayer's own frame has to be sized to the FULL wrapped text
-  // height up front, not just the visible viewport - it clips its own
-  // content to its frame regardless of the ScrollLayer's (separate) content
-  // size, so a frame sized only to the viewport would still cut the text
-  // off even once the ScrollLayer itself knows there's more to scroll to.
-  int16_t text_height = measure_notes_text_height(content_bounds.size.w);
-  if (text_height < content_bounds.size.h) {
-    text_height = content_bounds.size.h;
-  }
-
   s_notes_scroll_layer = scroll_layer_create(content_bounds);
-  scroll_layer_set_content_size(s_notes_scroll_layer, GSize(content_bounds.size.w, text_height));
+  scroll_layer_set_content_size(s_notes_scroll_layer, content_bounds.size);
   scroll_layer_set_click_config_onto_window(s_notes_scroll_layer, window);
   scroll_layer_set_callbacks(s_notes_scroll_layer, (ScrollLayerCallbacks) {
     .click_config_provider = notes_window_click_config_provider,
@@ -2995,22 +3158,26 @@ static void notes_window_load(Window *window) {
   // Left-aligned and top-anchored (unlike the centered, short status text
   // s_error_layer uses) since this is body text, not a status message -
   // word-wrap fills top-down from there. A smaller font than the error
-  // layer's bold 18pt: notes can run to MAX_NOTES_LEN characters, several
-  // times longer than any error message this app ever shows.
-  s_notes_layer = text_layer_create(GRect(0, 0, content_bounds.size.w, text_height));
+  // layer's bold 18pt: notes can run far longer than any error message
+  // this app ever shows. Created at the viewport's own size - immediately
+  // resized to the real content height by render_notes_overlay_content
+  // below, same as every later re-render.
+  s_notes_layer = text_layer_create(GRect(0, 0, content_bounds.size.w, content_bounds.size.h));
   text_layer_set_text_alignment(s_notes_layer, GTextAlignmentLeft);
   text_layer_set_font(s_notes_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
   text_layer_set_background_color(s_notes_layer, GColorWhite);
   text_layer_set_text_color(s_notes_layer, GColorBlack);
   text_layer_set_overflow_mode(s_notes_layer, GTextOverflowModeWordWrap);
-  // s_notes_overlay_text was already populated by show_notes_overlay() just
-  // before this window was pushed - window_stack_push doesn't invoke this
-  // load handler synchronously, so the text has to already be sitting
-  // somewhere this can read it back out from.
-  text_layer_set_text(s_notes_layer, s_notes_overlay_text);
   scroll_layer_add_child(s_notes_scroll_layer, text_layer_get_layer(s_notes_layer));
 
   layer_add_child(window_layer, scroll_layer_get_layer(s_notes_scroll_layer));
+
+  // s_notes_display_text was already set by show_notes_overlay() just
+  // before this window was pushed - window_stack_push doesn't invoke this
+  // load handler synchronously, so it's already sitting somewhere this can
+  // read it back out from (the loading placeholder, most likely - the
+  // actual fetch is still in flight at this point).
+  render_notes_overlay_content();
 }
 
 static void notes_window_unload(Window *window) {
@@ -3019,6 +3186,8 @@ static void notes_window_unload(Window *window) {
   scroll_layer_destroy(s_notes_scroll_layer);
   s_notes_scroll_layer = NULL;
   status_bar_layer_destroy(s_notes_status_bar);
+  reset_notes_full_buffer();
+  cancel_notes_load_timeout();
   // The single source of truth for "is the notes window currently up" -
   // cleared here rather than in hide_notes_overlay() itself so a
   // Back-triggered dismissal (which never calls hide_notes_overlay - see

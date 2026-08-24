@@ -24,6 +24,19 @@ var MSG_HABIT_TRACK_STOP = 13; // watch -> phone: HABIT_ID + TRACKED_MS (this se
 var MSG_FINISH_DAY = 14; // watch -> phone: archive every currently-done task (no extra keys)
 var MSG_TASK_ADD = 12; // watch -> phone: TASK_TITLE (new task's dictated title)
 var MSG_NOTE_APPEND = 15; // watch -> phone: TASK_ID + NOTE_TEXT (dictated text to append to this task's notes)
+var MSG_NOTE_REQUEST = 16; // watch -> phone: TASK_ID (ask for this task's full notes, chunked reply)
+var MSG_NOTE_SYNC_START = 17; // phone -> watch: TASK_ID + NOTE_TOTAL_LEN (bytes about to follow, 0 = no notes)
+var MSG_NOTE_CHUNK = 18; // phone -> watch: TASK_ID + NOTE_CHUNK_TEXT (append this chunk)
+var MSG_NOTE_SYNC_END = 19; // phone -> watch: TASK_ID (all chunks sent, render now)
+// Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
+// Well under any platform's AppMessage dictionary budget - app_message_open
+// in main.c already requests the platform's own max, and this is one string
+// field in an otherwise-tiny dict, not competing with a TASK_ITEM's several
+// other keys. JS string .length is UTF-16 code units, not UTF-8 bytes, so a
+// chunk full of multi-byte characters can encode to somewhat more than this
+// many bytes on the wire - the margin below is generous enough to absorb
+// that without needing to size chunks by encoded byte length instead.
+var NOTE_CHUNK_LEN = 256;
 
 var STATUS_OK = 0;
 var STATUS_SYNCING = 1;
@@ -323,18 +336,10 @@ function sendTaskAt(tasks, index) {
   if (t.timeEstimate) {
     dict.TASK_TIME_ESTIMATE_MS = Math.min(t.timeEstimate, 2000000000);
   }
-  if (t.notes) {
-    // Watch-side MAX_NOTES_LEN is 200 (see main.c) - truncate to match
-    // rather than let AppMessage's own dictionary-size limit silently drop
-    // the whole TASK_ITEM if a very long note pushed it over. Notes can run
-    // to many paragraphs of markdown in the real app; this is a glance-
-    // sized preview only (see show_notes_overlay), not a full reader.
-    var notesStr = String(t.notes);
-    // A silent mid-word cutoff read as a bug (confirmed live: "cut off mid
-    // word" with no signal it was intentional) - trailing "..." keeps the
-    // same 199-char wire budget while making the truncation visible.
-    dict.TASK_NOTES = notesStr.length > 199 ? notesStr.slice(0, 196) + '...' : notesStr;
-  }
+  // No TASK_NOTES here - the watch fetches a task's full notes on demand
+  // (MSG_NOTE_REQUEST, see sendFullNotesForTask below) only for whichever
+  // one task's overlay is currently open, rather than every row in every
+  // sync carrying a preview whether or not it's ever viewed.
   sendWithRetry(dict, function () {
     sendTaskAt(tasks, index + 1);
   }, function (e) {
@@ -1096,6 +1101,67 @@ function handleAddTask(title) {
     });
 }
 
+// A chunk boundary that never splits a UTF-16 surrogate pair (an astral
+// character, e.g. most emoji, encoded as two UTF-16 code units) across two
+// chunks - a naive fixed-offset slice() could otherwise land exactly
+// between the high and low surrogate, corrupting that one character on
+// reassembly. Backs the boundary off by one code unit in that case; the
+// half-unit of slack this costs is irrelevant against NOTE_CHUNK_LEN.
+function safeChunkEnd(str, desiredEnd) {
+  if (desiredEnd < str.length) {
+    var code = str.charCodeAt(desiredEnd - 1);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      return desiredEnd - 1;
+    }
+  }
+  return desiredEnd;
+}
+
+// Sends one chunk of a full-notes transfer and recurses to the next once
+// the phone confirms delivery (same one-in-flight-at-a-time discipline as
+// sendTaskAt/sendHabitAt - see sendWithRetry's own comment for why this
+// matters more than a one-off send). offset >= notes.length (including the
+// initial call for an empty note) sends MSG_NOTE_SYNC_END and stops.
+function sendNoteChunk(taskId, notes, offset) {
+  if (offset >= notes.length) {
+    sendWithRetry({ MSG_TYPE: MSG_NOTE_SYNC_END, TASK_ID: taskId }, function () {}, function (e) {
+      console.log('[pkjs] giving up on NOTE_SYNC_END for ' + taskId + ' after retries: ' + JSON.stringify(e));
+    });
+    return;
+  }
+  var end = safeChunkEnd(notes, Math.min(offset + NOTE_CHUNK_LEN, notes.length));
+  var dict = { MSG_TYPE: MSG_NOTE_CHUNK, TASK_ID: taskId, NOTE_CHUNK_TEXT: notes.slice(offset, end) };
+  sendWithRetry(dict, function () {
+    sendNoteChunk(taskId, notes, end);
+  }, function (e) {
+    console.log('[pkjs] giving up on NOTE_CHUNK at offset ' + offset + ' for ' + taskId + ' after retries: ' + JSON.stringify(e));
+  });
+}
+
+// Answers MSG_NOTE_REQUEST (see main.c's request_notes_full) and also
+// re-triggers itself after a note-append (see handleNoteAppend below) so
+// an open overlay picks up the appended text without a full list resync.
+// NOTE_TOTAL_LEN lets the watch malloc exactly once for the whole transfer
+// instead of growing a buffer chunk by chunk.
+function sendFullNotesForTask(taskId) {
+  var state = loadState();
+  var task = state.task[taskId];
+  var notes = (task && task.notes) ? String(task.notes) : '';
+  var startDict = { MSG_TYPE: MSG_NOTE_SYNC_START, TASK_ID: taskId, NOTE_TOTAL_LEN: notes.length };
+  sendWithRetry(startDict, function () {
+    sendNoteChunk(taskId, notes, 0);
+  }, function (e) {
+    console.log('[pkjs] giving up on NOTE_SYNC_START for ' + taskId + ' after retries: ' + JSON.stringify(e));
+  });
+}
+
+function handleNoteRequest(taskId) {
+  if (!taskId) {
+    return;
+  }
+  sendFullNotesForTask(taskId);
+}
+
 // Watch-dictated note append - long-select on the notes overlay (see
 // MSG_NOTE_APPEND in main.c/start_note_append_dictation). notes is a plain
 // string field, so this - like handleTaskToggle's isDone set, unlike
@@ -1129,11 +1195,14 @@ function handleNoteAppend(taskId, noteText) {
   state.task[taskId] = Object.assign({}, task, { notes: newNotes });
   saveState(state);
 
-  // Same "push the updated list right away" reasoning as handleAddTask -
-  // main.c's MSG_TASK_SYNC_END handler re-reads the notes overlay's text
-  // straight from this, so the user sees their dictated text appended
-  // without having to close and reopen the overlay.
-  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
+  // Re-sends this one task's full notes right away (same fetch
+  // MSG_NOTE_REQUEST triggers - see sendFullNotesForTask) rather than a
+  // whole-list resync: main.c matches the reply against whichever task's
+  // overlay is currently open and re-renders in place, so the user sees
+  // their dictated text appended without closing and reopening the
+  // overlay. A no-op on the watch if the overlay's since moved to a
+  // different task (or closed) - see MSG_NOTE_SYNC_START's id check there.
+  sendFullNotesForTask(taskId);
 
   var crypto = getCrypto();
   // Same "[Task Shared] updateTask" / { id, changes } shape as
@@ -1307,6 +1376,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_NOTE_APPEND:
       handleNoteAppend(payload.TASK_ID, payload.NOTE_TEXT);
+      break;
+    case MSG_NOTE_REQUEST:
+      handleNoteRequest(payload.TASK_ID);
       break;
     default:
       break;

@@ -95,9 +95,10 @@
       "HABITS_ENABLED",
       "ADD_TASK_ENABLED",
       "BACKLIGHT_MODE",
-      "TASK_NOTES",
       "AUTO_SYNC_INTERVAL_MIN",
-      "NOTE_TEXT"
+      "NOTE_TEXT",
+      "NOTE_TOTAL_LEN",
+      "NOTE_CHUNK_TEXT"
     ]
   }
 }

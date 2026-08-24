@@ -834,11 +834,15 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName, hideDone) {
   // placeholder-titled row; a done one is skipped here too when hideDone
   // is on, independently of whatever state its (necessarily not-done, or
   // this whole block would never run) parent is in.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, notes: t.notes || undefined });
+  // No `notes` field here - the watch fetches a task's full notes on demand
+  // (MSG_NOTE_REQUEST, see index.js's sendFullNotesForTask) only for
+  // whichever one task's overlay is currently open, rather than every row
+  // carrying a preview whether or not it's ever viewed.
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, notes: sub.notes || undefined });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
     }
   });
 }
