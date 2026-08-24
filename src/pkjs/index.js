@@ -435,6 +435,16 @@ function doSync() {
   var lastSeq = loadLastSeq();
   var vectorClock = loadVectorClock();
   var isFirstSync = lastSeq === 0 && Object.keys(state.task).length === 0;
+  // Tracked across the whole multi-page pullPage() loop, not reset per
+  // page - each page's own done/total ratio starts back near 0% (it's a
+  // fresh, smaller batch of ops), so resetting this per page let the
+  // displayed percent visibly drop back down every time a new page's
+  // decrypt work began, right after it had just reached 100% on the
+  // previous one (confirmed live as a reported bug: hits 100%, then
+  // reverts to a lower number). Never letting the displayed value
+  // decrease means it holds at 100% through any later page's own lower
+  // ratio instead, all the way to the sync's actual completion.
+  var decryptLastPercentSent = -1;
 
   var pullPage = function () {
     // Deliberately NOT passing clientId as excludeClient here (unlike every
@@ -468,10 +478,12 @@ function doSync() {
       // backlog that delays the eventual "done" status behind it, which is
       // worse than the staleness this is trying to fix.
       if (res.ops && res.ops.length) {
-        var decryptLastPercentSent = -1;
         store.applyOperations(res.ops, state, crypto, function (done, total) {
           var percent = Math.floor(100 * done / total);
-          if (percent >= decryptLastPercentSent + 10 || done === total) {
+          // percent > decryptLastPercentSent (not just the throttle check
+          // below) is what keeps this from ever regressing - see
+          // decryptLastPercentSent's own comment.
+          if (percent > decryptLastPercentSent && (percent >= decryptLastPercentSent + 10 || done === total)) {
             decryptLastPercentSent = percent;
             sendStatus(STATUS_SYNCING, 'Decrypting ' + percent + '%');
           }
