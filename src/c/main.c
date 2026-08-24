@@ -1725,8 +1725,16 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     // Click routing goes through MenuLayer's own config regardless of
     // whether its layer is currently hidden (same mechanism the empty-
     // screen's phantom row 0 below already relies on), so this fires even
-    // though s_menu_layer is hidden behind the overlay right now.
+    // though s_menu_layer is hidden behind the overlay right now. Retries
+    // immediately after dismissing (same "Select to retry" convention the
+    // empty-screen's own phantom row 0 already uses below) rather than
+    // just clearing the message and leaving the user to separately find
+    // and press Resync - previously a real gap for the single most likely
+    // cause of this overlay, a transient "Couldn't reach phone app" send
+    // failure (see outbox_failed_handler), where the fix is almost always
+    // just "try again."
     hide_error_overlay();
+    request_sync();
     return;
   }
   if (s_task_count == 0 && !ACTIONABLE_EMPTY_ACTIVE()) {
@@ -1924,9 +1932,9 @@ static void show_error_overlay(void) {
   static char s_error_overlay_text[MAX_STATUS_MSG_LEN + 48];
   if (s_status_msg[0] != '\0') {
     snprintf(s_error_overlay_text, sizeof(s_error_overlay_text),
-              "Sync Error\n\n%s\n\nSelect to dismiss", s_status_msg);
+              "Sync Error\n\n%s\n\nSelect to retry", s_status_msg);
   } else {
-    snprintf(s_error_overlay_text, sizeof(s_error_overlay_text), "Sync Error\n\nSelect to dismiss");
+    snprintf(s_error_overlay_text, sizeof(s_error_overlay_text), "Sync Error\n\nSelect to retry");
   }
   text_layer_set_text(s_error_layer, s_error_overlay_text);
   layer_set_hidden(text_layer_get_layer(s_error_layer), false);
