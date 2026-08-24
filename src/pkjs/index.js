@@ -7,6 +7,7 @@
 var supersync = require('./lib/supersync-client.js');
 var store = require('./lib/task-store.js');
 var pairingPage = require('./lib/pairing-page.js');
+var sha256lib = require('./lib/sha256.js');
 
 // Keep in sync with the enums at the top of src/c/main.c.
 var MSG_TASK_SYNC_START = 1;
@@ -1147,7 +1148,17 @@ function sendFullNotesForTask(taskId) {
   var state = loadState();
   var task = state.task[taskId];
   var notes = (task && task.notes) ? String(task.notes) : '';
-  var startDict = { MSG_TYPE: MSG_NOTE_SYNC_START, TASK_ID: taskId, NOTE_TOTAL_LEN: notes.length };
+  // NOTE_TOTAL_LEN has to be the actual UTF-8 BYTE count AppMessage will
+  // put on the wire (what main.c mallocs against), not notes.length - that
+  // counts UTF-16 code units, which undercounts any non-ASCII character
+  // (accented letters, symbols, emoji all encode to more UTF-8 bytes than
+  // UTF-16 units). Confirmed live: a note with a few emoji sent a
+  // NOTE_TOTAL_LEN several bytes short of what actually arrived, and the
+  // watch's malloc'd buffer being that many bytes too small made its own
+  // overflow guard silently drop every chunk once the shortfall was used
+  // up - the note just went truncated with no error anywhere.
+  var totalBytes = sha256lib.utf8ToBytes(notes).length;
+  var startDict = { MSG_TYPE: MSG_NOTE_SYNC_START, TASK_ID: taskId, NOTE_TOTAL_LEN: totalBytes };
   sendWithRetry(startDict, function () {
     sendNoteChunk(taskId, notes, 0);
   }, function (e) {
