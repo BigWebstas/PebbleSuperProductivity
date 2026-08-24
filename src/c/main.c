@@ -3350,7 +3350,12 @@ static void window_load(Window *window) {
   text_layer_set_text_alignment(s_error_layer, GTextAlignmentCenter);
   text_layer_set_font(s_error_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
   text_layer_set_background_color(s_error_layer, GColorRed);
-  text_layer_set_text_color(s_error_layer, GColorBlack);
+  // White, not black - better contrast against red, and on aplite (no true
+  // red available - see PebbleOS's own 1-bit color reduction) this also
+  // sidesteps GColorRed potentially reducing to black there, which would
+  // have made black text genuinely invisible rather than just lower
+  // contrast.
+  text_layer_set_text_color(s_error_layer, GColorWhite);
   text_layer_set_overflow_mode(s_error_layer, GTextOverflowModeWordWrap);
   layer_set_hidden(text_layer_get_layer(s_error_layer), true);
   layer_add_child(window_layer, text_layer_get_layer(s_error_layer));
