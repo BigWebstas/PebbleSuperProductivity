@@ -688,6 +688,80 @@ function scheduleHideDoneSweep(config) {
   }, store.HIDE_DONE_GRACE_MS + 100);
 }
 
+// Builds one "[Task Shared] updateTask" op - the shape task-store.js's
+// applyTaskAction() expects on the way back down (matches the real wire
+// shape confirmed by decrypting live ops: decrypted payload is
+// { actionPayload: { task: { id, changes } } }, task-shared.actions.ts).
+// entityChanges is required (even empty) for the real client's own
+// isMultiEntityPayload() guard (operation.types.ts) - without it,
+// extractActionPayload() never unwraps actionPayload, so the replayed
+// action ends up with a top-level `actionPayload` key instead of `task`,
+// and the reducer destructures `task` as undefined. vectorClock is
+// REQUIRED by the real server (validation.service.ts's
+// sanitizeVectorClock(), called from validateOp()) - a missing/non-object
+// one fails validation outright and the whole op is rejected before it's
+// ever stored; this was the actual cause of watch-completed tasks never
+// reaching any other client, desktop included. Saved immediately (not
+// gated on upload success) since the local change already causally
+// happened whether or not this particular upload attempt succeeds - see
+// loadVectorClock's own comment. Shared by handleTaskToggle's own toggle
+// and its parent-auto-complete follow-up below, so both get a causally
+// distinct, correctly-incremented clock rather than colliding on the same
+// one.
+function buildTaskUpdateOp(taskId, changes, clientId) {
+  var crypto = getCrypto();
+  var payload = { actionPayload: { task: { id: taskId, changes: changes } }, entityChanges: [] };
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  return {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[Task Shared] updateTask',
+    entityType: 'TASK',
+    entityId: taskId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+}
+
+// Builds (and applies the matching local optimistic update for) the
+// parent's own updateTask op if taskId's just-applied completion left
+// every sibling subtask done too - see handleTaskToggle's own call site
+// for the full reasoning (mirrors the real app's
+// TaskInternalEffects.onAllSubTasksDone$ effect). Returns null if the
+// setting's off, taskId isn't a subtask, the parent's missing or already
+// done, or a sibling's still open - i.e. whenever there's nothing to do.
+function buildParentAutoCompleteOp(taskId, state, config, clientId) {
+  if (!config.autoMarkParentDone) {
+    return null;
+  }
+  var task = state.task[taskId];
+  if (!task || !task.parentId) {
+    return null;
+  }
+  var parent = state.task[task.parentId];
+  if (!parent || parent.isDone) {
+    return null;
+  }
+  var allSubtasksDone = (parent.subTaskIds || []).every(function (subId) {
+    var sub = state.task[subId];
+    return sub && sub.isDone;
+  });
+  if (!allSubtasksDone) {
+    return null;
+  }
+  // Same doneOn-stamping reasoning as handleTaskToggle's own toggle -
+  // getActiveTasks' hideDone grace period needs an accurate completion
+  // timestamp, not just isDone itself.
+  state.task[parent.id] = Object.assign({}, parent, { isDone: true, doneOn: Date.now() });
+  saveState(state);
+  return buildTaskUpdateOp(parent.id, { isDone: true }, clientId);
+}
+
 function handleTaskToggle(taskId, done) {
   var config = loadConfig();
   if (!config || !config.jwt) {
@@ -711,59 +785,34 @@ function handleTaskToggle(taskId, done) {
     scheduleHideDoneSweep(config);
   }
 
-  var crypto = getCrypto();
-  // Matches the real wire shape confirmed by decrypting live ops: the
-  // decrypted payload is { actionPayload: {...} }, and for
-  // "[Task Shared] updateTask" specifically, actionPayload is
-  // { task: Update<Task> } i.e. { id, changes } (task-shared.actions.ts) -
-  // task-store.js's applyTaskAction() reads exactly this nesting on the
-  // way back down. Uploading the old flat { isDone } payload (this
-  // project's original, unverified assumption, same category of bug
-  // already fixed on the read side - see README) meant a watch toggle
-  // wasn't decodable by any real client's replay, including our own next
-  // sync: sync only actually worked in the download direction.
-  // entityChanges is required (even empty) for the real client's own
-  // isMultiEntityPayload() guard (operation.types.ts) - without it,
-  // extractActionPayload() never unwraps actionPayload, so the replayed
-  // action ends up with a top-level `actionPayload` key instead of `task`,
-  // and the reducer destructures `task` as undefined. Empty is valid/
-  // expected here per the real client's own validate-operation-payload.ts
-  // ("Most actions have empty entityChanges because actionPayload is
-  // sufficient for replay") - updateTask's reducer reads `action.task`
-  // directly, never entityChanges.
-  var payload = { actionPayload: { task: { id: taskId, changes: { isDone: done } } }, entityChanges: [] };
   var clientId = getOrCreateClientId();
-  // REQUIRED by the real server (confirmed by reading
-  // validation.service.ts's sanitizeVectorClock(), called from
-  // validateOp()): a missing/non-object vectorClock fails validation
-  // outright and the whole op is rejected before it's ever stored - this
-  // was the actual cause of watch-completed tasks never reaching any other
-  // client, desktop included. Saved immediately (not gated on upload
-  // success) since the local completion already causally happened whether
-  // or not this particular upload attempt succeeds - see loadVectorClock's
-  // comment.
-  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
-  saveVectorClock(newVectorClock);
-  var op = {
-    id: generateOpId(),
-    opType: 'UPD',
-    actionType: '[Task Shared] updateTask',
-    entityType: 'TASK',
-    entityId: taskId,
-    payload: crypto ? crypto.encrypt(payload) : payload,
-    isPayloadEncrypted: !!crypto,
-    vectorClock: newVectorClock,
-    clientId: clientId,
-    timestamp: Date.now(),
-    schemaVersion: SCHEMA_VERSION,
-  };
+  var op = buildTaskUpdateOp(taskId, { isDone: done }, clientId);
+  // Mirrors the real app's own TaskInternalEffects.onAllSubTasksDone$
+  // effect (task-internal.effects.ts): completing a subtask that leaves
+  // every sibling done also completes the parent, as a SECOND updateTask
+  // op rather than folded into this one - the exact same shape a real
+  // client's own effect would have produced, so a desktop client
+  // replaying this watch-originated pair sees nothing different from
+  // completing it there instead. Gated on config.autoMarkParentDone
+  // (mirrors tasksCfg.isAutoMarkParentAsDone, also off by default there)
+  // since this silently changes a second task beyond the one the user
+  // actually acted on. Only attempted when done is true (never on undo) -
+  // the real effect only reacts to a subtask's own isDone turning true,
+  // and never reopens an already-completed parent when one's undone
+  // later.
+  var parentOp = done ? buildParentAutoCompleteOp(taskId, state, config, clientId) : null;
+
+  var uploads = [uploadSingleOp(op, config, clientId)];
+  if (parentOp) {
+    uploads.push(uploadSingleOp(parentOp, config, clientId));
+  }
 
   var toggleFailureMsg = null;
-  uploadSingleOp(op, config, clientId)
+  Promise.all(uploads)
     .catch(function (err) {
-      // MVP: log and leave the local optimistic update in place; the next
-      // full sync will reconcile. A persisted retry queue for offline use
-      // is a known gap, called out in README.md.
+      // MVP: log and leave the local optimistic update(s) in place; the
+      // next full sync will reconcile. A persisted retry queue for
+      // offline use is a known gap, called out in README.md.
       toggleFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload task toggle: ' + toggleFailureMsg);
       sendStatus(STATUS_ERROR, toggleFailureMsg);
@@ -1405,6 +1454,7 @@ Pebble.addEventListener('showConfiguration', function () {
       groupByProject: !!config.groupByProject,
       todayOnly: !!config.todayOnly,
       hideDoneTasks: !!config.hideDoneTasks,
+      autoMarkParentDone: !!config.autoMarkParentDone,
       // Undefined (never configured before) defaults to on - see the
       // matching comment in handleTaskToggle for why.
       autoSyncOnComplete: config.autoSyncOnComplete !== false,
@@ -1477,6 +1527,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     groupByProject: !!result.groupByProject,
     todayOnly: !!result.todayOnly,
     hideDoneTasks: !!result.hideDoneTasks,
+    autoMarkParentDone: !!result.autoMarkParentDone,
     autoSyncOnComplete: !!result.autoSyncOnComplete,
     // saveConfig() is a full replace, not a merge - every field the app
     // wants persisted has to be listed here explicitly, or it silently

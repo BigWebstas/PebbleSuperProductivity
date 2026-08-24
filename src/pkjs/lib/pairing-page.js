@@ -19,6 +19,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var groupByProject = !!options.groupByProject;
   var todayOnly = !!options.todayOnly;
   var hideDoneTasks = !!options.hideDoneTasks;
+  var autoMarkParentDone = !!options.autoMarkParentDone;
   var autoSyncOnComplete = !!options.autoSyncOnComplete;
   var autoSyncIntervalMin = options.autoSyncIntervalMin || 0;
   var hasPassword = !!options.hasPassword;
@@ -158,6 +159,17 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    with all of them. A task you complete on the watch itself stays\n' +
 '    visible for about 5 seconds first, so you can see it happen before it\n' +
 '    disappears.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="autoMarkParentDone" type="checkbox"' + (autoMarkParentDone ? ' checked' : '') + '>\n' +
+'    <label for="autoMarkParentDone">Complete main task when all subtasks are done</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Completing the last remaining open subtask (from the watch) also\n' +
+'    completes its main task, matching Super Productivity\'s own "Automatically\n' +
+'    mark parent task done" setting. Only fires forward - undoing a subtask\n' +
+'    never reopens an already-completed main task.\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="backlightMode">Backlight</label>\n' +
@@ -305,6 +317,7 @@ autoSyncIntervalOptions + '\n' +
 '      groupByProject: document.getElementById(\'groupByProject\').checked,\n' +
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
 '      hideDoneTasks: document.getElementById(\'hideDoneTasks\').checked,\n' +
+'      autoMarkParentDone: document.getElementById(\'autoMarkParentDone\').checked,\n' +
 '      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked,\n' +
 '      autoSyncIntervalMin: parseInt(document.getElementById(\'autoSyncIntervalMin\').value, 10) || 0,\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
