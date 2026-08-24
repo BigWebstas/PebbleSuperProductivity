@@ -1846,23 +1846,6 @@ static void stop_syncing_animation(void) {
   if (s_syncing_timer) {
     app_timer_cancel(s_syncing_timer);
     s_syncing_timer = NULL;
-    // Hands the backlight back now that the sync which forced it on (see
-    // start_syncing_animation) has actually finished - only reachable here
-    // when the animation really was running, not on every incidental call
-    // (this function also fires harmlessly whenever the app is simply
-    // never in the initial-syncing state to begin with).
-#ifndef PBL_PLATFORM_APLITE
-    // ALWAYS_ON mode wants to stay lit regardless of this - nothing to
-    // undo there. Every other mode (system default, or a custom
-    // touch-based timeout) goes dark immediately rather than lingering,
-    // same "goes dark right as this timer expires" reasoning
-    // backlight_timer_callback's own comment gives for its own case.
-    if (s_backlight_mode != BACKLIGHT_MODE_ALWAYS_ON) {
-      light_enable(false);
-    }
-#else
-    light_enable(false);
-#endif
   }
 #ifndef PBL_PLATFORM_APLITE
   // Restores s_empty_layer to the plain font every other empty-state
@@ -1936,15 +1919,6 @@ static void start_syncing_animation(void) {
     return;
   }
 #endif
-  // Forces the backlight on for the whole initial sync, independent of
-  // s_backlight_mode's own touch-based rules (and unconditionally on
-  // aplite, which has no such mode to begin with - see its own comment
-  // further up) - this screen can sit for minutes on a large first sync
-  // with nothing for the user to press, and the watch's own normal
-  // auto-dim has no idea a sync driven entirely from the phone side is
-  // even happening. Handed back in stop_syncing_animation() once this
-  // actually finishes.
-  light_enable(true);
   s_syncing_dots = 0;
 #ifdef PBL_PLATFORM_APLITE
   text_layer_set_text(s_empty_layer, "Syncing\n\nThis may take a few minutes");
@@ -2230,6 +2204,38 @@ static void request_sync(void) {
 #endif
 }
 
+// The single place s_status_code ever gets assigned (both from a phone-
+// pushed MSG_SYNC_STATUS below and from outbox_failed_handler's own local
+// STATUS_ERROR) - forces the backlight on for as long as a sync is
+// actually in progress and hands it back the moment it stops, regardless
+// of which of those two call sites made that happen. Not just the very
+// first sync's empty-screen "Syncing" animation (that used to be the only
+// case covered, via start/stop_syncing_animation): a LATER resync's
+// decrypt phase, with an already-cached list on screen, never touches
+// that empty-screen path at all, and outbox_failed_handler can also move
+// status away from STATUS_SYNCING without ever going through
+// MSG_SYNC_STATUS. No new persisted state needed - just comparing old vs.
+// new status_code right here, before s_status_code itself is overwritten.
+// Unconditional on aplite (no backlight-mode setting to defer to there -
+// see s_backlight_mode's own comment); everywhere else, ALWAYS_ON mode is
+// left alone on the way back out since there's nothing to hand back.
+static void set_status_code(int32_t new_status_code) {
+  bool was_syncing = (s_status_code == STATUS_SYNCING);
+  bool now_syncing = (new_status_code == STATUS_SYNCING);
+  if (now_syncing && !was_syncing) {
+    light_enable(true);
+  } else if (!now_syncing && was_syncing) {
+#ifndef PBL_PLATFORM_APLITE
+    if (s_backlight_mode != BACKLIGHT_MODE_ALWAYS_ON) {
+      light_enable(false);
+    }
+#else
+    light_enable(false);
+#endif
+  }
+  s_status_code = new_status_code;
+}
+
 static void inbox_received_handler(DictionaryIterator *iterator, void *context) {
   Tuple *type_tuple = dict_find(iterator, KEY_MSG_TYPE);
   if (!type_tuple) {
@@ -2243,7 +2249,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (s_incoming_total > MAX_TASKS) {
         s_incoming_total = MAX_TASKS;
       }
-      s_status_code = STATUS_SYNCING;
+      set_status_code(STATUS_SYNCING);
       break;
     }
     case MSG_TASK_ITEM: {
@@ -2284,7 +2290,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       int count = s_incoming_total < MAX_TASKS ? s_incoming_total : MAX_TASKS;
       memcpy(s_tasks, s_incoming, sizeof(Task) * (size_t)count);
       s_task_count = count;
-      s_status_code = STATUS_OK;
+      set_status_code(STATUS_OK);
       recompute_groups();
       save_tasks();
       menu_layer_reload_data(s_menu_layer);
@@ -2362,7 +2368,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     case MSG_SYNC_STATUS: {
       Tuple *status_tuple = dict_find(iterator, KEY_STATUS_CODE);
       if (status_tuple) {
-        s_status_code = status_tuple->value->int32;
+        set_status_code(status_tuple->value->int32);
       }
       Tuple *msg_tuple = dict_find(iterator, KEY_STATUS_MSG);
       if (msg_tuple) {
@@ -2611,7 +2617,7 @@ static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult
   // every send failure visible instead of just this one class of them.
   // Reached immediately on aplite (no retry there - see this file's
   // "outbound send retry" section) or once every retry above is exhausted.
-  s_status_code = STATUS_ERROR;
+  set_status_code(STATUS_ERROR);
   strncpy(s_status_msg, "Couldn't reach phone app", MAX_STATUS_MSG_LEN - 1);
   s_status_msg[MAX_STATUS_MSG_LEN - 1] = '\0';
   show_error_overlay();
