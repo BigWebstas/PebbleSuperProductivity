@@ -435,10 +435,6 @@ function doSync() {
   var lastSeq = loadLastSeq();
   var vectorClock = loadVectorClock();
   var isFirstSync = lastSeq === 0 && Object.keys(state.task).length === 0;
-  // Set right before pullPage()'s loop actually starts (below), not here -
-  // bootstrapFromSnapshot() can still move lastSeq forward first on a first
-  // sync, and that jump shouldn't count against the progress range.
-  var startSeq;
 
   var pullPage = function () {
     // Deliberately NOT passing clientId as excludeClient here (unlike every
@@ -505,17 +501,6 @@ function doSync() {
           lastSeq = entry.serverSeq;
         }
       });
-      // Progress feedback for a large first sync (or any multi-page catch-
-      // up): res.latestSeq is the account's overall high-water mark (see
-      // the note above) - exactly the right denominator for "how far
-      // through this account's history are we", since ops are strictly
-      // sequential by serverSeq. Capped below 100 while hasMore is still
-      // true so a concurrent upload nudging latestSeq forward mid-sync
-      // can't make this read 100% before the sync actually finishes.
-      if (res.hasMore && res.latestSeq > startSeq) {
-        var percent = Math.min(99, Math.floor(100 * (lastSeq - startSeq) / (res.latestSeq - startSeq)));
-        sendStatus(STATUS_SYNCING, percent + '%');
-      }
       if (res.hasMore) {
         return pullPage();
       }
@@ -551,7 +536,6 @@ function doSync() {
   };
 
   var work = (isFirstSync ? bootstrapFromSnapshot() : Promise.resolve()).then(function () {
-    startSeq = lastSeq;
     return pullPage();
   });
 
