@@ -2216,20 +2216,15 @@ static void request_sync(void) {
 
 // The single place s_status_code ever gets assigned (both from a phone-
 // pushed MSG_SYNC_STATUS below and from outbox_failed_handler's own local
-// STATUS_ERROR) - forces the backlight on for as long as a sync is
-// actually in progress and hands it back the moment it stops, regardless
-// of which of those two call sites made that happen. Not just the very
-// first sync's empty-screen "Syncing" animation (that used to be the only
-// case covered, via start/stop_syncing_animation): a LATER resync's
-// decrypt phase, with an already-cached list on screen, never touches
-// that empty-screen path at all, and outbox_failed_handler can also move
-// status away from STATUS_SYNCING without ever going through
-// MSG_SYNC_STATUS. No new persisted state needed - just comparing old vs.
-// new status_code right here, before s_status_code itself is overwritten.
-// Unconditional on aplite (no backlight-mode setting to defer to there -
-// see s_backlight_mode's own comment); everywhere else, ALWAYS_ON mode is
-// left alone on the way back out since there's nothing to hand back.
+// STATUS_ERROR).
+//
+// Forcing the backlight on for as long as a sync is in progress is
+// disabled for now (#if 0 below, not // - this block itself contains
+// #ifndef/#else/#endif, which the preprocessor would still process even
+// with every C statement line-commented, so #if 0 is the only way to
+// actually take it out). Re-enable by flipping that 0 to 1.
 static void set_status_code(int32_t new_status_code) {
+#if 0
   bool was_syncing = (s_status_code == STATUS_SYNCING);
   bool now_syncing = (new_status_code == STATUS_SYNCING);
   if (now_syncing && !was_syncing) {
@@ -2243,6 +2238,7 @@ static void set_status_code(int32_t new_status_code) {
     light_enable(false);
 #endif
   }
+#endif
   s_status_code = new_status_code;
 }
 
