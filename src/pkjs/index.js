@@ -29,6 +29,15 @@ var MSG_NOTE_REQUEST = 16; // watch -> phone: TASK_ID (ask for this task's full 
 var MSG_NOTE_SYNC_START = 17; // phone -> watch: TASK_ID + NOTE_TOTAL_LEN (bytes about to follow, 0 = no notes)
 var MSG_NOTE_CHUNK = 18; // phone -> watch: TASK_ID + NOTE_CHUNK_TEXT (append this chunk)
 var MSG_NOTE_SYNC_END = 19; // phone -> watch: TASK_ID (all chunks sent, render now)
+// Project notes - same fetch/append shape as the TASK_ID versions above,
+// just keyed by PROJECT_ID (see main.c's own comment on these enum values
+// for what "a project's notes" means given the real app has no single notes
+// field on a Project).
+var MSG_PROJECT_NOTE_APPEND = 20; // watch -> phone: PROJECT_ID + NOTE_TEXT
+var MSG_PROJECT_NOTE_REQUEST = 21; // watch -> phone: PROJECT_ID
+var MSG_PROJECT_NOTE_SYNC_START = 22; // phone -> watch: PROJECT_ID + NOTE_TOTAL_LEN
+var MSG_PROJECT_NOTE_CHUNK = 23; // phone -> watch: PROJECT_ID + NOTE_CHUNK_TEXT
+var MSG_PROJECT_NOTE_SYNC_END = 24; // phone -> watch: PROJECT_ID
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -210,6 +219,13 @@ function generateTaskId() {
   return 'task-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
 }
 
+// Same ad-hoc shape as generateTaskId above, for a newly-created Note (see
+// handleProjectNoteAppend) - real note ids are nanoid() (project.service.ts)
+// but the server has no format requirement beyond a non-empty string.
+function generateNoteId() {
+  return 'note-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36);
+}
+
 // ---------------- AppMessage out ----------------
 
 function sendStatus(code, message) {
@@ -319,6 +335,16 @@ function sendTaskAt(tasks, index) {
     TASK_DONE: t.isDone ? 1 : 0,
     TASK_PROJECT: String(t.project || '').slice(0, 31),
   };
+  if (t.projectId) {
+    // Lets the watch's project row (when grouping is on - see
+    // getActiveTasks' own groupProjectIds) ask for THIS project's notes
+    // without the watch needing any other notion of "which project is
+    // this" - TASK_PROJECT above is only ever the display name. Omitted
+    // when grouping is off (t.projectId is '' there - see
+    // pushTaskAndSubtasks), same "absent means nothing to show" convention
+    // as TASK_DUE_MIN/TASK_TIME_SPENT_MS below.
+    dict.TASK_PROJECT_ID = String(t.projectId).slice(0, 31);
+  }
   if (t.dueWithTime) {
     // Minutes since local midnight, not the raw ms timestamp or a
     // pre-formatted string - the watch has its own 12h/24h clock
@@ -1311,6 +1337,169 @@ function handleNoteAppend(taskId, noteText) {
     });
 }
 
+// The real app has no single "project notes" field - a project has a LIST
+// of separate Note entities (project.noteIds, entityType 'NOTE' - see
+// task-store.js's applyNoteAction). The watch's project row (shown when
+// grouping is on) treats a project's OLDEST Note (by `created`) as the one
+// synthetic "project note" it shows/appends to - same one-note shape
+// task.notes already has - rather than exposing a whole list the watch has
+// no UI for. Returns undefined if the project has no notes yet.
+function firstNoteForProject(state, projectId) {
+  var notes = state.note || {};
+  var best = null;
+  Object.keys(notes).forEach(function (id) {
+    var n = notes[id];
+    if (n && n.projectId === projectId && (!best || (n.created || 0) < (best.created || 0))) {
+      best = n;
+    }
+  });
+  return best;
+}
+
+// Mirrors sendFullNotesForTask above, for the project's own synthetic note.
+function sendFullNotesForProject(projectId) {
+  var state = loadState();
+  var note = firstNoteForProject(state, projectId);
+  var notes = (note && note.content) ? String(note.content) : '';
+  var totalBytes = sha256lib.utf8ToBytes(notes).length;
+  var startDict = { MSG_TYPE: MSG_PROJECT_NOTE_SYNC_START, PROJECT_ID: projectId, NOTE_TOTAL_LEN: totalBytes };
+  sendWithRetry(startDict, function () {
+    sendProjectNoteChunk(projectId, notes, 0);
+  }, function (e) {
+    console.log('[pkjs] giving up on PROJECT_NOTE_SYNC_START for ' + projectId + ' after retries: ' + JSON.stringify(e));
+  });
+}
+
+// Mirrors sendNoteChunk above, for a project's synthetic note.
+function sendProjectNoteChunk(projectId, notes, offset) {
+  if (offset >= notes.length) {
+    sendWithRetry({ MSG_TYPE: MSG_PROJECT_NOTE_SYNC_END, PROJECT_ID: projectId }, function () {}, function (e) {
+      console.log('[pkjs] giving up on PROJECT_NOTE_SYNC_END for ' + projectId + ' after retries: ' + JSON.stringify(e));
+    });
+    return;
+  }
+  var end = safeChunkEnd(notes, Math.min(offset + NOTE_CHUNK_LEN, notes.length));
+  var dict = { MSG_TYPE: MSG_PROJECT_NOTE_CHUNK, PROJECT_ID: projectId, NOTE_CHUNK_TEXT: notes.slice(offset, end) };
+  sendWithRetry(dict, function () {
+    sendProjectNoteChunk(projectId, notes, end);
+  }, function (e) {
+    console.log('[pkjs] giving up on PROJECT_NOTE_CHUNK at offset ' + offset + ' for ' + projectId + ' after retries: ' + JSON.stringify(e));
+  });
+}
+
+function handleProjectNoteRequest(projectId) {
+  if (!projectId) {
+    return;
+  }
+  sendFullNotesForProject(projectId);
+}
+
+// Watch-dictated project note append - long-select on the project notes
+// overlay (see MSG_PROJECT_NOTE_APPEND in main.c/start_note_append_dictation).
+// Unlike handleNoteAppend (always updating an existing task.notes string),
+// a project may not have a synthetic note yet at all - the first append
+// creates one ('[Note] Add Note'); a later append updates its content
+// ('[Note] Update Note'), same plain-replace safety as handleNoteAppend's
+// own comment (applying the same computed newContent twice, once
+// optimistically here and again on replay, is harmless either way).
+function handleProjectNoteAppend(projectId, noteText) {
+  if (!projectId || !noteText || !String(noteText).trim()) {
+    return;
+  }
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+
+  var state = loadState();
+  // A cache saved before this feature existed has no `note` key at all
+  // (loadState() is a raw JSON.parse of whatever's cached, not merged
+  // against store.emptyState()'s shape) - ensure it exists before writing
+  // below, same defensive need firstNoteForProject already has reading it.
+  state.note = state.note || {};
+  var existingNote = firstNoteForProject(state, projectId);
+  var dictated = String(noteText).trim();
+  var crypto = getCrypto();
+  var clientId = getOrCreateClientId();
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  var op;
+
+  if (existingNote) {
+    var existingContent = existingNote.content || '';
+    var newContent = existingContent ? existingContent + '\n\n' + NOTE_APPEND_DIVIDER + '\n\n' + dictated : dictated;
+    state.note[existingNote.id] = Object.assign({}, existingNote, { content: newContent, modified: Date.now() });
+    saveState(state);
+
+    // Same "[Note] Update Note" / { id, changes } shape as note.actions.ts's
+    // real updateNote action - entityChanges required for the same
+    // isMultiEntityPayload() unwrap reason documented on handleTaskToggle's
+    // payload above.
+    var updPayload = {
+      actionPayload: { note: { id: existingNote.id, changes: { content: newContent, modified: Date.now() } } },
+      entityChanges: [],
+    };
+    op = {
+      id: generateOpId(),
+      opType: 'UPD',
+      actionType: '[Note] Update Note',
+      entityType: 'NOTE',
+      entityId: existingNote.id,
+      payload: crypto ? crypto.encrypt(updPayload) : updPayload,
+      isPayloadEncrypted: !!crypto,
+      vectorClock: newVectorClock,
+      clientId: clientId,
+      timestamp: Date.now(),
+      schemaVersion: SCHEMA_VERSION,
+    };
+  } else {
+    var newNote = {
+      id: generateNoteId(),
+      projectId: projectId,
+      isPinnedToToday: false,
+      content: dictated,
+      created: Date.now(),
+      modified: Date.now(),
+    };
+    state.note[newNote.id] = newNote;
+    saveState(state);
+
+    // Same "[Note] Add Note" / { note, isPreventFocus } shape as
+    // note.actions.ts's real addNote action.
+    var addPayload = { actionPayload: { note: newNote, isPreventFocus: true }, entityChanges: [] };
+    op = {
+      id: generateOpId(),
+      opType: 'CRT',
+      actionType: '[Note] Add Note',
+      entityType: 'NOTE',
+      entityId: newNote.id,
+      payload: crypto ? crypto.encrypt(addPayload) : addPayload,
+      isPayloadEncrypted: !!crypto,
+      vectorClock: newVectorClock,
+      clientId: clientId,
+      timestamp: Date.now(),
+      schemaVersion: SCHEMA_VERSION,
+    };
+  }
+
+  // Re-sends this project's full notes right away, same "let an open
+  // overlay pick up the appended text in place" reasoning as
+  // handleNoteAppend's own sendFullNotesForTask call above.
+  sendFullNotesForProject(projectId);
+
+  var noteFailureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      noteFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload project note append: ' + noteFailureMsg);
+      sendStatus(STATUS_ERROR, noteFailureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, noteFailureMsg);
+    });
+}
+
 // Watch-triggered "Finish Day" - archives every currently-done task, the
 // one core data-mutating effect of the real app's Finish Day flow
 // (daily-summary.component.ts's finishDay() -> TaskService.moveToArchive()
@@ -1452,6 +1641,12 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_NOTE_REQUEST:
       handleNoteRequest(payload.TASK_ID);
+      break;
+    case MSG_PROJECT_NOTE_APPEND:
+      handleProjectNoteAppend(payload.PROJECT_ID, payload.NOTE_TEXT);
+      break;
+    case MSG_PROJECT_NOTE_REQUEST:
+      handleProjectNoteRequest(payload.PROJECT_ID);
       break;
     default:
       break;

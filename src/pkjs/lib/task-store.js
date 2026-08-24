@@ -72,9 +72,11 @@ function msIsToday(ms) {
 //                          __inBacklog?, ...} },
 //          project: { [id]: {id, title, ...} },
 //          simpleCounter: { [id]: {id, title, isEnabled, type, countOnDay,
-//                                   streakMinValue?, isTrackStreaks?, ...} } }
+//                                   streakMinValue?, isTrackStreaks?, ...} },
+//          note: { [id]: {id, projectId, isPinnedToToday, content, created,
+//                          modified, ...} } }
 function emptyState() {
-  return { task: {}, project: {}, simpleCounter: {} };
+  return { task: {}, project: {}, simpleCounter: {}, note: {} };
 }
 
 function ensureCollection(state, entityType) {
@@ -438,6 +440,55 @@ function applyProjectAction(op, actionPayload, state) {
   }
 }
 
+// The real app has no "project notes" field - a project has a *list* of
+// separate Note entities (project.noteIds), entityType 'NOTE'
+// (note.actions.ts/note.reducer.ts), riding the same generic op-log capture
+// path TASK/PROJECT/SIMPLE_COUNTER do. The watch has no UI for a list of
+// notes per project though - it treats a project's oldest Note (by
+// `created`, see firstNoteForProject in index.js) as the one synthetic
+// "project note" it shows/appends to, same "one note, view + append" shape
+// task.notes already has. This just needs to replay the real Note entity
+// faithfully; which note the watch picks is index.js's concern, not this
+// replay's.
+function applyNoteAction(op, actionPayload, state) {
+  var notes = ensureCollection(state, 'note');
+  if (!actionPayload) {
+    return;
+  }
+  switch (op.actionType) {
+    case '[Note] Add Note':
+      if (actionPayload.note && actionPayload.note.id) {
+        notes[actionPayload.note.id] = actionPayload.note;
+      }
+      break;
+
+    case '[Note] Update Note':
+      if (actionPayload.note && actionPayload.note.id) {
+        notes[actionPayload.note.id] =
+          Object.assign({}, notes[actionPayload.note.id], actionPayload.note.changes);
+      }
+      break;
+
+    case '[Note] Delete Note':
+      if (actionPayload.id) {
+        delete notes[actionPayload.id];
+      }
+      break;
+
+    case '[Note] Move to other project':
+      if (actionPayload.note && actionPayload.note.id && actionPayload.targetProjectId) {
+        notes[actionPayload.note.id] =
+          Object.assign({}, notes[actionPayload.note.id], { projectId: actionPayload.targetProjectId });
+      }
+      break;
+
+    default:
+      // Update Note Order only reorders (todayOrder, or a project's own
+      // note order) - nothing about title/content to mirror.
+      break;
+  }
+}
+
 // "Habits" in the real app's UI are actually the SimpleCounter feature
 // (src/app/features/simple-counter/), entityType 'SIMPLE_COUNTER' - there is
 // no separate "HABIT" entity type. Confirmed against
@@ -555,6 +606,10 @@ function applyOperation(entry, state, crypto) {
       applyPlannerAction(op, payload && payload.actionPayload, state);
       return;
     }
+    if (entityType === 'note') {
+      applyNoteAction(op, payload && payload.actionPayload, state);
+      return;
+    }
 
     // Everything else (GLOBAL_CONFIG, TAG, PLUGIN_USER_DATA, ...) is
     // unused by the watch's task list - kept as a best-effort flat CRUD
@@ -610,6 +665,9 @@ function applyOperation(entry, state, crypto) {
         }
         if (payload && payload.simpleCounter && payload.simpleCounter.entities) {
           state.simpleCounter = payload.simpleCounter.entities;
+        }
+        if (payload && payload.note && payload.note.entities) {
+          state.note = payload.note.entities;
         }
         break;
       default:
@@ -786,23 +844,33 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
   var rows = [];
   if (groupByProject) {
     var byProject = {};
+    // Grouped by project TITLE (not id) - see projectTitleFor's own "No
+    // Project" fallback - so groupProjectIds takes the first task's own
+    // projectId seen for that title as the whole visual group's id (used by
+    // the watch's project-notes row - see TASK_PROJECT_ID in index.js's
+    // sendTaskAt). Two distinct projects sharing a display name would
+    // already visually merge into one group before this existed; this just
+    // means the merged group's notes button points at whichever of them was
+    // seen first, same negligible edge case.
+    var groupProjectIds = {};
     mainTasks.forEach(function (t) {
       var name = projectTitleFor(state, t);
       if (!byProject[name]) {
         byProject[name] = [];
+        groupProjectIds[name] = t.projectId || '';
       }
       byProject[name].push(t);
     });
     Object.keys(byProject).sort(titleCompare).forEach(function (name) {
       byProject[name].sort(withinGroupSort);
       byProject[name].forEach(function (t) {
-        pushTaskAndSubtasks(rows, allTasks, t, name, hideDone);
+        pushTaskAndSubtasks(rows, allTasks, t, name, groupProjectIds[name], hideDone);
       });
     });
   } else {
     mainTasks.sort(withinGroupSort);
     mainTasks.forEach(function (t) {
-      pushTaskAndSubtasks(rows, allTasks, t, '', hideDone);
+      pushTaskAndSubtasks(rows, allTasks, t, '', '', hideDone);
     });
   }
 
@@ -823,7 +891,7 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
 // (~) for exactly that reason, before this was re-tested more thoroughly.
 var SUBTASK_PREFIX = '    » ';
 
-function pushTaskAndSubtasks(rows, allTasks, t, groupName, hideDone) {
+function pushTaskAndSubtasks(rows, allTasks, t, groupName, groupProjectId, hideDone) {
   // t is already guaranteed a real title here - getActiveTasks filters
   // ghost (title-less) records out of mainTasks before this is ever
   // called (hideDone's own done-main-task filtering happens there too, for
@@ -837,12 +905,16 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName, hideDone) {
   // No `notes` field here - the watch fetches a task's full notes on demand
   // (MSG_NOTE_REQUEST, see index.js's sendFullNotesForTask) only for
   // whichever one task's overlay is currently open, rather than every row
-  // carrying a preview whether or not it's ever viewed.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
+  // carrying a preview whether or not it's ever viewed. projectId likewise
+  // rides along on every row (not just once per group) so main.c's
+  // recompute_groups() - which derives its per-group TaskGroup from
+  // whichever task happens to be group.start - can read it off any task
+  // rather than needing a separate carrier.
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
     }
   });
 }

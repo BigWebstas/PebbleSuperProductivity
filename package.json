@@ -98,7 +98,9 @@
       "AUTO_SYNC_INTERVAL_MIN",
       "NOTE_TEXT",
       "NOTE_TOTAL_LEN",
-      "NOTE_CHUNK_TEXT"
+      "NOTE_CHUNK_TEXT",
+      "TASK_PROJECT_ID",
+      "PROJECT_ID"
     ]
   }
 }

@@ -39,6 +39,8 @@
 #define KEY_NOTE_TEXT MESSAGE_KEY_NOTE_TEXT
 #define KEY_NOTE_TOTAL_LEN MESSAGE_KEY_NOTE_TOTAL_LEN
 #define KEY_NOTE_CHUNK_TEXT MESSAGE_KEY_NOTE_CHUNK_TEXT
+#define KEY_TASK_PROJECT_ID MESSAGE_KEY_TASK_PROJECT_ID
+#define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -61,6 +63,19 @@ enum {
   MSG_NOTE_SYNC_START = 17, // phone -> watch: TASK_ID + NOTE_TOTAL_LEN (bytes about to follow, 0 = no notes)
   MSG_NOTE_CHUNK = 18,      // phone -> watch: TASK_ID + NOTE_CHUNK_TEXT (append this chunk)
   MSG_NOTE_SYNC_END = 19,   // phone -> watch: TASK_ID (all chunks sent, render now)
+  // Project notes - selecting the project row shown when "group by project"
+  // is on (see the project-row addition to menu_draw_row/menu_select_click)
+  // reuses this exact same fetch/append machinery, just keyed by PROJECT_ID
+  // instead of TASK_ID - see s_notes_overlay_is_project's own comment. The
+  // real app has no single "project notes" field (a project has a *list* of
+  // separate Note entities, project.noteIds) - this treats the project's
+  // oldest Note (by `created`) as the one synthetic "project note" the watch
+  // shows/appends to, creating one on first append if none exists yet.
+  MSG_PROJECT_NOTE_APPEND = 20,     // watch -> phone: PROJECT_ID + NOTE_TEXT
+  MSG_PROJECT_NOTE_REQUEST = 21,    // watch -> phone: PROJECT_ID
+  MSG_PROJECT_NOTE_SYNC_START = 22, // phone -> watch: PROJECT_ID + NOTE_TOTAL_LEN
+  MSG_PROJECT_NOTE_CHUNK = 23,      // phone -> watch: PROJECT_ID + NOTE_CHUNK_TEXT
+  MSG_PROJECT_NOTE_SYNC_END = 24,   // phone -> watch: PROJECT_ID
 };
 
 // STATUS_CODE values sent from the phone.
@@ -93,6 +108,11 @@ enum {
 // correctly - completely invisible until you act on that specific task.
 #define MAX_ID_LEN 96
 #define MAX_PROJECT_LEN 32
+// Project ids are a plain nanoid() (project.service.ts), same as a habit's
+// SimpleCounter id - no calendar-integration format to accommodate, so this
+// doesn't need MAX_ID_LEN's 96-byte allowance (see MAX_HABIT_ID_LEN's own
+// comment for the same reasoning).
+#define MAX_PROJECT_ID_LEN 32
 // A task's notes can be many paragraphs of markdown in the real app - too
 // big and too rarely-viewed to carry on every Task in the double-buffered
 // s_tasks/s_incoming arrays (MAX_TASKS * 2 copies) the way title/project/etc
@@ -115,6 +135,14 @@ typedef struct {
   char id[MAX_ID_LEN];
   char title[MAX_TITLE_LEN];
   char project[MAX_PROJECT_LEN]; // '' when the phone isn't grouping by project
+#ifndef PBL_PLATFORM_APLITE
+  // The task's project id (not just its display name above) - needed so the
+  // project row (see recompute_groups()/TaskGroup.project_id) can ask the
+  // phone for THAT project's notes. Aplite-gated along with the rest of the
+  // notes feature (see MAX_NOTES_LEN's own comment) rather than carried on
+  // every Task there for no reachable use.
+  char project_id[MAX_PROJECT_ID_LEN];
+#endif
   bool done;
   int due_min;       // minutes since local midnight, or -1 when the task has no dueWithTime
   int time_spent_ms; // total tracked time (all days, all devices), 0 if none
@@ -130,6 +158,16 @@ typedef struct {
   char name[MAX_PROJECT_LEN];
   int start; // index into s_tasks
   int count;
+#ifndef PBL_PLATFORM_APLITE
+  // Copied from the group's first task (see recompute_groups()) - lets the
+  // selectable project row (see menu_draw_row/menu_select_click) ask the
+  // phone for this project's notes without the watch needing any other
+  // notion of "which project is this group". Aplite-gated: aplite keeps the
+  // group name as a plain, non-selectable header exactly as before (see
+  // menu_get_num_rows/menu_get_header_height's own aplite branches) since it
+  // can't display notes at all.
+  char project_id[MAX_PROJECT_ID_LEN];
+#endif
 } TaskGroup;
 
 // "Habits" are Super Productivity's SimpleCounter feature (real entityType
@@ -306,14 +344,22 @@ static StatusBarLayer *s_notes_status_bar;
 static ScrollLayer *s_notes_scroll_layer;
 static TextLayer *s_notes_layer;
 static bool s_notes_overlay_active = false;
-// Which task the notes overlay is currently showing - a plain id copy (not
-// a Task*), same reasoning as s_pending_toggle_task_id/s_tracking_task_id
-// below: a background sync can rebuild s_tasks out from under the overlay
-// while it's open. Needed by long-select's voice note-append (see
-// notes_window_select_long_click_handler/start_note_append_dictation) to
-// know which task to send the dictated text for.
-static char s_notes_overlay_task_id[MAX_ID_LEN] = "";
-// Full notes text for whichever task s_notes_overlay_task_id names, fetched
+// Which task OR project the notes overlay is currently showing - a plain id
+// copy (not a Task*/TaskGroup*), same reasoning as s_pending_toggle_task_id/
+// s_tracking_task_id below: a background sync can rebuild s_tasks/s_groups
+// out from under the overlay while it's open. Needed by long-select's voice
+// note-append (see notes_window_select_long_click_handler/
+// start_note_append_dictation) to know which subject to send the dictated
+// text for. This one overlay/window is reused for both task notes and
+// project notes (see the project-row addition to menu_draw_row/
+// menu_select_click) rather than duplicating the whole fetch/scroll/dictate
+// machinery for a second subject type - only one can ever be open at a
+// time anyway. s_notes_overlay_is_project disambiguates which fetch/append
+// message type and buffer size (MAX_ID_LEN comfortably fits a project id
+// too - see MAX_PROJECT_ID_LEN) a pending request/reply is about.
+static char s_notes_overlay_subject_id[MAX_ID_LEN] = "";
+static bool s_notes_overlay_is_project = false;
+// Full notes text for whichever subject s_notes_overlay_subject_id names, fetched
 // on demand (MSG_NOTE_REQUEST/MSG_NOTE_SYNC_START/MSG_NOTE_CHUNK/
 // MSG_NOTE_SYNC_END) rather than carried on every Task in s_tasks/
 // s_incoming - see the removed MAX_NOTES_LEN field's own comment further up
@@ -351,6 +397,7 @@ static const char *s_notes_display_text = "";
 static bool s_notes_is_loading = false;
 #define NOTES_LOADING_TEXT "Loading notes..."
 #define NOTES_EMPTY_TEXT "(No notes for this task)"
+#define PROJECT_NOTES_EMPTY_TEXT "(No notes for this project)"
 #define NOTES_TIMEOUT_TEXT "Couldn't load notes - back out and try again."
 // Guards against a fetch that never completes (phone not paired, dropped
 // AppMessage past its own retry budget) leaving the overlay stuck on
@@ -384,6 +431,13 @@ static char s_pending_toggle_task_id[MAX_ID_LEN] = "";
 // config already), so this timestamp-based approach reimplements the same
 // timing convention by hand.
 #define DOUBLE_CLICK_WINDOW_MS 300
+// Same double-click detection, for the project row (see menu_draw_row/
+// menu_select_click) - simpler than s_pending_toggle_timer's pair above
+// because there's no real single-click action to commit if the second
+// click never comes (a project row has no "toggle"), so the timer callback
+// (pending_project_click_timer_callback) just clears the pending state.
+static AppTimer *s_pending_project_click_timer = NULL;
+static char s_pending_project_click_id[MAX_PROJECT_ID_LEN] = "";
 #endif
 
 // Time tracking: long-select on a task starts/stops tracking it (only one
@@ -567,6 +621,10 @@ static void recompute_groups(void) {
     }
     strncpy(s_groups[s_group_count].name, s_tasks[i].project, MAX_PROJECT_LEN - 1);
     s_groups[s_group_count].name[MAX_PROJECT_LEN - 1] = '\0';
+#ifndef PBL_PLATFORM_APLITE
+    strncpy(s_groups[s_group_count].project_id, s_tasks[i].project_id, MAX_PROJECT_ID_LEN - 1);
+    s_groups[s_group_count].project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+#endif
     s_groups[s_group_count].start = i;
     s_groups[s_group_count].count = j - i;
     s_group_count++;
@@ -698,9 +756,12 @@ static void backlight_touch(void);
 #endif
 #ifndef PBL_PLATFORM_APLITE
 static void show_notes_overlay(Task *task);
+static void show_project_notes_overlay(TaskGroup *group);
 static void hide_notes_overlay(void);
 static void push_notes_window(void);
 static void pending_toggle_timer_callback(void *data);
+static void pending_project_click_timer_callback(void *data);
+static TaskGroup *resolve_project_row_at(MenuIndex index);
 #endif
 #ifndef PBL_PLATFORM_APLITE
 static void start_add_task_dictation(void);
@@ -821,6 +882,18 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
   if (group_idx > s_group_count) {
     return 0;
   }
+#ifndef PBL_PLATFORM_APLITE
+  // A non-empty group name (grouping actually on) gets one extra row up
+  // front - a selectable "project row" standing in for the old plain
+  // header (see menu_get_header_height's own aplite split below), reached
+  // the same way a task row is (double-click Select shows its notes - see
+  // menu_select_click). Aplite keeps the plain, non-interactive header
+  // instead (no RAM budget for the notes feature this exists to reach -
+  // same exclusion as every other notes-adjacent piece in this file).
+  if (s_groups[group_idx].name[0] != '\0') {
+    return (uint16_t)(s_groups[group_idx].count + 1);
+  }
+#endif
   return (uint16_t)s_groups[group_idx].count;
 }
 
@@ -841,7 +914,15 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
   if (group_idx >= s_group_count || s_groups[group_idx].name[0] == '\0') {
     return 0;
   }
+#ifndef PBL_PLATFORM_APLITE
+  // The group name now lives in a selectable project ROW instead (see
+  // menu_get_num_rows/menu_draw_row) - no separate header needed. Aplite
+  // keeps the plain 40px header below (draw_header's own aplite-reachable
+  // branch still runs there).
+  return 0;
+#else
   return 40;
+#endif
 }
 
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
@@ -925,10 +1006,11 @@ static Habit *find_habit_by_id(const char *id) {
 #endif
 
 // Resolves a MenuIndex to the Task it points at, or NULL if it isn't on a
-// task row at all (the Resync row, a group header, or nothing there once
-// s_group_count/s_task_count are taken into account - recompute_groups()
-// leaves s_group_count at 0 whenever s_task_count is 0, so an empty list is
-// handled by the same group_idx bounds check as any other out-of-range row).
+// task row at all (the Resync row, a group header/project row, the Finish
+// Day row, or nothing there once s_group_count/s_task_count are taken into
+// account - recompute_groups() leaves s_group_count at 0 whenever
+// s_task_count is 0, so an empty list is handled by the same group_idx
+// bounds check as any other out-of-range row).
 static Task *resolve_task_at(MenuIndex index) {
   if (index.section == 0) {
     return NULL;
@@ -937,12 +1019,43 @@ static Task *resolve_task_at(MenuIndex index) {
   if (group_idx >= s_group_count) {
     return NULL;
   }
-  int task_idx = s_groups[group_idx].start + (int)index.row;
+  int row = (int)index.row;
+#ifndef PBL_PLATFORM_APLITE
+  // Row 0 of a named group is the selectable project row (see
+  // menu_get_num_rows) standing in for the plain header aplite still uses -
+  // not a task, every other row shifts down by one to make room for it.
+  if (s_groups[group_idx].name[0] != '\0') {
+    if (row == 0) {
+      return NULL;
+    }
+    row -= 1;
+  }
+#endif
+  int task_idx = s_groups[group_idx].start + row;
   if (task_idx < 0 || task_idx >= s_task_count) {
     return NULL;
   }
   return &s_tasks[task_idx];
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// Resolves a MenuIndex to the TaskGroup it points at IF it's on that
+// group's own selectable project row (row 0 of a named group - see
+// resolve_task_at's own comment), or NULL otherwise.
+static TaskGroup *resolve_project_row_at(MenuIndex index) {
+  if (index.section == 0) {
+    return NULL;
+  }
+  int group_idx = (int)index.section - 1;
+  if (group_idx >= s_group_count) {
+    return NULL;
+  }
+  if (s_groups[group_idx].name[0] == '\0' || (int)index.row != 0) {
+    return NULL;
+  }
+  return &s_groups[group_idx];
+}
+#endif
 
 // Resolves the row MenuLayer currently has highlighted to a Task, or NULL
 // if the selection isn't on a task row at all.
@@ -1275,6 +1388,41 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 #endif
     return;
   }
+#ifndef PBL_PLATFORM_APLITE
+  // The project row (see menu_get_num_rows/resolve_project_row_at) - same
+  // green/underline/divider look the old plain header used, but now a real
+  // selectable row: double-click Select shows this project's notes (see
+  // menu_select_click), same "same style, now inverts on select" treatment
+  // the Finish Day row above got when IT became interactive. Text (not the
+  // green fill) inverts on selection, matching the Resync/Habits/Add Task
+  // section-0 rows' own convention for a row that keeps its own brand color
+  // regardless of selection state.
+  TaskGroup *project_row = resolve_project_row_at(*cell_index);
+  if (project_row) {
+    bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
+                        menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
+    GRect bounds = layer_get_bounds(cell_layer);
+    GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+    GRect text_rect = GRect(6, 2, bounds.size.w - 12, bounds.size.h - 4);
+    GColor fg = is_selected ? GColorWhite : GColorBlack;
+
+    graphics_context_set_fill_color(ctx, GColorGreen);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    graphics_context_set_text_color(ctx, fg);
+    graphics_draw_text(ctx, project_row->name, bold_font, text_rect,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+    GSize text_size = graphics_text_layout_get_content_size(
+        project_row->name, bold_font, text_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+    int16_t underline_y = 2 + text_size.h;
+    graphics_context_set_stroke_color(ctx, fg);
+    graphics_draw_line(ctx, GPoint(6, underline_y), GPoint(6 + text_size.w, underline_y));
+
+    int16_t divider_y = bounds.size.h - 2;
+    graphics_draw_line(ctx, GPoint(0, divider_y), GPoint(bounds.size.w, divider_y));
+    return;
+  }
+#endif
   Task *task = resolve_task_at(*cell_index);
   if (!task) {
     return;
@@ -1497,6 +1645,13 @@ static void send_pending_retry(void) {
     case MSG_NOTE_REQUEST:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       break;
+    case MSG_PROJECT_NOTE_APPEND:
+      dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
+      dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str2);
+      break;
+    case MSG_PROJECT_NOTE_REQUEST:
+      dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
+      break;
     case MSG_FINISH_DAY:
     case MSG_REQUEST_SYNC:
     default:
@@ -1598,8 +1753,8 @@ static void send_task_add(const char *title) {
   begin_send(MSG_TASK_ADD, title, NULL, 0);
 }
 
-static void send_note_append(const char *task_id, const char *note_text) {
-  begin_send(MSG_NOTE_APPEND, task_id, note_text, 0);
+static void send_note_append(const char *id, const char *note_text, bool is_project) {
+  begin_send(is_project ? MSG_PROJECT_NOTE_APPEND : MSG_NOTE_APPEND, id, note_text, 0);
 }
 
 // Fires when dictation finishes (success, cancel, or failure). Only ever
@@ -1612,7 +1767,7 @@ static void dictation_status_callback(DictationSession *session, DictationSessio
   s_dictation_pending = false;
   if (status == DictationSessionStatusSuccess) {
     if (s_dictation_is_note_append) {
-      send_note_append(s_notes_overlay_task_id, transcription);
+      send_note_append(s_notes_overlay_subject_id, transcription, s_notes_overlay_is_project);
     } else {
       send_task_add(transcription);
     }
@@ -1650,10 +1805,11 @@ static void start_add_task_dictation(void) {
 
 // Long-select on the notes overlay (see
 // notes_window_select_long_click_handler) - dictates text to append to the
-// currently-shown task's notes, same session/guard as start_add_task_dictation
-// above, just tagged for the callback to route differently.
-// s_notes_overlay_task_id is only valid while s_notes_window is the pushed/
-// visible window, which is the only way this ever gets called.
+// currently-shown task's OR project's notes (see s_notes_overlay_is_project),
+// same session/guard as start_add_task_dictation above, just tagged for the
+// callback to route differently. s_notes_overlay_subject_id is only valid
+// while s_notes_window is the pushed/visible window, which is the only way
+// this ever gets called.
 static void start_note_append_dictation(void) {
   if (s_dictation_pending || !s_dictation_session) {
     return;
@@ -1772,6 +1928,36 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     }
     return;
   }
+#ifndef PBL_PLATFORM_APLITE
+  // The project row (see resolve_project_row_at/menu_draw_row) - same
+  // double-click-to-show-notes gesture as a task row below, but there's no
+  // competing single-click action to delay here (a project row doesn't
+  // "toggle"), so this just tracks whether a second click on the SAME
+  // project arrives within the window; a lone click's timer callback
+  // (pending_project_click_timer_callback) has nothing to commit, it just
+  // clears the pending state.
+  TaskGroup *project_row = resolve_project_row_at(*cell_index);
+  if (project_row) {
+    if (s_pending_project_click_timer &&
+        strncmp(s_pending_project_click_id, project_row->project_id, MAX_PROJECT_ID_LEN) == 0) {
+      app_timer_cancel(s_pending_project_click_timer);
+      s_pending_project_click_timer = NULL;
+      s_pending_project_click_id[0] = '\0';
+      show_project_notes_overlay(project_row);
+      return;
+    }
+    if (s_pending_project_click_timer) {
+      app_timer_cancel(s_pending_project_click_timer);
+      s_pending_project_click_timer = NULL;
+      s_pending_project_click_id[0] = '\0';
+    }
+    strncpy(s_pending_project_click_id, project_row->project_id, MAX_PROJECT_ID_LEN - 1);
+    s_pending_project_click_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+    s_pending_project_click_timer =
+        app_timer_register(DOUBLE_CLICK_WINDOW_MS, pending_project_click_timer_callback, NULL);
+    return;
+  }
+#endif
   Task *task = resolve_task_at(*cell_index);
   if (!task) {
     return;
@@ -2136,38 +2322,54 @@ static void start_notes_load_timeout(void) {
   s_notes_load_timeout_timer = app_timer_register(NOTES_LOAD_TIMEOUT_MS, notes_load_timeout_callback, NULL);
 }
 
-// Asks the phone for this task's full notes (MSG_NOTE_REQUEST) - the reply
-// arrives later as MSG_NOTE_SYNC_START/MSG_NOTE_CHUNK*/MSG_NOTE_SYNC_END
-// (see inbox_received_handler), matched back to s_notes_overlay_task_id
-// rather than trusting a stale in-flight request still being about the
-// task currently on screen.
-static void request_notes_full(const char *task_id) {
-  begin_send(MSG_NOTE_REQUEST, task_id, NULL, 0);
+// Asks the phone for this subject's (task's or project's) full notes
+// (MSG_NOTE_REQUEST/MSG_PROJECT_NOTE_REQUEST) - the reply arrives later as
+// MSG_(PROJECT_)NOTE_SYNC_START/CHUNK*/SYNC_END (see inbox_received_handler),
+// matched back to s_notes_overlay_subject_id/s_notes_overlay_is_project
+// rather than trusting a stale in-flight request still being about whatever
+// is currently on screen.
+static void request_notes_full(const char *id, bool is_project) {
+  begin_send(is_project ? MSG_PROJECT_NOTE_REQUEST : MSG_NOTE_REQUEST, id, NULL, 0);
   start_notes_load_timeout();
 }
 
-// Shows a task's notes (double-click Select on it - see
-// pending_toggle_timer_callback/menu_select_click) in their own pushed
-// Window (see s_notes_window's own comment for why - Back's default pop
-// behavior). Also doubles as a live refresh while that window is already
-// open (see handleNoteAppend in index.js, which re-triggers this same
-// fetch for whichever task's overlay is open after a successful append):
-// s_notes_layer is only non-NULL between notes_window_load/unload, so that
-// case just re-renders the already-visible window instead of pushing a
-// second copy of it.
-static void show_notes_overlay(Task *task) {
+// Shared by show_notes_overlay (task) and show_project_notes_overlay below -
+// same pushed Window either way (see s_notes_window's own comment for why -
+// Back's default pop behavior), just a different subject id/fetch message
+// type. Also doubles as a live refresh while that window is already open
+// (see handleNoteAppend/handleProjectNoteAppend in index.js, which
+// re-trigger this same fetch for whichever subject's overlay is open after
+// a successful append): s_notes_layer is only non-NULL between
+// notes_window_load/unload, so that case just re-renders the already-visible
+// window instead of pushing a second copy of it.
+static void show_notes_overlay_for(const char *id, bool is_project) {
   s_notes_overlay_active = true;
-  strncpy(s_notes_overlay_task_id, task->id, MAX_ID_LEN - 1);
-  s_notes_overlay_task_id[MAX_ID_LEN - 1] = '\0';
+  s_notes_overlay_is_project = is_project;
+  strncpy(s_notes_overlay_subject_id, id, MAX_ID_LEN - 1);
+  s_notes_overlay_subject_id[MAX_ID_LEN - 1] = '\0';
   reset_notes_full_buffer();
   s_notes_display_text = NOTES_LOADING_TEXT;
   s_notes_is_loading = true;
-  request_notes_full(task->id);
+  request_notes_full(id, is_project);
   if (s_notes_layer) {
     render_notes_overlay_content();
     return;
   }
   push_notes_window();
+}
+
+// Shows a task's notes (double-click Select on it - see
+// pending_toggle_timer_callback/menu_select_click).
+static void show_notes_overlay(Task *task) {
+  show_notes_overlay_for(task->id, false);
+}
+
+// Shows a project's notes (double-click Select on its project row - see
+// pending_project_click_timer_callback/menu_select_click). See
+// MSG_PROJECT_NOTE_APPEND's own comment for what "a project's notes" means
+// here, given the real app has no single notes field on a Project.
+static void show_project_notes_overlay(TaskGroup *group) {
+  show_notes_overlay_for(group->project_id, true);
 }
 
 // Dismisses the notes overlay (Select, see
@@ -2196,6 +2398,92 @@ static void pending_toggle_timer_callback(void *data) {
   save_tasks();
   menu_layer_reload_data(s_menu_layer);
   send_task_toggle(task);
+}
+
+// Fires when a project row's double-click window passes with no second
+// click - see menu_select_click. Unlike pending_toggle_timer_callback
+// above, there's nothing to commit here (a project row has no single-click
+// action of its own), just the pending state to clear.
+static void pending_project_click_timer_callback(void *data) {
+  s_pending_project_click_timer = NULL;
+  s_pending_project_click_id[0] = '\0';
+}
+
+// True if a MSG_(PROJECT_)NOTE_SYNC_* reply for `id`/`is_project` is about
+// whatever the notes overlay is CURRENTLY showing, as opposed to a stale
+// reply for a subject the user has since backed out of (or a different
+// subject type's reply arriving while the other kind's overlay is open) -
+// see s_notes_overlay_subject_id/s_notes_overlay_is_project's own comment.
+static bool notes_reply_matches(const char *id, bool is_project) {
+  return is_project == s_notes_overlay_is_project &&
+         strncmp(id, s_notes_overlay_subject_id, MAX_ID_LEN) == 0;
+}
+
+// Shared by the MSG_NOTE_SYNC_START/MSG_PROJECT_NOTE_SYNC_START inbox
+// handlers below - identical malloc/reset logic either way, just a
+// different wire message and dictionary key for the id.
+static void handle_notes_sync_start(const char *id, bool is_project, int32_t total_len) {
+  if (!notes_reply_matches(id, is_project)) {
+    return;
+  }
+  reset_notes_full_buffer();
+  if (total_len <= 0) {
+    s_notes_fetch_state = NOTES_FETCH_EMPTY;
+    return; // No chunks will follow - a SYNC_END will render the empty-notes text.
+  }
+  s_notes_full_capacity = (int)strlen(NOTES_HEADER) + (int)total_len + 1;
+  s_notes_full_text = malloc((size_t)s_notes_full_capacity);
+  if (!s_notes_full_text) {
+    s_notes_full_capacity = 0;
+    s_notes_fetch_state = NOTES_FETCH_FAILED;
+    return;
+  }
+  memcpy(s_notes_full_text, NOTES_HEADER, strlen(NOTES_HEADER));
+  s_notes_full_len = (int)strlen(NOTES_HEADER);
+  s_notes_fetch_state = NOTES_FETCH_STARTED;
+}
+
+// Shared by MSG_NOTE_CHUNK/MSG_PROJECT_NOTE_CHUNK below.
+static void handle_notes_chunk(const char *id, bool is_project, const char *chunk) {
+  if (s_notes_fetch_state != NOTES_FETCH_STARTED || !notes_reply_matches(id, is_project)) {
+    return;
+  }
+  int chunk_len = (int)strlen(chunk);
+  // Bounds-checked against the capacity the matching SYNC_START already
+  // malloc'd for the total the phone declared up front - a chunk that would
+  // overflow it (a phone/watch length-accounting mismatch) is dropped
+  // rather than overrunning the buffer.
+  if (s_notes_full_len + chunk_len < s_notes_full_capacity) {
+    memcpy(s_notes_full_text + s_notes_full_len, chunk, (size_t)chunk_len);
+    s_notes_full_len += chunk_len;
+  }
+}
+
+// Shared by MSG_NOTE_SYNC_END/MSG_PROJECT_NOTE_SYNC_END below.
+static void handle_notes_sync_end(const char *id, bool is_project) {
+  if (!notes_reply_matches(id, is_project)) {
+    return;
+  }
+  cancel_notes_load_timeout();
+  s_notes_is_loading = false;
+  switch (s_notes_fetch_state) {
+    case NOTES_FETCH_STARTED:
+      s_notes_full_text[s_notes_full_len] = '\0';
+      s_notes_display_text = s_notes_full_text;
+      break;
+    case NOTES_FETCH_EMPTY:
+      s_notes_display_text = is_project ? PROJECT_NOTES_EMPTY_TEXT : NOTES_EMPTY_TEXT;
+      break;
+    case NOTES_FETCH_FAILED:
+    case NOTES_FETCH_IDLE:
+    default:
+      // Either malloc failed, or the matching SYNC_START never arrived at
+      // all - a real failure, not a legitimately empty note (that's
+      // NOTES_FETCH_EMPTY, handled above).
+      s_notes_display_text = NOTES_TIMEOUT_TEXT;
+      break;
+  }
+  render_notes_overlay_content();
 }
 #endif
 
@@ -2280,6 +2568,14 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_incoming[idx].title[MAX_TITLE_LEN - 1] = '\0';
       strncpy(s_incoming[idx].project, project_tuple ? project_tuple->value->cstring : "", MAX_PROJECT_LEN - 1);
       s_incoming[idx].project[MAX_PROJECT_LEN - 1] = '\0';
+#ifndef PBL_PLATFORM_APLITE
+      {
+        Tuple *project_id_tuple = dict_find(iterator, KEY_TASK_PROJECT_ID);
+        strncpy(s_incoming[idx].project_id, project_id_tuple ? project_id_tuple->value->cstring : "",
+                MAX_PROJECT_ID_LEN - 1);
+        s_incoming[idx].project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+      }
+#endif
       s_incoming[idx].done = done_tuple && done_tuple->value->int32 != 0;
       // Absent (not just 0, which is a legitimate 12:00am) means "no
       // dueWithTime" - the phone only includes this key at all when the
@@ -2465,50 +2761,16 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (!id_tuple || !total_tuple) {
         break;
       }
-      // A reply for a task whose overlay isn't (or is no longer) the one
-      // on screen - the user backed out and opened a different task, or
-      // this is a stale retry - is just discarded rather than clobbering
-      // whatever's currently showing.
-      if (strncmp(id_tuple->value->cstring, s_notes_overlay_task_id, MAX_ID_LEN) != 0) {
-        break;
-      }
-      reset_notes_full_buffer();
-      int32_t total_len = total_tuple->value->int32;
-      if (total_len <= 0) {
-        s_notes_fetch_state = NOTES_FETCH_EMPTY;
-        break; // No chunks will follow - MSG_NOTE_SYNC_END renders the empty-notes text.
-      }
-      s_notes_full_capacity = (int)strlen(NOTES_HEADER) + (int)total_len + 1;
-      s_notes_full_text = malloc((size_t)s_notes_full_capacity);
-      if (!s_notes_full_text) {
-        s_notes_full_capacity = 0;
-        s_notes_fetch_state = NOTES_FETCH_FAILED;
-        break;
-      }
-      memcpy(s_notes_full_text, NOTES_HEADER, strlen(NOTES_HEADER));
-      s_notes_full_len = (int)strlen(NOTES_HEADER);
-      s_notes_fetch_state = NOTES_FETCH_STARTED;
+      handle_notes_sync_start(id_tuple->value->cstring, false, total_tuple->value->int32);
       break;
     }
     case MSG_NOTE_CHUNK: {
       Tuple *id_tuple = dict_find(iterator, KEY_TASK_ID);
       Tuple *chunk_tuple = dict_find(iterator, KEY_NOTE_CHUNK_TEXT);
-      if (!id_tuple || !chunk_tuple || s_notes_fetch_state != NOTES_FETCH_STARTED) {
+      if (!id_tuple || !chunk_tuple) {
         break;
       }
-      if (strncmp(id_tuple->value->cstring, s_notes_overlay_task_id, MAX_ID_LEN) != 0) {
-        break;
-      }
-      const char *chunk = chunk_tuple->value->cstring;
-      int chunk_len = (int)strlen(chunk);
-      // Bounds-checked against the capacity MSG_NOTE_SYNC_START already
-      // malloc'd for the total the phone declared up front - a chunk that
-      // would overflow it (a phone/watch length-accounting mismatch) is
-      // dropped rather than overrunning the buffer.
-      if (s_notes_full_len + chunk_len < s_notes_full_capacity) {
-        memcpy(s_notes_full_text + s_notes_full_len, chunk, (size_t)chunk_len);
-        s_notes_full_len += chunk_len;
-      }
+      handle_notes_chunk(id_tuple->value->cstring, false, chunk_tuple->value->cstring);
       break;
     }
     case MSG_NOTE_SYNC_END: {
@@ -2516,29 +2778,33 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (!id_tuple) {
         break;
       }
-      if (strncmp(id_tuple->value->cstring, s_notes_overlay_task_id, MAX_ID_LEN) != 0) {
+      handle_notes_sync_end(id_tuple->value->cstring, false);
+      break;
+    }
+    case MSG_PROJECT_NOTE_SYNC_START: {
+      Tuple *id_tuple = dict_find(iterator, KEY_PROJECT_ID);
+      Tuple *total_tuple = dict_find(iterator, KEY_NOTE_TOTAL_LEN);
+      if (!id_tuple || !total_tuple) {
         break;
       }
-      cancel_notes_load_timeout();
-      s_notes_is_loading = false;
-      switch (s_notes_fetch_state) {
-        case NOTES_FETCH_STARTED:
-          s_notes_full_text[s_notes_full_len] = '\0';
-          s_notes_display_text = s_notes_full_text;
-          break;
-        case NOTES_FETCH_EMPTY:
-          s_notes_display_text = NOTES_EMPTY_TEXT;
-          break;
-        case NOTES_FETCH_FAILED:
-        case NOTES_FETCH_IDLE:
-        default:
-          // Either malloc failed, or MSG_NOTE_SYNC_START for this request
-          // never arrived at all - a real failure, not a legitimately
-          // empty note (that's NOTES_FETCH_EMPTY, handled above).
-          s_notes_display_text = NOTES_TIMEOUT_TEXT;
-          break;
+      handle_notes_sync_start(id_tuple->value->cstring, true, total_tuple->value->int32);
+      break;
+    }
+    case MSG_PROJECT_NOTE_CHUNK: {
+      Tuple *id_tuple = dict_find(iterator, KEY_PROJECT_ID);
+      Tuple *chunk_tuple = dict_find(iterator, KEY_NOTE_CHUNK_TEXT);
+      if (!id_tuple || !chunk_tuple) {
+        break;
       }
-      render_notes_overlay_content();
+      handle_notes_chunk(id_tuple->value->cstring, true, chunk_tuple->value->cstring);
+      break;
+    }
+    case MSG_PROJECT_NOTE_SYNC_END: {
+      Tuple *id_tuple = dict_find(iterator, KEY_PROJECT_ID);
+      if (!id_tuple) {
+        break;
+      }
+      handle_notes_sync_end(id_tuple->value->cstring, true);
       break;
     }
 #endif
@@ -3402,6 +3668,10 @@ static void window_unload(Window *window) {
   if (s_pending_toggle_timer) {
     app_timer_cancel(s_pending_toggle_timer);
     s_pending_toggle_timer = NULL;
+  }
+  if (s_pending_project_click_timer) {
+    app_timer_cancel(s_pending_project_click_timer);
+    s_pending_project_click_timer = NULL;
   }
 #endif
   bitmap_layer_destroy(s_logo_layer);

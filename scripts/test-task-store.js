@@ -924,6 +924,10 @@ check('getActiveTasks(groupByProject=true) groups by project title, sorted, with
   // Groups sorted by title: "Groceries" < "No Project" < "Work"
   assert.deepStrictEqual(tasks.map((t) => t.id), ['g1', 'n1', 'w1']);
   assert.deepStrictEqual(tasks.map((t) => t.project), ['Groceries', 'No Project', 'Work']);
+  // Each row also carries its group's real project id (see main.c's
+  // project row / TASK_PROJECT_ID) - undefined for the synthetic "No
+  // Project" bucket, since no real project backs it.
+  assert.deepStrictEqual(tasks.map((t) => t.projectId), ['p2', undefined, 'p1']);
 });
 
 check('getActiveTasks(groupByProject=true) keeps a subtask in its parent\'s group', () => {
@@ -1174,6 +1178,59 @@ check('[SimpleCounter] Delete multiple SimpleCounters removes the counters', () 
     state
   );
   assert.deepStrictEqual(habits(state), []);
+});
+
+function noteEntry(actionType, actionPayload) {
+  return entry('NOTE', actionType, actionPayload);
+}
+
+check('[Note] Add Note then [Note] Update Note builds a merged note', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      noteEntry('[Note] Add Note', { note: { id: 'note1', projectId: 'p1', content: 'first', created: 1 } }),
+      noteEntry('[Note] Update Note', { note: { id: 'note1', changes: { content: 'first\n\nsecond' } } }),
+    ],
+    state
+  );
+  assert.strictEqual(state.note.note1.content, 'first\n\nsecond');
+  assert.strictEqual(state.note.note1.projectId, 'p1');
+});
+
+check('[Note] Delete Note removes the note', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      noteEntry('[Note] Add Note', { note: { id: 'note1', projectId: 'p1', content: 'x', created: 1 } }),
+      noteEntry('[Note] Delete Note', { id: 'note1', projectId: 'p1', isPinnedToToday: false }),
+    ],
+    state
+  );
+  assert.strictEqual(state.note.note1, undefined);
+});
+
+check('[Note] Move to other project reassigns projectId', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      noteEntry('[Note] Add Note', { note: { id: 'note1', projectId: 'p1', content: 'x', created: 1 } }),
+      noteEntry('[Note] Move to other project', { note: { id: 'note1' }, targetProjectId: 'p2' }),
+    ],
+    state
+  );
+  assert.strictEqual(state.note.note1.projectId, 'p2');
+});
+
+check('unrecognized NOTE actionType (reorder) is ignored, not thrown', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      noteEntry('[Note] Add Note', { note: { id: 'note1', projectId: 'p1', content: 'x', created: 1 } }),
+      noteEntry('[Note] Update Note Order', { ids: ['note1'], activeContextType: 'PROJECT', activeContextId: 'p1' }),
+    ],
+    state
+  );
+  assert.strictEqual(state.note.note1.content, 'x');
 });
 
 console.log('');
