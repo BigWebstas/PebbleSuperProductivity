@@ -1769,11 +1769,19 @@ Pebble.addEventListener('webviewclosed', function (e) {
   // The pairing page's own "Clear all data & resync" button, separate from
   // Save & sync - wipes the local replay cache without touching credentials/
   // options, then does a fresh full resync (isFirstSync in doSync() keys off
-  // exactly this state: lastSeq 0 and no cached tasks).
+  // exactly this state: lastSeq 0 and no cached tasks). Also clears
+  // sp_last_synced_at - if the immediate doSync() below doesn't get to
+  // finish before this JS session ends (e.g. backing out of the config page
+  // relaunches the watchapp's JS, firing a new 'ready' event) and that
+  // relaunch lands inside RECENT_SYNC_SKIP_MS of the *previous* (pre-clear)
+  // sync, the 'ready' handler would otherwise skip the real sync and push
+  // the now-empty cache straight to the watch instead of forcing a fresh
+  // download.
   if (result.clearData) {
     localStorage.removeItem('sp_entities');
     localStorage.removeItem('sp_last_seq');
     localStorage.removeItem('sp_vector_clock');
+    localStorage.removeItem('sp_last_synced_at');
     doSync();
     return;
   }
