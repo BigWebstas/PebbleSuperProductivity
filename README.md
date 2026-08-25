@@ -47,6 +47,13 @@ Productivity's own **SuperSync** server.
 
 See the [Releases page](https://github.com/BigWebstas/PebbleSuperProductivity/releases) for downloadable `.pbw` artifacts of each version.
 
+### [v0.6.19](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.19)
+- Add project notes: when "group tasks by project" is on, double-click Select on a project row to view (and long-select to append to) its notes, same as a task's.
+- Show a task's tags above its notes in the notes overlay (double-click Select on a task).
+- Always show the tags section in the notes overlay, saying "No tags for this task"/"No tags for this project" instead of hiding it when there are none, mirroring the notes body's own "(No notes for this task)" placeholder.
+- Remove the "Show completed habits last" and "Hide completed habits" settings - habits now always sort plain alphabetically.
+- Skip a redundant full sync when reopening the app within 5 minutes of the last successful one, pushing the already-fresh cached list to the watch instead.
+
 ### [v0.6.18](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.18)
 - Add a "Complete main task when all subtasks are done" setting (off by default), mirroring the real app's own auto-complete-parent behavior.
 - Fix an auto-completed parent task vanishing from the watch's list without ever showing "Done" when paired with "Hide completed tasks".
