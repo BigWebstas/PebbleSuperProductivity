@@ -47,6 +47,9 @@ Productivity's own **SuperSync** server.
 
 See the [Releases page](https://github.com/BigWebstas/PebbleSuperProductivity/releases) for downloadable `.pbw` artifacts of each version.
 
+### [v0.6.20](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.20)
+- Fix "Clear all data & resync" sometimes leaving the watch showing stale/blank data instead of forcing a fresh sync, if reopened within 5 minutes of the previous sync.
+
 ### [v0.6.19](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.19)
 - Add project notes: when "group tasks by project" is on, double-click Select on a project row to view (and long-select to append to) its notes, same as a task's.
 - Show a task's tags above its notes in the notes overlay (double-click Select on a task).
