@@ -356,29 +356,34 @@ static Window *s_notes_window;
 static StatusBarLayer *s_notes_status_bar;
 static ScrollLayer *s_notes_scroll_layer;
 // A fixed header sitting ABOVE s_notes_scroll_layer (not inside it), showing
-// "Tags: urgent, home" on a colored background for a task with tags (empty
-// string, zero height, invisible otherwise - see show_notes_overlay) -
-// stays on screen while the notes body scrolls underneath it, rather than
-// scrolling away together with the notes as one block. A plain custom-drawn
-// Layer (not TextLayer) - matches menu_draw_row's own fill-then-draw-text
-// pattern elsewhere in this file, since TextLayer has no padding/inset
-// concept of its own and a colored banner reads cramped with text flush to
-// its edges. Kept as a plain always-local text line rather than baked into
+// "Tags: urgent, home" (or NOTES_TAGS_EMPTY_TEXT when the task has none) on
+// a colored background - stays on screen while the notes body scrolls
+// underneath it, rather than scrolling away together with the notes as one
+// block. Shown for ANY task, tagged or not (see notes_tags_layer_draw) -
+// zero height/invisible only for a project subject (see
+// show_project_notes_overlay), since the real app has no tags-on-project
+// concept for this to report on at all - that's a fundamentally different
+// case from a task that's merely untagged. A plain custom-drawn Layer (not
+// TextLayer) - matches menu_draw_row's own fill-then-draw-text pattern
+// elsewhere in this file, since TextLayer has no padding/inset concept of
+// its own and a colored banner reads cramped with text flush to its edges.
+// Kept as a plain always-local text line rather than baked into
 // s_notes_full_text the way NOTES_HEADER is, since it has to appear even
 // when the fetch ends up EMPTY/loading/timed-out - unlike notes content,
-// tags are already fully known before the fetch even starts. No such line
-// for a project subject (see show_project_notes_overlay) - the real app has
-// no tags-on-project concept.
+// tags are already fully known before the fetch even starts.
 static Layer *s_notes_tags_layer;
-// Just the comma-joined tag names now - NOT prefixed with "Tags: " the way
-// this used to be, since that label is drawn in its own bold font (see
-// NOTES_TAGS_LABEL/notes_tags_layer_draw) and graphics_draw_text can't mix
-// two font weights in a single call. Kept on its own line below the label
-// rather than packed onto the same line before it, so the label can stay a
-// fixed one-liner regardless of how many lines the (possibly long,
-// wrapping) tag list itself needs.
+// Just the comma-joined tag names, empty when the task has none (see
+// NOTES_TAGS_EMPTY_TEXT, substituted in at draw time - not baked in here,
+// so this stays a plain reflection of task->tags) - NOT prefixed with
+// "Tags: " the way this used to be, since that label is drawn in its own
+// bold font (see NOTES_TAGS_LABEL/notes_tags_layer_draw) and
+// graphics_draw_text can't mix two font weights in a single call. Kept on
+// its own line below the label rather than packed onto the same line
+// before it, so the label can stay a fixed one-liner regardless of how many
+// lines the (possibly long, wrapping) tag list itself needs.
 static char s_notes_tags_line[MAX_TASK_TAGS_LEN + 16] = "";
 #define NOTES_TAGS_LABEL "Tags:"
+#define NOTES_TAGS_EMPTY_TEXT "No tags for this task"
 #define NOTES_TAGS_BG_COLOR GColorYellow
 #define NOTES_TAGS_PADDING_X 6
 #define NOTES_TAGS_PADDING_Y 4
@@ -2297,18 +2302,29 @@ static int16_t measure_notes_text_height(int16_t width, const char *text) {
   return size.h + margin;
 }
 
+// What to actually show on the names line - the real comma-joined tags, or
+// NOTES_TAGS_EMPTY_TEXT for a legitimately untagged task (not the same as
+// "no tags header at all", which is a project subject instead - see
+// s_notes_tags_layer's own comment). Shared by measure_notes_tags_parts and
+// notes_tags_layer_draw so what gets measured and what gets drawn can never
+// disagree.
+static const char *notes_tags_display_line(void) {
+  return s_notes_tags_line[0] != '\0' ? s_notes_tags_line : NOTES_TAGS_EMPTY_TEXT;
+}
+
 // Measures the bold "Tags:" label and the (possibly multi-line, word-
-// wrapped) tag names separately, given the already-padded content width -
-// shared by render_notes_overlay_content (which only needs the combined
-// total, to size s_notes_tags_layer's frame) and notes_tags_layer_draw
-// (which needs each piece's own height, to know where the names text
-// starts) so the two can never disagree about how tall either piece is.
+// wrapped) tag names/placeholder separately, given the already-padded
+// content width - shared by render_notes_overlay_content (which only needs
+// the combined total, to size s_notes_tags_layer's frame) and
+// notes_tags_layer_draw (which needs each piece's own height, to know where
+// the names text starts) so the two can never disagree about how tall
+// either piece is.
 static void measure_notes_tags_parts(int16_t content_w, int16_t *out_label_h, int16_t *out_names_h) {
   GSize label_size = graphics_text_layout_get_content_size(
       NOTES_TAGS_LABEL, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
       GRect(0, 0, content_w, 2000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
   GSize names_size = graphics_text_layout_get_content_size(
-      s_notes_tags_line, fonts_get_system_font(FONT_KEY_GOTHIC_18),
+      notes_tags_display_line(), fonts_get_system_font(FONT_KEY_GOTHIC_18),
       GRect(0, 0, content_w, 2000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
   *out_label_h = label_size.h;
   *out_names_h = names_size.h;
@@ -2330,13 +2346,15 @@ static void render_notes_overlay_content(void) {
   // The tags line is a fixed header OUTSIDE the ScrollLayer (see
   // notes_window_load) - stays on screen while the notes body scrolls
   // underneath it, rather than scrolling away together with the notes as
-  // one block. Zero height (and so no visible gap) when there's nothing to
-  // show, same "absent means nothing to show" convention as the due-time/
-  // tracked-time task-row subtitle segments. Measured against the padded
-  // width (see notes_tags_layer_draw) so the wrap point matches what's
-  // actually drawn, not the full unpadded layer width.
+  // one block. Shown for any TASK subject, tagged or not (an untagged task
+  // gets NOTES_TAGS_EMPTY_TEXT via notes_tags_display_line, same "say so
+  // explicitly" convention as NOTES_EMPTY_TEXT for the notes body itself) -
+  // zero height (no visible gap) only for a PROJECT subject, which has no
+  // tags concept to report on at all. Measured against the padded width
+  // (see notes_tags_layer_draw) so the wrap point matches what's actually
+  // drawn, not the full unpadded layer width.
   int16_t tags_height = 0;
-  if (s_notes_tags_line[0] != '\0') {
+  if (!s_notes_overlay_is_project) {
     int16_t label_h, names_h;
     measure_notes_tags_parts(s_notes_content_bounds.size.w - NOTES_TAGS_PADDING_X * 2, &label_h, &names_h);
     tags_height = label_h + names_h + NOTES_TAGS_PADDING_Y * 2;
@@ -3556,15 +3574,16 @@ static void notes_window_click_config_provider(void *context) {
 }
 
 // Fills s_notes_tags_layer's own bounds with NOTES_TAGS_BG_COLOR and draws
-// the bold "Tags:" label followed by the (regular-weight) tag names on the
-// line(s) below it - same "fill background then draw padded text" pattern
-// menu_draw_row already uses for the Resync/Habits/Add Task/project rows
-// elsewhere in this file, since TextLayer has no padding/inset concept of
-// its own. Two separate graphics_draw_text calls (not one string) since a
-// single call can't mix two font weights - see s_notes_tags_line's own
+// the bold "Tags:" label followed by the (regular-weight) tag names - or
+// NOTES_TAGS_EMPTY_TEXT for an untagged task, see notes_tags_display_line -
+// on the line(s) below it, same "fill background then draw padded text"
+// pattern menu_draw_row already uses for the Resync/Habits/Add Task/project
+// rows elsewhere in this file, since TextLayer has no padding/inset concept
+// of its own. Two separate graphics_draw_text calls (not one string) since
+// a single call can't mix two font weights - see s_notes_tags_line's own
 // comment. A no-op draw when there's nothing to show (zero-height frame -
-// see render_notes_overlay_content), so this never fires when the layer is
-// invisible anyway.
+// see render_notes_overlay_content), so this never fires for a project
+// subject, which has no tags concept at all.
 static void notes_tags_layer_draw(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   graphics_context_set_fill_color(ctx, NOTES_TAGS_BG_COLOR);
@@ -3580,7 +3599,7 @@ static void notes_tags_layer_draw(Layer *layer, GContext *ctx) {
                       GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
   GRect names_rect = GRect(NOTES_TAGS_PADDING_X, NOTES_TAGS_PADDING_Y + label_h, content_w, names_h);
-  graphics_draw_text(ctx, s_notes_tags_line, fonts_get_system_font(FONT_KEY_GOTHIC_18), names_rect,
+  graphics_draw_text(ctx, notes_tags_display_line(), fonts_get_system_font(FONT_KEY_GOTHIC_18), names_rect,
                       GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 }
 
@@ -3600,11 +3619,12 @@ static void notes_window_load(Window *window) {
 
   // A fixed header (see s_notes_tags_layer's own comment) - added directly
   // to window_layer, NOT the ScrollLayer, so it stays put while the notes
-  // body scrolls beneath it. Zero height/invisible when s_notes_tags_line
-  // is empty, so it costs nothing for a task with no tags or for a project
-  // subject. Provisional zero-height frame here - render_notes_overlay_
-  // content (called at the end of this function) sizes it for real and
-  // slices the ScrollLayer's own frame to start right below it.
+  // body scrolls beneath it. Zero height/invisible only for a project
+  // subject, which has no tags concept to report on at all - shown (with
+  // NOTES_TAGS_EMPTY_TEXT) even for a task with no tags of its own.
+  // Provisional zero-height frame here - render_notes_overlay_content
+  // (called at the end of this function) sizes it for real and slices the
+  // ScrollLayer's own frame to start right below it.
   s_notes_tags_layer = layer_create(GRect(content_bounds.origin.x, content_bounds.origin.y,
                                            content_bounds.size.w, 0));
   layer_set_update_proc(s_notes_tags_layer, notes_tags_layer_draw);
