@@ -96,6 +96,19 @@ var NOTE_APPEND_DIVIDER = '•••••••••••••••••�
 // so it belongs on outgoing ops for correctness regardless.
 var SCHEMA_VERSION = 4;
 
+// Opening the watchapp (Pebble's 'ready' event - see the bottom of this
+// file) used to always trigger a full doSync() no matter how recently one
+// had already completed, including the ordinary case of just backing out
+// to the watchface and reopening the app a few seconds later - a real
+// network round-trip (and, on an E2EE account, real decrypt work) for data
+// that can't meaningfully have changed. If the last sync finished within
+// this window, the 'ready' handler pushes the already-fresh cached list
+// straight to the watch instead (see pushCachedStateToWatch) rather than
+// hitting the network again. Any watch-initiated action (toggle, resync
+// row, etc.) still triggers its own real sync regardless of this window -
+// only the passive "app just opened" trigger is throttled.
+var RECENT_SYNC_SKIP_MS = 5 * 60 * 1000;
+
 // ---------------- local storage helpers ----------------
 
 function loadConfig() {
@@ -129,6 +142,21 @@ function loadLastSeq() {
 
 function saveLastSeq(seq) {
   localStorage.setItem('sp_last_seq', String(seq));
+}
+
+// When doSync() last actually completed (successfully reached the server) -
+// see RECENT_SYNC_SKIP_MS's own comment for what this gates. Deliberately
+// separate from sp_last_seq: that tracks sync PROGRESS (how far through the
+// account's op history), not WHEN it last ran - a long-idle watch with an
+// already-fully-caught-up lastSeq would otherwise look "recently synced"
+// forever, which is exactly the stale-data case this is meant to avoid.
+function loadLastSyncedAt() {
+  var v = localStorage.getItem('sp_last_synced_at');
+  return v ? parseInt(v, 10) : 0;
+}
+
+function saveLastSyncedAt(ms) {
+  localStorage.setItem('sp_last_synced_at', String(ms));
 }
 
 function getOrCreateClientId() {
@@ -450,6 +478,22 @@ function scheduleAutoSync(config) {
   }
 }
 
+// Pushes whatever's already in the local cache (loadState()) straight to
+// the watch - no network involved. Shared by doSync()'s own success path
+// (after a real sync just refreshed that cache) and the 'ready' handler's
+// recent-sync skip path (see RECENT_SYNC_SKIP_MS), so the two can't drift
+// out of sync with each other on what "push the current state" means.
+function pushCachedStateToWatch(config) {
+  var state = loadState();
+  var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks);
+  sendTaskListToWatch(tasks);
+  if (config.enableHabits !== false) {
+    var habits = store.getActiveHabits(state, MAX_HABITS);
+    sendHabitListToWatch(habits);
+  }
+  sendStatus(STATUS_OK);
+}
+
 function doSync() {
   if (syncInFlight) {
     return Promise.resolve();
@@ -593,13 +637,8 @@ function doSync() {
       saveState(state);
       saveLastSeq(lastSeq);
       saveVectorClock(vectorClock);
-      var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks);
-      sendTaskListToWatch(tasks);
-      if (config.enableHabits !== false) {
-        var habits = store.getActiveHabits(state, MAX_HABITS, !!config.habitSortDoneLast, !!config.hideDoneHabits);
-        sendHabitListToWatch(habits);
-      }
-      sendStatus(STATUS_OK);
+      saveLastSyncedAt(Date.now());
+      pushCachedStateToWatch(config);
     })
     .catch(function (err) {
       console.log('[pkjs] sync failed: ' + (err && err.message));
@@ -1616,8 +1655,19 @@ function handleFinishDay() {
 
 Pebble.addEventListener('ready', function () {
   console.log('[pkjs] ready');
-  doSync();
-  scheduleAutoSync(loadConfig());
+  var config = loadConfig();
+  var lastSyncedAt = loadLastSyncedAt();
+  // See RECENT_SYNC_SKIP_MS's own comment - skips a real network sync only
+  // for the passive "app just opened" trigger, and only when paired (an
+  // unpaired watch has never actually synced, so lastSyncedAt is always 0
+  // there and this condition can't be true).
+  if (config && config.jwt && lastSyncedAt && Date.now() - lastSyncedAt < RECENT_SYNC_SKIP_MS) {
+    console.log('[pkjs] skipping sync on open, last synced ' + Math.round((Date.now() - lastSyncedAt) / 1000) + 's ago');
+    pushCachedStateToWatch(config);
+  } else {
+    doSync();
+  }
+  scheduleAutoSync(config);
 });
 
 Pebble.addEventListener('appmessage', function (e) {
@@ -1695,8 +1745,6 @@ Pebble.addEventListener('showConfiguration', function () {
       projects: projects,
       enableHabits: config.enableHabits !== false,
       enableAddTask: config.enableAddTask !== false,
-      habitSortDoneLast: !!config.habitSortDoneLast,
-      hideDoneHabits: !!config.hideDoneHabits,
       backlightMode: config.backlightMode || 0,
     }
   );
@@ -1756,8 +1804,6 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableHabits: !!result.enableHabits,
     enableAddTask: !!result.enableAddTask,
     autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
-    habitSortDoneLast: !!result.habitSortDoneLast,
-    hideDoneHabits: !!result.hideDoneHabits,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
   };
   saveConfig(newConfig);
