@@ -45,27 +45,83 @@ Productivity's own **SuperSync** server.
 
 ## Changelog
 
-- **v0.6.18** — add a "Complete main task when all subtasks are done" setting (off by default), mirroring the real app's own auto-complete-parent behavior; fix an auto-completed parent task vanishing from the watch's list without ever showing "Done" when paired with "Hide completed tasks"
-- **v0.6.17** — add a backlight setting (always-on, or relight-and-hold for a custom duration after any button press); double-click Select on a task to view its notes; a task marked done on the watch now stays visible for ~5 seconds before disappearing when "Hide completed tasks" is on, instead of vanishing as soon as the next auto-sync lands; "Sync automatically on a timer" now actually syncs while the app is closed too, via the watch periodically waking itself up (a brief screen flash each time, not a silent background refresh) - not available on aplite (RAM)
-- **v0.6.16** — add a "Hide completed tasks" setting: removes a done task from the watch's list entirely instead of showing it dimmed (a done subtask under a still-open parent is hidden individually; a done main task hides its whole subtask block along with it). Off by default.
-- **v0.6.15** — raise the task/habit limits to 50/16 on emery (Pebble Time 2); add RepeatedCountdownReminder habit support with its own long-select-to-start/stop timer (Select pauses/resumes it) - not available on aplite; add a background auto-sync-on-a-timer setting; retry a failed watch↔phone send a few times before showing a sync error, instead of failing on the first hiccup; fix a habit list silently truncated to 8 even on platforms that could show more; habits now sort alphabetically by default, with a setting to restore the old not-done-before-done grouping
-- **v0.6.14** — close the app automatically once Finish Day's archive send is confirmed; bigger subtitle text on task/habit rows; habit-page text stays black when selected; subtask marker changed from `~` to `»`
-- **v0.6.13** — add a "Finish Day" row (long-select, always last in the task list) that archives every currently-done task; not available on aplite (RAM constraints)
-- **v0.6.12** — StopWatch-type habits now show a live timer (long-select to start/stop), formatted like a task's spent/estimate subtitle; not available on aplite (RAM constraints)
-- **v0.6.11** — change the Add Task row's icon from a mic glyph to a plus sign
-- **v0.6.10** — fix watch-uploaded task/time/habit ops silently failing to apply on desktop (missing `entityChanges` on the op payload)
-- **v0.6.9** — fix voice-added tasks not showing under Today Only, add settings to disable Habits/Add Task
-- **v0.6.8** — fix "Add to Today" leaving a stale `dueWithTime` that hid the task from Today Only
-- **v0.6.7** — add voice-dictated task creation via a new "Add Task" row
-- **v0.6.6** — keep the version footer's text black instead of gray
-- **v0.6.5** — add a version footer row to the task list, stop dimming done habit titles
-- **v0.6.4** — fix a task planned-for-today (no time) not syncing to the watch, change Resync's idle subtitle to "Synced"
-- **v0.6.3** — keep habit count visible alongside "Done", match selected-row color to nav
-- **v0.6.2** — habit increment/decrement, row icons, task time estimate, sync message
-- **v0.6.1** — fix todayOnly wrongly hiding a backlog task planned for today
-- **v0.6.0** — add a habits page
+See the [Releases page](https://github.com/BigWebstas/PebbleSuperProductivity/releases) for downloadable `.pbw` artifacts of each version.
 
-See [GitHub Releases](https://github.com/BigWebstas/PebbleSuperProductivity/releases) for the full history.
+### [v0.6.18](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.18)
+- Add a "Complete main task when all subtasks are done" setting (off by default), mirroring the real app's own auto-complete-parent behavior.
+- Fix an auto-completed parent task vanishing from the watch's list without ever showing "Done" when paired with "Hide completed tasks".
+
+### [v0.6.17](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.17)
+- Add a backlight setting (always-on, or relight-and-hold for a custom duration after any button press).
+- Double-click Select on a task to view its notes.
+- A task marked done on the watch now stays visible for ~5 seconds before disappearing when "Hide completed tasks" is on, instead of vanishing as soon as the next auto-sync lands.
+- "Sync automatically on a timer" now actually syncs while the app is closed too, via the watch periodically waking itself up (a brief screen flash each time, not a silent background refresh) - not available on aplite (RAM).
+
+### [v0.6.16](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.16)
+- Add a "Hide completed tasks" setting: removes a done task from the watch's list entirely instead of showing it dimmed (a done subtask under a still-open parent is hidden individually; a done main task hides its whole subtask block along with it). Off by default.
+
+### [v0.6.15](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.15)
+- Raise the task/habit limits to 50/16 on emery (Pebble Time 2).
+- Add RepeatedCountdownReminder habit support with its own long-select-to-start/stop timer (Select pauses/resumes it) - not available on aplite.
+- Add a background auto-sync-on-a-timer setting.
+- Retry a failed watch↔phone send a few times before showing a sync error, instead of failing on the first hiccup.
+- Fix a habit list silently truncated to 8 even on platforms that could show more.
+- Habits now sort alphabetically by default, with a setting to restore the old not-done-before-done grouping.
+
+### [v0.6.14](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.14)
+- Close the app automatically once Finish Day's archive send is confirmed.
+- Bigger subtitle text on task/habit rows.
+- Habit-page text stays black when selected.
+- Subtask marker changed from `~` to `»`.
+
+### [v0.6.13](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.13)
+- Add a "Finish Day" row (long-select, always last in the task list) that archives every currently-done task; not available on aplite (RAM constraints).
+
+### [v0.6.12](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.12)
+- StopWatch-type habits now show a live timer (long-select to start/stop), formatted like a task's spent/estimate subtitle; not available on aplite (RAM constraints).
+
+### [v0.6.11](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.11)
+- Change the Add Task row's icon from a mic glyph to a plus sign.
+
+### [v0.6.10](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.10)
+- Fix watch-uploaded task/time/habit ops silently failing to apply on desktop (missing `entityChanges` on the op payload).
+
+### [v0.6.9](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.9)
+- Fix voice-added tasks not showing under Today Only.
+- Add settings to disable Habits/Add Task.
+
+### [v0.6.8](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.8)
+- Fix "Add to Today" leaving a stale `dueWithTime` that hid the task from Today Only.
+
+### [v0.6.7](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.7)
+- Add voice-dictated task creation via a new "Add Task" row.
+
+### v0.6.6
+- Keep the version footer's text black instead of gray.
+
+### [v0.6.5](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.5)
+- Add a version footer row to the task list.
+- Stop dimming done habit titles.
+
+### [v0.6.4](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.4)
+- Fix a task planned-for-today (no time) not syncing to the watch.
+- Change Resync's idle subtitle to "Synced".
+
+### [v0.6.3](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.3)
+- Keep habit count visible alongside "Done".
+- Match selected-row color to nav.
+
+### [v0.6.2](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.2)
+- Habit increment/decrement.
+- Row icons.
+- Task time estimate.
+- Sync message.
+
+### [v0.6.1](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.1)
+- Fix todayOnly wrongly hiding a backlog task planned for today.
+
+### [v0.6.0](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.0)
+- Add a habits page.
 
 ## Known limitations
 
