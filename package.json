@@ -100,7 +100,8 @@
       "NOTE_TOTAL_LEN",
       "NOTE_CHUNK_TEXT",
       "TASK_PROJECT_ID",
-      "PROJECT_ID"
+      "PROJECT_ID",
+      "TASK_TAGS"
     ]
   }
 }

@@ -345,6 +345,14 @@ function sendTaskAt(tasks, index) {
     // as TASK_DUE_MIN/TASK_TIME_SPENT_MS below.
     dict.TASK_PROJECT_ID = String(t.projectId).slice(0, 31);
   }
+  if (t.tags) {
+    // Comma-joined tag names (see task-store.js's tagTitlesFor) for the
+    // watch's read-only tags overlay - long-select Back on a task row, see
+    // main.c's show_tags_overlay. Sent directly (not fetched on demand the
+    // way notes are) since resolved names are short and already fully
+    // available locally.
+    dict.TASK_TAGS = String(t.tags).slice(0, 63);
+  }
   if (t.dueWithTime) {
     // Minutes since local midnight, not the raw ms timestamp or a
     // pre-formatted string - the watch has its own 12h/24h clock

@@ -41,6 +41,7 @@
 #define KEY_NOTE_CHUNK_TEXT MESSAGE_KEY_NOTE_CHUNK_TEXT
 #define KEY_TASK_PROJECT_ID MESSAGE_KEY_TASK_PROJECT_ID
 #define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
+#define KEY_TASK_TAGS MESSAGE_KEY_TASK_TAGS
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -130,6 +131,12 @@ enum {
 // keeps the plain instant single-click toggle it's always had rather than
 // paying a universal double-click commit delay for a feature it can't
 // display.
+// Unlike notes, tag names are short and already fully resolved phone-side
+// (see task-store.js's tagTitlesFor) - no fetch-on-demand machinery needed,
+// so this IS a fixed per-task field, sized to comfortably fit a handful of
+// short tag names comma-joined (matches the phone's own TASK_TAGS truncation
+// to 63 chars in index.js's sendTaskAt).
+#define MAX_TASK_TAGS_LEN 64
 
 typedef struct {
   char id[MAX_ID_LEN];
@@ -142,6 +149,12 @@ typedef struct {
   // notes feature (see MAX_NOTES_LEN's own comment) rather than carried on
   // every Task there for no reachable use.
   char project_id[MAX_PROJECT_ID_LEN];
+  // Comma-joined tag names, '' if untagged - shown as a line above the
+  // notes text in the notes overlay (double-click Select - see
+  // show_notes_overlay/s_notes_tags_line). Aplite-gated same as project_id
+  // above: another MAX_TASK_TAGS_LEN * MAX_TASKS * 2 (double-buffered)
+  // bytes aplite has no margin for.
+  char tags[MAX_TASK_TAGS_LEN];
 #endif
   bool done;
   int due_min;       // minutes since local midnight, or -1 when the task has no dueWithTime
@@ -342,6 +355,17 @@ static bool s_error_overlay_active = false;
 static Window *s_notes_window;
 static StatusBarLayer *s_notes_status_bar;
 static ScrollLayer *s_notes_scroll_layer;
+// A short second TextLayer stacked above s_notes_layer inside the same
+// ScrollLayer, showing "Tags: urgent, home" for a task with tags (empty
+// string, zero height, invisible otherwise - see show_notes_overlay). Kept
+// as a plain always-local text line rather than baked into s_notes_full_text
+// the way NOTES_HEADER is, since it has to appear even when the fetch ends
+// up EMPTY/loading/timed-out - unlike notes content, tags are already fully
+// known before the fetch even starts. No such line for a project subject
+// (see show_project_notes_overlay) - the real app has no tags-on-project
+// concept.
+static TextLayer *s_notes_tags_layer;
+static char s_notes_tags_line[MAX_TASK_TAGS_LEN + 16] = "";
 static TextLayer *s_notes_layer;
 static bool s_notes_overlay_active = false;
 // Which task OR project the notes overlay is currently showing - a plain id
@@ -2252,32 +2276,50 @@ static int16_t measure_notes_text_height(int16_t width, const char *text) {
   return size.h + margin;
 }
 
-// Applies s_notes_display_text to the already-created TextLayer/ScrollLayer
-// and resizes both to match - shared by notes_window_load (first open) and
-// every later update (a fetch landing, timing out, or a fresh note-append's
-// re-fetch). A no-op if the window isn't loaded yet (s_notes_layer is only
-// non-NULL between notes_window_load/unload) - notes_window_load itself
-// calls this once it creates the layers, picking up whatever
-// s_notes_display_text already holds at that point.
+// Applies s_notes_display_text (and s_notes_tags_line, if any - see
+// show_notes_overlay) to the already-created TextLayers/ScrollLayer and
+// resizes everything to match - shared by notes_window_load (first open)
+// and every later update (a fetch landing, timing out, or a fresh
+// note-append's re-fetch). A no-op if the window isn't loaded yet
+// (s_notes_layer is only non-NULL between notes_window_load/unload) -
+// notes_window_load itself calls this once it creates the layers, picking
+// up whatever s_notes_display_text/s_notes_tags_line already hold at that
+// point.
 static void render_notes_overlay_content(void) {
   if (!s_notes_layer) {
     return;
   }
+  GRect scroll_bounds = layer_get_bounds(scroll_layer_get_layer(s_notes_scroll_layer));
+
+  // The tags line sits above the notes text, both scrolling together as one
+  // block - zero height (and so no visible gap) when there's nothing to
+  // show, same "absent means nothing to show" convention as the due-time/
+  // tracked-time task-row subtitle segments.
+  text_layer_set_text(s_notes_tags_layer, s_notes_tags_line);
+  int16_t tags_height = 0;
+  if (s_notes_tags_line[0] != '\0') {
+    GSize tags_size = graphics_text_layout_get_content_size(
+        s_notes_tags_line, fonts_get_system_font(FONT_KEY_GOTHIC_18),
+        GRect(0, 0, scroll_bounds.size.w, 2000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
+    tags_height = tags_size.h;
+  }
+  layer_set_frame(text_layer_get_layer(s_notes_tags_layer), GRect(0, 0, scroll_bounds.size.w, tags_height));
+
   text_layer_set_text(s_notes_layer, s_notes_display_text);
   // The new text can be a very different length than what was there before
   // (a loading placeholder swapping for the real thing, or a fresh
   // note-append) - resize the scrollable content to match and snap back to
   // the top rather than leaving the scroll position mid-way through text
   // that may no longer be there.
-  GRect scroll_bounds = layer_get_bounds(scroll_layer_get_layer(s_notes_scroll_layer));
   int16_t text_height = measure_notes_text_height(scroll_bounds.size.w, s_notes_display_text);
-  if (text_height < scroll_bounds.size.h) {
-    text_height = scroll_bounds.size.h;
+  if (text_height < scroll_bounds.size.h - tags_height) {
+    text_height = scroll_bounds.size.h - tags_height;
   }
   GRect text_frame = layer_get_frame(text_layer_get_layer(s_notes_layer));
+  text_frame.origin.y = tags_height;
   text_frame.size.h = text_height;
   layer_set_frame(text_layer_get_layer(s_notes_layer), text_frame);
-  scroll_layer_set_content_size(s_notes_scroll_layer, GSize(scroll_bounds.size.w, text_height));
+  scroll_layer_set_content_size(s_notes_scroll_layer, GSize(scroll_bounds.size.w, tags_height + text_height));
   scroll_layer_set_content_offset(s_notes_scroll_layer, GPointZero, false);
 }
 
@@ -2359,16 +2401,28 @@ static void show_notes_overlay_for(const char *id, bool is_project) {
 }
 
 // Shows a task's notes (double-click Select on it - see
-// pending_toggle_timer_callback/menu_select_click).
+// pending_toggle_timer_callback/menu_select_click). s_notes_tags_line is
+// set here (synchronously - unlike notes, tag names are already fully
+// resolved and sent with every task, see Task.tags's own comment) rather
+// than baked into the fetched notes text, so it stays visible above the
+// notes content regardless of whether that fetch ends up with real text,
+// "(No notes...)", or a timeout - see render_notes_overlay_content.
 static void show_notes_overlay(Task *task) {
+  if (task->tags[0] != '\0') {
+    snprintf(s_notes_tags_line, sizeof(s_notes_tags_line), "Tags: %s", task->tags);
+  } else {
+    s_notes_tags_line[0] = '\0';
+  }
   show_notes_overlay_for(task->id, false);
 }
 
 // Shows a project's notes (double-click Select on its project row - see
 // pending_project_click_timer_callback/menu_select_click). See
 // MSG_PROJECT_NOTE_APPEND's own comment for what "a project's notes" means
-// here, given the real app has no single notes field on a Project.
+// here, given the real app has no single notes field on a Project. No tags
+// line here - the real app has no tags-on-project concept either.
 static void show_project_notes_overlay(TaskGroup *group) {
+  s_notes_tags_line[0] = '\0';
   show_notes_overlay_for(group->project_id, true);
 }
 
@@ -2574,6 +2628,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         strncpy(s_incoming[idx].project_id, project_id_tuple ? project_id_tuple->value->cstring : "",
                 MAX_PROJECT_ID_LEN - 1);
         s_incoming[idx].project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+        Tuple *tags_tuple = dict_find(iterator, KEY_TASK_TAGS);
+        strncpy(s_incoming[idx].tags, tags_tuple ? tags_tuple->value->cstring : "", MAX_TASK_TAGS_LEN - 1);
+        s_incoming[idx].tags[MAX_TASK_TAGS_LEN - 1] = '\0';
       }
 #endif
       s_incoming[idx].done = done_tuple && done_tuple->value->int32 != 0;
@@ -3474,6 +3531,18 @@ static void notes_window_load(Window *window) {
     .click_config_provider = notes_window_click_config_provider,
   });
 
+  // A short, bold-free tags line stacked above the notes text (see
+  // render_notes_overlay_content) - zero height/invisible when
+  // s_notes_tags_line is empty, so it costs nothing for a task with no
+  // tags or for a project subject.
+  s_notes_tags_layer = text_layer_create(GRect(0, 0, content_bounds.size.w, 0));
+  text_layer_set_text_alignment(s_notes_tags_layer, GTextAlignmentLeft);
+  text_layer_set_font(s_notes_tags_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_background_color(s_notes_tags_layer, GColorWhite);
+  text_layer_set_text_color(s_notes_tags_layer, GColorBlack);
+  text_layer_set_overflow_mode(s_notes_tags_layer, GTextOverflowModeWordWrap);
+  scroll_layer_add_child(s_notes_scroll_layer, text_layer_get_layer(s_notes_tags_layer));
+
   // Left-aligned and top-anchored (unlike the centered, short status text
   // s_error_layer uses) since this is body text, not a status message -
   // word-wrap fills top-down from there. A smaller font than the error
@@ -3500,6 +3569,8 @@ static void notes_window_load(Window *window) {
 }
 
 static void notes_window_unload(Window *window) {
+  text_layer_destroy(s_notes_tags_layer);
+  s_notes_tags_layer = NULL;
   text_layer_destroy(s_notes_layer);
   s_notes_layer = NULL;
   scroll_layer_destroy(s_notes_scroll_layer);

@@ -1233,6 +1233,65 @@ check('unrecognized NOTE actionType (reorder) is ignored, not thrown', () => {
   assert.strictEqual(state.note.note1.content, 'x');
 });
 
+function tagEntry(actionType, actionPayload) {
+  return entry('TAG', actionType, actionPayload);
+}
+
+check('[Tag] Add Tag then [Tag] Update Tag builds a merged tag', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tag1', title: 'urgent' } }),
+      tagEntry('[Tag] Update Tag', { tag: { id: 'tag1', changes: { title: 'urgent!' } } }),
+    ],
+    state
+  );
+  assert.strictEqual(state.tag.tag1.title, 'urgent!');
+});
+
+check('[Tag] Delete Tag / Delete multiple Tags removes tags', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tag1', title: 'a' } }),
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tag2', title: 'b' } }),
+      tagEntry('[Tag] Delete Tag', { id: 'tag1' }),
+      tagEntry('[Tag] Delete multiple Tags', { ids: ['tag2'] }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(state.tag, {});
+});
+
+check('getActiveTasks resolves a task\'s tagIds to joined tag titles', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tag1', title: 'urgent' } }),
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tag2', title: 'home' } }),
+      addTask({ id: 't1', title: 'Fix sink', isDone: false, tagIds: ['tag1', 'tag2'] }),
+      addTask({ id: 't2', title: 'No tags here', isDone: false }),
+    ],
+    state
+  );
+  const tasks = active(state);
+  assert.strictEqual(tasks.find((t) => t.id === 't1').tags, 'urgent, home');
+  assert.strictEqual(tasks.find((t) => t.id === 't2').tags, undefined);
+});
+
+check('getActiveTasks skips a tag id with no matching TAG entity', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tag1', title: 'urgent' } }),
+      addTask({ id: 't1', title: 'Fix sink', isDone: false, tagIds: ['tag1', 'unknown-tag'] }),
+    ],
+    state
+  );
+  const tasks = active(state);
+  assert.strictEqual(tasks.find((t) => t.id === 't1').tags, 'urgent');
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);

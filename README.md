@@ -24,7 +24,7 @@ Productivity's own **SuperSync** server.
     * Click once to toggle Done/In-progress
     * Long hold to start time tracking when on tasks and habits
     * Long hold to append a note when on the notes screen
-    * Double click to show task and project notes
+    * Double click to show task and project notes, plus a task's tags (shown above its notes)
       * To show projects and project notes you must enable "Group tasks by project" in settings
 * Back returns to the prior screen
 

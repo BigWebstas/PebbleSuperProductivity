@@ -69,14 +69,15 @@ function msIsToday(ms) {
 }
 
 // state: { task: { [id]: {id, title, isDone, parentId?, projectId?,
-//                          __inBacklog?, ...} },
+//                          tagIds?, __inBacklog?, ...} },
 //          project: { [id]: {id, title, ...} },
 //          simpleCounter: { [id]: {id, title, isEnabled, type, countOnDay,
 //                                   streakMinValue?, isTrackStreaks?, ...} },
 //          note: { [id]: {id, projectId, isPinnedToToday, content, created,
-//                          modified, ...} } }
+//                          modified, ...} },
+//          tag: { [id]: {id, title, ...} } }
 function emptyState() {
-  return { task: {}, project: {}, simpleCounter: {}, note: {} };
+  return { task: {}, project: {}, simpleCounter: {}, note: {}, tag: {} };
 }
 
 function ensureCollection(state, entityType) {
@@ -489,6 +490,49 @@ function applyNoteAction(op, actionPayload, state) {
   }
 }
 
+// Resolves task.tagIds against the TAG entity collection replayed here
+// (tag.actions.ts, entityType 'TAG' - same generic op-log capture path
+// PROJECT/NOTE already use, no entity-specific meta-reducer). Only `title`
+// is needed for the watch's read-only tags overlay - see main.c's
+// show_tags_overlay/MSG_TASK_TAGS.
+function applyTagAction(op, actionPayload, state) {
+  var tags = ensureCollection(state, 'tag');
+  if (!actionPayload) {
+    return;
+  }
+  switch (op.actionType) {
+    case '[Tag] Add Tag':
+      if (actionPayload.tag && actionPayload.tag.id) {
+        tags[actionPayload.tag.id] = actionPayload.tag;
+      }
+      break;
+
+    case '[Tag] Update Tag':
+      if (actionPayload.tag && actionPayload.tag.id) {
+        tags[actionPayload.tag.id] = Object.assign({}, tags[actionPayload.tag.id], actionPayload.tag.changes);
+      }
+      break;
+
+    case '[Tag] Delete Tag':
+      if (actionPayload.id) {
+        delete tags[actionPayload.id];
+      }
+      break;
+
+    // NOT "...Delete Tags" - mirrors deleteSimpleCounters' own real action
+    // string literal, confirmed against the actual createAction() call
+    // rather than assumed from the plural naming pattern.
+    case '[Tag] Delete multiple Tags':
+      (actionPayload.ids || []).forEach(function (id) { delete tags[id]; });
+      break;
+
+    default:
+      // Reorder and advanced-config actions don't touch title - nothing to
+      // mirror.
+      break;
+  }
+}
+
 // "Habits" in the real app's UI are actually the SimpleCounter feature
 // (src/app/features/simple-counter/), entityType 'SIMPLE_COUNTER' - there is
 // no separate "HABIT" entity type. Confirmed against
@@ -610,11 +654,15 @@ function applyOperation(entry, state, crypto) {
       applyNoteAction(op, payload && payload.actionPayload, state);
       return;
     }
+    if (entityType === 'tag') {
+      applyTagAction(op, payload && payload.actionPayload, state);
+      return;
+    }
 
-    // Everything else (GLOBAL_CONFIG, TAG, PLUGIN_USER_DATA, ...) is
-    // unused by the watch's task list - kept as a best-effort flat CRUD
-    // merge (this project's original, unverified assumption) purely so
-    // unrelated entity types don't spam the "unhandled" log.
+    // Everything else (GLOBAL_CONFIG, PLUGIN_USER_DATA, ...) is unused by
+    // the watch's task list - kept as a best-effort flat CRUD merge (this
+    // project's original, unverified assumption) purely so unrelated
+    // entity types don't spam the "unhandled" log.
     switch (op.opType) {
       case 'CRT': {
         var created = ensureCollection(state, entityType);
@@ -669,6 +717,9 @@ function applyOperation(entry, state, crypto) {
         if (payload && payload.note && payload.note.entities) {
           state.note = payload.note.entities;
         }
+        if (payload && payload.tag && payload.tag.entities) {
+          state.tag = payload.tag.entities;
+        }
         break;
       default:
         console.log('[task-store] unhandled op type: ' + op.opType);
@@ -697,6 +748,23 @@ function isMainTask(t) {
 function projectTitleFor(state, task) {
   var project = task.projectId && state.project && state.project[task.projectId];
   return (project && project.title) || 'No Project';
+}
+
+// Resolves task.tagIds against state.tag, joined for the watch's read-only
+// tags overlay (long-select Back on a task row - see main.c's
+// show_tags_overlay/MSG_TASK_TAGS). A tag id with no matching entity (not
+// yet synced, or deleted) is silently skipped rather than surfacing a
+// blank/placeholder name.
+function tagTitlesFor(state, task) {
+  var ids = task.tagIds || [];
+  var tags = state.tag || {};
+  var names = [];
+  ids.forEach(function (id) {
+    if (tags[id] && tags[id].title) {
+      names.push(tags[id].title);
+    }
+  });
+  return names.join(', ');
 }
 
 function titleCompare(a, b) {
@@ -864,13 +932,13 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
     Object.keys(byProject).sort(titleCompare).forEach(function (name) {
       byProject[name].sort(withinGroupSort);
       byProject[name].forEach(function (t) {
-        pushTaskAndSubtasks(rows, allTasks, t, name, groupProjectIds[name], hideDone);
+        pushTaskAndSubtasks(rows, state, allTasks, t, name, groupProjectIds[name], hideDone);
       });
     });
   } else {
     mainTasks.sort(withinGroupSort);
     mainTasks.forEach(function (t) {
-      pushTaskAndSubtasks(rows, allTasks, t, '', '', hideDone);
+      pushTaskAndSubtasks(rows, state, allTasks, t, '', '', hideDone);
     });
   }
 
@@ -891,7 +959,7 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
 // (~) for exactly that reason, before this was re-tested more thoroughly.
 var SUBTASK_PREFIX = '    » ';
 
-function pushTaskAndSubtasks(rows, allTasks, t, groupName, groupProjectId, hideDone) {
+function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId, hideDone) {
   // t is already guaranteed a real title here - getActiveTasks filters
   // ghost (title-less) records out of mainTasks before this is ever
   // called (hideDone's own done-main-task filtering happens there too, for
@@ -909,12 +977,16 @@ function pushTaskAndSubtasks(rows, allTasks, t, groupName, groupProjectId, hideD
   // rides along on every row (not just once per group) so main.c's
   // recompute_groups() - which derives its per-group TaskGroup from
   // whichever task happens to be group.start - can read it off any task
-  // rather than needing a separate carrier.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
+  // rather than needing a separate carrier. tags, unlike notes, IS sent
+  // directly (not fetched on demand) - resolved tag names are short and
+  // already fully available locally once TAG entities have replayed, so
+  // there's no fetch round-trip worth avoiding the way there is for a
+  // task's full notes text.
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
     }
   });
 }
