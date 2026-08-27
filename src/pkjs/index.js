@@ -223,13 +223,64 @@ function incrementVectorClock(clock, clientId) {
 var cachedCrypto = null;
 var cachedPassword = null;
 
+// The per-salt derived-key cache, persisted across pkjs sessions (the JS VM
+// dies every time the watchapp closes, so the module-scope cache above only
+// covers repeat doSync() calls within one app session). Cleared alongside
+// sp_entities whenever credentials change - see the config-page handler.
+// Capped so a heavily multi-device account can't grow it without bound:
+// one entry per distinct client-session salt ever seen, ~70 bytes each.
+var KDF_KEY_CACHE_MAX = 100;
+
+function loadKdfKeys() {
+  try {
+    return JSON.parse(localStorage.getItem('sp_kdf_keys') || 'null') || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveKdfKey(b64salt, b64key) {
+  var map = loadKdfKeys();
+  if (map[b64salt] === b64key) {
+    return;
+  }
+  map[b64salt] = b64key;
+  var salts = Object.keys(map);
+  if (salts.length > KDF_KEY_CACHE_MAX) {
+    // Drop oldest-inserted entries (V8 preserves string-key insertion
+    // order) down to the cap - a re-derive is the only cost of a miss.
+    for (var i = 0; i < salts.length - KDF_KEY_CACHE_MAX; i++) {
+      delete map[salts[i]];
+    }
+  }
+  localStorage.setItem('sp_kdf_keys', JSON.stringify(map));
+}
+
+function loadKdfEncryptSalt() {
+  return localStorage.getItem('sp_kdf_encrypt_salt');
+}
+
+function saveKdfEncryptSalt(b64salt) {
+  localStorage.setItem('sp_kdf_encrypt_salt', b64salt);
+}
+
+function clearKdfCache() {
+  localStorage.removeItem('sp_kdf_keys');
+  localStorage.removeItem('sp_kdf_encrypt_salt');
+}
+
 function getCrypto() {
   var password = localStorage.getItem('sp_password');
   if (!password) {
     return null;
   }
   if (!cachedCrypto || cachedPassword !== password) {
-    cachedCrypto = supersync.createCrypto(password);
+    cachedCrypto = supersync.createCrypto(password, {
+      loadKeys: loadKdfKeys,
+      saveKey: saveKdfKey,
+      loadEncryptSalt: loadKdfEncryptSalt,
+      saveEncryptSalt: saveKdfEncryptSalt,
+    });
     cachedPassword = password;
   }
   return cachedCrypto;
@@ -1837,6 +1888,13 @@ Pebble.addEventListener('webviewclosed', function (e) {
     localStorage.removeItem('sp_entities');
     localStorage.removeItem('sp_last_seq');
     localStorage.removeItem('sp_vector_clock');
+    // Persisted Argon2id keys are tied to the old password (and, via
+    // jwtChanged, possibly a different account entirely) - drop them so we
+    // don't try to decrypt the new account's ops with stale keys. The
+    // clearData path above deliberately does NOT clear these: the password
+    // is unchanged there, so keeping the cache is exactly what makes the
+    // forced full resync fast.
+    clearKdfCache();
   }
 
   doSync();

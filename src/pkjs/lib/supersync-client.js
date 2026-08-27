@@ -68,16 +68,52 @@ function deriveLegacyKey(password) {
 // object - mirrors encryption/session-cache.ts's rationale. One crypto
 // instance is created per pairing/password in index.js and reused across an
 // entire sync session.
-function createCrypto(password) {
+//
+// `persistence` (all fields optional) lets index.js push that per-salt cache
+// out to localStorage so it also survives across pkjs sessions - the JS VM
+// is torn down every time the watchapp closes, so without this every app
+// open that syncs re-runs Argon2id for salts an earlier session already
+// paid for (each SuperSync client session encrypts all its ops under one
+// salt, so even "3 new ops from the desktop" costs a full derivation):
+//   loadKeys()            -> { base64(salt): base64(key), ... } seeded in
+//   saveKey(b64salt, b64key)  called once per newly-derived salt
+//   loadEncryptSalt()     -> base64(salt) this client last encrypted under,
+//                            reused so the first watch toggle after an app
+//                            launch doesn't derive a fresh random salt
+//   saveEncryptSalt(b64salt)
+function createCrypto(password, persistence) {
+  persistence = persistence || {};
   var decryptKeyCache = {}; // base64(salt) -> derived key bytes
   var legacyKey = null;
   var encryptSalt = null;
   var encryptKey = null;
 
+  if (persistence.loadKeys) {
+    var persisted = persistence.loadKeys() || {};
+    Object.keys(persisted).forEach(function (b64salt) {
+      try {
+        decryptKeyCache[b64salt] = base64.base64ToBytes(persisted[b64salt]);
+      } catch (e) {
+        // a corrupt entry just means that salt gets re-derived - ignore
+      }
+    });
+  }
+
+  function rememberKey(b64salt, keyBytes) {
+    if (persistence.saveKey) {
+      try {
+        persistence.saveKey(b64salt, base64.bytesToBase64(keyBytes));
+      } catch (e) {
+        // persistence is best-effort; the in-memory cache still works
+      }
+    }
+  }
+
   function getArgon2KeyForSalt(salt) {
     var cacheKey = base64.bytesToBase64(salt);
     if (!decryptKeyCache[cacheKey]) {
       decryptKeyCache[cacheKey] = deriveArgon2Key(password, salt);
+      rememberKey(cacheKey, decryptKeyCache[cacheKey]);
     }
     return decryptKeyCache[cacheKey];
   }
@@ -114,12 +150,44 @@ function createCrypto(password) {
 
   function encrypt(obj) {
     if (!encryptKey) {
-      encryptSalt = randomBytes(SALT_LENGTH);
-      encryptKey = deriveArgon2Key(password, encryptSalt);
-      // Seed the decrypt cache too, so decrypting this same op back down
-      // (e.g. on the next sync, after uploading a task toggle) doesn't
-      // blindly re-run Argon2id for a salt we already paid to derive.
-      decryptKeyCache[base64.bytesToBase64(encryptSalt)] = encryptKey;
+      // Reuse the salt this client last encrypted under (persisted across
+      // pkjs sessions) rather than a fresh random one - its derived key is
+      // then almost always already in decryptKeyCache (seeded from
+      // persistence above, or from decrypting our own prior ops back down),
+      // so the common "toggle a task on the watch -> upload" path pays no
+      // Argon2id at all after the first ever sync.
+      var reusedSalt = persistence.loadEncryptSalt && persistence.loadEncryptSalt();
+      if (reusedSalt) {
+        try {
+          encryptSalt = base64.base64ToBytes(reusedSalt);
+          if (encryptSalt.length !== SALT_LENGTH) {
+            encryptSalt = null;
+          }
+        } catch (e) {
+          encryptSalt = null;
+        }
+      }
+      if (!encryptSalt) {
+        encryptSalt = randomBytes(SALT_LENGTH);
+        if (persistence.saveEncryptSalt) {
+          try {
+            persistence.saveEncryptSalt(base64.bytesToBase64(encryptSalt));
+          } catch (e) {
+            // best-effort - a fresh salt next session just costs one derive
+          }
+        }
+      }
+      var b64EncryptSalt = base64.bytesToBase64(encryptSalt);
+      if (decryptKeyCache[b64EncryptSalt]) {
+        encryptKey = decryptKeyCache[b64EncryptSalt];
+      } else {
+        encryptKey = deriveArgon2Key(password, encryptSalt);
+        // Seed the decrypt cache too, so decrypting this same op back down
+        // (e.g. on the next sync, after uploading a task toggle) doesn't
+        // blindly re-run Argon2id for a salt we already paid to derive.
+        decryptKeyCache[b64EncryptSalt] = encryptKey;
+        rememberKey(b64EncryptSalt, encryptKey);
+      }
     }
     var plaintext = sha256lib.utf8ToBytes(JSON.stringify(obj));
     var iv = randomBytes(IV_LENGTH);
