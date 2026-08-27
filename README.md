@@ -47,6 +47,9 @@ Productivity's own **SuperSync** server.
 
 See the [Releases page](https://github.com/BigWebstas/PebbleSuperProductivity/releases) for downloadable `.pbw` artifacts of each version.
 
+### [v0.6.21](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.21)
+- Faster syncs on encrypted accounts: the watch now remembers the slow-to-compute decryption keys between app opens instead of recomputing them every time, so most syncs after the first skip that work entirely.
+
 ### [v0.6.20](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.20)
 - Fix "Clear all data & resync" sometimes leaving the watch showing stale/blank data instead of forcing a fresh sync, if reopened within 5 minutes of the previous sync.
 
