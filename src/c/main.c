@@ -3897,7 +3897,14 @@ static void init(void) {
 #ifndef PBL_PLATFORM_APLITE
   app_message_register_outbox_sent(outbox_sent_handler);
 #endif
-  app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
+  // Deliberately not app_message_*_size_maximum() (~8 KB each on basalt): two
+  // maxed buffers eat ~16 KB of the ~25 KB app heap, leaving too little for the
+  // Habits window's layers to allocate on top of the still-loaded main window
+  // (text_layer_create there would return NULL and crash). The protocol's
+  // largest messages are a MSG_TASK_ITEM (~500 B) and a MSG_NOTE_CHUNK
+  // (NOTE_CHUNK_LEN 256 chars, up to ~1 KB with multi-byte UTF-8); 2 KB in /
+  // 1 KB out clears both with margin.
+  app_message_open(2048, 1024);
 
   s_main_window = window_create();
   window_set_window_handlers(s_main_window, (WindowHandlers) {
