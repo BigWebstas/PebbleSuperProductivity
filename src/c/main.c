@@ -457,7 +457,17 @@ static bool s_notes_is_loading = false;
 // be completely silent"). Canceled the moment a matching SYNC_START/END
 // actually arrives; started fresh on every new request.
 static AppTimer *s_notes_load_timeout_timer = NULL;
-#define NOTES_LOAD_TIMEOUT_MS 8000
+// Generous on purpose: the request competes with anything else on the
+// AppMessage link, and when a sync is mid-flight the watch-side outbound
+// retry for the NOTE_REQUEST send alone can burn ~7s (1s + 2s + 4s backoff,
+// see outbox_failed_handler) before the phone even sees it, then the
+// chunked reply has its own per-chunk retries on top. 8s was tight enough
+// that a notes open right after opening the app (which may still be
+// syncing) would spuriously hit this and show the error text for notes
+// that were about to arrive. A genuinely unreachable phone still surfaces
+// its own "Couldn't reach phone app" overlay from the send-retry path well
+// before this fires.
+#define NOTES_LOAD_TIMEOUT_MS 20000
 // Distinguishes a dictation_status_callback firing for note-append (started
 // from the notes overlay's long-select) from one firing for Add Task
 // (started from the section-0 row) - both share the single s_dictation_session/
