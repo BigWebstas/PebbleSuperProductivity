@@ -70,6 +70,13 @@ fixed in firmware.
 
 See the [Releases page](https://github.com/BigWebstas/PebbleSuperProductivity/releases) for downloadable `.pbw` artifacts of each version.
 
+### [v0.6.22](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.22)
+- Fix the Habits screen crashing the app (out of memory) on every watch except the Pebble Time 2.
+- Show subtasks of recurring tasks on the watch, instead of just the bare parent row (also fixes any subtask added since the last full sync going missing). Existing accounts need one "Clear all data & resync" to pick up subtasks synced before this fix.
+- Recover automatically when "Clear all data & resync" hits a server error fetching the starting snapshot, instead of getting stuck retrying forever.
+- Add optional touch navigation for the Pebble Time 2: swipe to scroll, tap a row to toggle/open it, long-press for the press-and-hold action, swipe right to go back. Off by default while the Time 2's touch firmware matures - enable it under "Touch navigation" in settings.
+- Wait longer before the notes screen shows a "couldn't load" error, so opening a task's notes right after launching the app no longer fails spuriously while the first sync is still running.
+
 ### [v0.6.21](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.21)
 - Faster syncs on encrypted accounts: the watch now remembers the slow-to-compute decryption keys between app opens instead of recomputing them every time, so most syncs after the first skip that work entirely.
 
