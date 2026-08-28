@@ -336,6 +336,12 @@ function sendStatus(code, message) {
     // setting actually work while the app is closed, not just while it's
     // open. Always included, same reasoning as the two fields above.
     AUTO_SYNC_INTERVAL_MIN: config.autoSyncIntervalMin || 0,
+    // Touch navigation on/off, mirrored to the watch's s_touch_nav_enabled.
+    // Defaults on (undefined = never configured), so a Pebble Time 2 gets
+    // touch scrolling/tapping without visiting settings; ignored entirely by
+    // the button-only builds. Always included, same reasoning as the fields
+    // above.
+    TOUCH_NAV_ENABLED: config.touchNav !== false ? 1 : 0,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -1797,6 +1803,8 @@ Pebble.addEventListener('showConfiguration', function () {
       enableHabits: config.enableHabits !== false,
       enableAddTask: config.enableAddTask !== false,
       backlightMode: config.backlightMode || 0,
+      // Undefined (never configured) defaults to on - see sendStatus.
+      touchNav: config.touchNav !== false,
     }
   );
   Pebble.openURL(url);
@@ -1864,6 +1872,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableAddTask: !!result.enableAddTask,
     autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
+    touchNav: !!result.touchNav,
   };
   saveConfig(newConfig);
   scheduleAutoSync(newConfig);

@@ -28,6 +28,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var projects = options.projects || [];
   var enableHabits = options.enableHabits !== false;
   var enableAddTask = options.enableAddTask !== false;
+  var touchNav = options.touchNav !== false;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
@@ -215,6 +216,18 @@ projectOptions + '\n' +
 '    setting.\n' +
 '  </p>\n' +
 '\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="touchNav" type="checkbox"' + (touchNav ? ' checked' : '') + '>\n' +
+'    <label for="touchNav">Touch navigation</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    On a touchscreen watch (Pebble Time 2), swipe to scroll the list, tap a\n' +
+'    task to toggle it done, tap a row to open it, long-press for the\n' +
+'    press-and-hold action (time tracking, Finish Day, dictate a note), and\n' +
+'    swipe right to go back. The physical buttons keep working too. No effect\n' +
+'    on watches without a touchscreen.\n' +
+'  </p>\n' +
+'\n' +
 '  <h2>Sync</h2>\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="autoSyncOnComplete" type="checkbox"' + (autoSyncOnComplete ? ' checked' : '') + '>\n' +
@@ -300,6 +313,7 @@ autoSyncIntervalOptions + '\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
+'      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +
 '  });\n' +

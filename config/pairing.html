@@ -99,6 +99,17 @@
     setting.
   </p>
 
+  <div class="checkbox-row">
+    <input id="touchNav" type="checkbox">
+    <label for="touchNav">Touch navigation</label>
+  </div>
+  <p class="hint">
+    On a touchscreen watch (Pebble Time 2), swipe to scroll, tap a row to
+    open/toggle it, long-press for the press-and-hold action, and swipe
+    right to go back. The physical buttons keep working too. No effect on
+    watches without a touchscreen.
+  </p>
+
   <button id="saveBtn">Save &amp; sync</button>
   <button id="cancelBtn" class="secondary">Cancel</button>
 
@@ -145,7 +156,8 @@
       groupByProject: document.getElementById('groupByProject').checked,
       defaultProjectId: document.getElementById('defaultProjectId').value,
       enableHabits: document.getElementById('enableHabits').checked,
-      enableAddTask: document.getElementById('enableAddTask').checked
+      enableAddTask: document.getElementById('enableAddTask').checked,
+      touchNav: document.getElementById('touchNav').checked
     });
   });
 

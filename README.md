@@ -33,6 +33,20 @@ Productivity's own **SuperSync** server.
       * To show projects and project notes you must enable "Group tasks by project" in settings
 * Back returns to the prior screen
 
+### Touch (Pebble Time 2)
+
+With "Touch navigation" enabled in settings (on by default on a touchscreen
+watch), the watch's own touch layer handles scrolling and taps, and this app
+adds the press-and-hold gestures on top:
+
+* Swipe up/down to scroll; tap a row to activate it (toggle a task done, open
+  Habits/Add Task, tap a note to dismiss it)
+* Long-press for the same action a long Select press does — start/stop time
+  tracking, Finish Day, habit −1 / StopWatch, dictate a note
+* Swipe right to go back
+* Double-click-to-view-notes stays on the physical Select button
+* The physical buttons keep working regardless
+
 ## App Settings
 
 * Pretty straight forward, all settings should have a subtext describing their function

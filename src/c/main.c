@@ -42,6 +42,7 @@
 #define KEY_TASK_PROJECT_ID MESSAGE_KEY_TASK_PROJECT_ID
 #define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
 #define KEY_TASK_TAGS MESSAGE_KEY_TASK_TAGS
+#define KEY_TOUCH_NAV_ENABLED MESSAGE_KEY_TOUCH_NAV_ENABLED
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -575,6 +576,16 @@ static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
 // keeps the Add Task row permanently absent there.
 static bool s_habits_enabled = true;
 static bool s_add_task_enabled = true;
+#if defined(PBL_TOUCH)
+// Mirrors the phone's "Touch navigation" pairing setting (config.touchNav).
+// Starts false (touch bridge/handler off) until the first sync's
+// MSG_SYNC_STATUS lands, same conservative 0-until-first-sync convention as
+// s_backlight_mode; the phone then sends touchNav !== false, so a Pebble
+// Time 2 ends up with it ON within a second of launch - the setting exists
+// mainly as an off switch. Whole feature is PBL_TOUCH-only, absent on the
+// button-only builds. See apply_touch_nav() below.
+static bool s_touch_nav_enabled = false;
+#endif
 // Backlight override, same phone-settings mirroring convention as the two
 // flags above: 0 (system default) until the first sync says otherwise, so
 // an unconfigured/never-synced watch never touches the backlight API at
@@ -826,6 +837,14 @@ static TaskGroup *resolve_project_row_at(MenuIndex index);
 #ifndef PBL_PLATFORM_APLITE
 static void start_add_task_dictation(void);
 static void start_note_append_dictation(void);
+#endif
+
+#if defined(PBL_TOUCH)
+// Touch navigation (Pebble Time 2 / emery and any other PBL_TOUCH platform).
+// Applies s_touch_nav_enabled: opts into the system touch-nav bridge and
+// arms/disarms the raw long-press + swipe-back handler below. Called from
+// init() and whenever a sync's MSG_SYNC_STATUS reports the setting changed.
+static void apply_touch_nav(void);
 #endif
 
 // ---------- menu layer callbacks ----------
@@ -2849,6 +2868,17 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         s_wakeup_rescheduled_this_launch = true;
       }
 #endif
+#if defined(PBL_TOUCH)
+      // Same optional/absent-means-unchanged pattern as the flags above, and
+      // like backlight only acted on when the value actually changed (this
+      // fires on every routine background-sync status push, and a redundant
+      // touch_service_(un)subscribe on each of those is wasteful).
+      Tuple *touch_nav_tuple = dict_find(iterator, KEY_TOUCH_NAV_ENABLED);
+      if (touch_nav_tuple && (touch_nav_tuple->value->int32 != 0) != s_touch_nav_enabled) {
+        s_touch_nav_enabled = touch_nav_tuple->value->int32 != 0;
+        apply_touch_nav();
+      }
+#endif
       // update_empty_layer() only redraws the empty-state text layer, which
       // stays hidden while s_task_count > 0 - reload_data is what actually
       // refreshes the Resync row's status subtitle in that case. Both are
@@ -3570,14 +3600,161 @@ static void notes_window_select_long_click_handler(ClickRecognizerRef recognizer
   start_note_append_dictation();
 }
 
+#if defined(PBL_TOUCH)
+// ---------------------------------------------------------------------------
+// Touch navigation (Pebble Time 2 / emery and any other PBL_TOUCH platform)
+// ---------------------------------------------------------------------------
+//
+// Hybrid model. The system touch-nav bridge (app_touch_navigation_enable)
+// handles the easy 80%: a swipe/drag scrolls a MenuLayer or the notes
+// ScrollLayer, and a tap on a row is delivered as a SELECT single-click, so
+// tapping a task toggles it done, tapping Habits/Add Task/Resync/a project
+// row activates it, and a tap dismisses the notes overlay - all through the
+// click handlers that already exist, no per-window code.
+//
+// The bridge has no gesture for the two things SELECT also does on a physical
+// press: a long-press (start/stop time tracking, Finish Day, habit -1,
+// StopWatch, dictate a note) and - not reproduced here - a double-click. This
+// raw touch_service handler adds the long-press back, plus a swipe-right =
+// Back, running alongside the bridge (both see the raw stream; the bridge is
+// only suppressed per-window by window_set_touch_bridge_disabled, which we
+// don't call). It never touches vertical drags - those belong to the bridge's
+// scrolling.
+//
+// The long-press acts on the MenuLayer's currently-selected row, exactly as
+// the physical long-click does (menu_select_long_click never hit-tests a
+// point either) - so there's no need to map the touch coordinate back to a
+// row, which MenuLayer exposes no API for. Scroll (touch or button) to
+// highlight, then long-press anywhere.
+//
+// NOT YET VERIFIED ON HARDWARE: whether the bridge also fires its tap
+// single-click at the start of a >LONGPRESS_MS hold or during a swipe. A
+// standard tap recognizer needs a quick, low-movement release, so a 500ms
+// stationary hold should fail it cleanly - but if a stray toggle shows up
+// before the long action on a real Time 2, the fix is to also take over tap
+// (window_set_touch_bridge_disabled) rather than tune around it.
+
+#define TOUCH_LONGPRESS_MS 500
+#define TOUCH_SLOP_PX 12       // movement past this cancels the long-press
+#define TOUCH_SWIPE_MIN_PX 40  // horizontal travel that counts as a back-swipe
+
+static AppTimer *s_touch_longpress_timer = NULL;
+static GPoint s_touch_down_point;
+static bool s_touch_longpress_fired = false;
+static bool s_touch_armed = false;  // a navigational gesture is in progress
+                                    // (false for a non_navigational touchdown,
+                                    // so its later move/liftoff are ignored)
+
+static void touch_longpress_timer_cancel(void) {
+  if (s_touch_longpress_timer) {
+    app_timer_cancel(s_touch_longpress_timer);
+    s_touch_longpress_timer = NULL;
+  }
+}
+
+static void touch_longpress_fire(void *data) {
+  s_touch_longpress_timer = NULL;
+  s_touch_longpress_fired = true;
+  backlight_touch();
+  vibes_short_pulse();  // the only "it registered" cue before the action lands
+  Window *top = window_stack_get_top_window();
+  if (top == s_notes_window) {
+    start_note_append_dictation();
+  } else if (top == s_habits_window && s_habits_menu_layer) {
+    MenuIndex idx = menu_layer_get_selected_index(s_habits_menu_layer);
+    habits_menu_select_long_click(s_habits_menu_layer, &idx, NULL);
+  } else if (top == s_main_window) {
+    MenuIndex idx = menu_layer_get_selected_index(s_menu_layer);
+    menu_select_long_click(s_menu_layer, &idx, NULL);
+  }
+}
+
+static void touch_swipe_back(void) {
+  Window *top = window_stack_get_top_window();
+  if (top == s_notes_window) {
+    hide_notes_overlay();
+  } else if (top == s_habits_window) {
+    window_stack_pop(true);
+  } else if (top == s_main_window && !s_error_overlay_active) {
+    // The only window on the stack - popping it exits the app, same as Back.
+    window_stack_pop(true);
+  }
+}
+
+static void touch_handler(const TouchEvent *event, void *context) {
+  switch (event->type) {
+  case TouchEvent_Touchdown:
+    s_touch_longpress_fired = false;
+    touch_longpress_timer_cancel();
+    // non_navigational: contact that arrived without the watch being woken
+    // first - not meant to drive navigation, so don't arm anything.
+    s_touch_armed = !event->non_navigational;
+    if (!s_touch_armed) {
+      break;
+    }
+    s_touch_down_point = GPoint(event->x, event->y);
+    s_touch_longpress_timer = app_timer_register(TOUCH_LONGPRESS_MS, touch_longpress_fire, NULL);
+    break;
+
+  case TouchEvent_PositionUpdate: {
+    if (!s_touch_armed) {
+      break;
+    }
+    int dx = event->x - s_touch_down_point.x;
+    int dy = event->y - s_touch_down_point.y;
+    if (dx * dx + dy * dy > TOUCH_SLOP_PX * TOUCH_SLOP_PX) {
+      touch_longpress_timer_cancel();  // a moving finger isn't a long-press
+    }
+    break;
+  }
+
+  case TouchEvent_Liftoff: {
+    touch_longpress_timer_cancel();
+    bool armed = s_touch_armed;
+    s_touch_armed = false;
+    if (!armed) {
+      break;
+    }
+    if (s_touch_longpress_fired) {
+      s_touch_longpress_fired = false;
+      break;  // the hold already did its thing; liftoff commits nothing more
+    }
+    int dx = event->x - s_touch_down_point.x;
+    int dy = event->y - s_touch_down_point.y;
+    int adx = dx < 0 ? -dx : dx;
+    int ady = dy < 0 ? -dy : dy;
+    // Rightward, clearly horizontal drag = Back. Leftward has no forward
+    // navigation to map to; vertical drags are the bridge's to scroll.
+    if (dx > 0 && adx >= TOUCH_SWIPE_MIN_PX && adx > ady * 2) {
+      backlight_touch();
+      touch_swipe_back();
+    }
+    break;
+  }
+  }
+}
+
+static void apply_touch_nav(void) {
+  app_touch_navigation_enable(s_touch_nav_enabled);
+  if (s_touch_nav_enabled) {
+    touch_service_subscribe(touch_handler, NULL);
+  } else {
+    touch_service_unsubscribe();
+    touch_longpress_timer_cancel();
+    s_touch_armed = false;
+  }
+}
+#endif  // PBL_TOUCH
+
 // Not menu_layer_set_click_config_onto_window - this window has no MenuLayer
 // to compose with. Installed onto the ScrollLayer (not the window directly)
 // via scroll_layer_set_click_config_onto_window/set_callbacks below, which
 // wires UP/DOWN to scrolling first and then calls this for SELECT - a note
 // long enough to need scrolling was exactly the un-openable case before the
 // ScrollLayer was added (word-wrapped text past screen height had no way to
-// bring the rest on screen; this app has no touchscreen on any supported
-// hardware, so UP/DOWN are the only way to move it).
+// bring the rest on screen). On the button-only builds UP/DOWN are the only
+// way to move it; on a touch build the touch-nav bridge also scrolls the
+// ScrollLayer by finger when the setting is on (see apply_touch_nav).
 static void notes_window_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, notes_window_select_click_handler);
   window_long_click_subscribe(BUTTON_ID_SELECT, 0, notes_window_select_long_click_handler, NULL);
@@ -3912,9 +4089,20 @@ static void init(void) {
     .unload = window_unload,
   });
   window_stack_push(s_main_window, true);
+
+#if defined(PBL_TOUCH)
+  // Apply the default (off) now; the first sync's MSG_SYNC_STATUS turns it on
+  // a moment later if the phone setting says so, same as every other mirrored
+  // pairing setting.
+  apply_touch_nav();
+#endif
 }
 
 static void deinit(void) {
+#if defined(PBL_TOUCH)
+  s_touch_nav_enabled = false;
+  apply_touch_nav();  // unsubscribe + cancel the long-press timer
+#endif
 #ifndef PBL_PLATFORM_APLITE
   // Relinquish the backlight back to automatic control before exiting -
   // otherwise an always-on or mid-timeout override from this session would

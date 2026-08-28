@@ -101,7 +101,8 @@
       "NOTE_CHUNK_TEXT",
       "TASK_PROJECT_ID",
       "PROJECT_ID",
-      "TASK_TAGS"
+      "TASK_TAGS",
+      "TOUCH_NAV_ENABLED"
     ]
   }
 }
