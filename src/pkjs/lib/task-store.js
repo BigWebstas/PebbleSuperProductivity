@@ -116,6 +116,45 @@ function deleteTasks(tasks, ids) {
   (ids || []).forEach(function (id) { delete tasks[id]; });
 }
 
+// Mirrors removeTaskFromParentSideEffects in
+// task-shared-crud.reducer.ts (just the subTaskIds splice - the real
+// helper's time recalc doesn't affect anything the watch shows): drops
+// `childId` from whichever task currently lists it in subTaskIds. Used by
+// both convert actions so a re-parented task can't stay referenced by its
+// old parent (which would otherwise keep rendering it as a nested row -
+// twice, once a convertToMainTask also lists it at top level).
+function detachFromParent(tasks, childId) {
+  Object.keys(tasks).forEach(function (pid) {
+    var sub = tasks[pid].subTaskIds;
+    if (sub && sub.indexOf(childId) !== -1) {
+      mergeTaskChanges(tasks, pid, { subTaskIds: sub.filter(function (s) { return s !== childId; }) });
+    }
+  });
+}
+
+// Inserts `childId` into `parentId`'s subTaskIds if absent, honoring the
+// afterTaskId anchor the convert actions carry (moveItemAfterAnchor in the
+// real reducer): null => prepend, a known id => right after it, anything
+// else => append.
+function attachToParent(tasks, parentId, childId, afterTaskId) {
+  var parent = tasks[parentId];
+  if (!parent) {
+    return;
+  }
+  var sub = parent.subTaskIds || [];
+  if (sub.indexOf(childId) !== -1) {
+    return;
+  }
+  var next;
+  if (!afterTaskId) {
+    next = [childId].concat(sub);
+  } else {
+    var at = sub.indexOf(afterTaskId);
+    next = at === -1 ? sub.concat([childId]) : sub.slice(0, at + 1).concat([childId], sub.slice(at + 1));
+  }
+  mergeTaskChanges(tasks, parentId, { subTaskIds: next });
+}
+
 function applyTaskAction(op, actionPayload, state) {
   var tasks = state.task;
   if (!actionPayload) {
@@ -128,6 +167,42 @@ function applyTaskAction(op, actionPayload, state) {
         setInBacklog(tasks, actionPayload.task.id, !!actionPayload.isAddToBacklog);
       }
       break;
+
+    // Mirrors on(addSubTask, ...) in tasks/store/task.reducer.ts. A subtask
+    // is NOT created via addTask - it's its own '[Task] Add SubTask' action
+    // ({ task, parentId }), dispatched both when a subtask is added by hand
+    // and, crucially, once per subTaskTemplate when
+    // task-repeat-cfg.service.ts materializes a recurring task's daily
+    // instance. Without this case that action fell through to `default` and
+    // was dropped entirely: the subtask entity never entered state.task and
+    // its id never reached the parent's subTaskIds, so a recurring task with
+    // subtasks (or any subtask added since the last full snapshot) showed on
+    // the watch as just its bare parent row. The real reducer also forces
+    // projectId to the parent's and tagIds to [], and (only for the very
+    // first subtask, and only if the parent has none of its own) copies the
+    // parent's timeEstimate/timeSpent down - that last part is skipped here
+    // since it only nudges the "spent / estimate" subtitle, never whether a
+    // row appears.
+    case '[Task] Add SubTask': {
+      var subTask = actionPayload.task;
+      var subParentId = actionPayload.parentId;
+      var subParent = subParentId && tasks[subParentId];
+      if (subTask && subTask.id && subParent) {
+        tasks[subTask.id] = Object.assign({}, subTask, {
+          parentId: subParentId,
+          projectId: subParent.projectId,
+          tagIds: [],
+        });
+        setInBacklog(tasks, subTask.id, false);
+        // Append (real reducer uses [...subTaskIds, task.id]), with the same
+        // already-present guard it keeps for replayed/imported ids.
+        var subParentIds = subParent.subTaskIds || [];
+        if (subParentIds.indexOf(subTask.id) === -1) {
+          mergeTaskChanges(tasks, subParentId, { subTaskIds: subParentIds.concat([subTask.id]) });
+        }
+      }
+      break;
+    }
 
     // NOT a full task snapshot - confirmed wrong by reading the actual
     // reducer (handleScheduleTaskWithTime in
@@ -287,10 +362,14 @@ function applyTaskAction(op, actionPayload, state) {
     // Mirrors handleConvertToMainTask in task-shared-crud.reducer.ts:
     // promotes a subtask to a main task (clearing parentId, without which
     // it stays invisible to isMainTask() forever), optionally planning it
-    // for today.
+    // for today. The detachFromParent() call mirrors the reducer's own
+    // removeTaskFromParentSideEffects: without it the former parent's
+    // subTaskIds still lists this id, so pushTaskAndSubtasks() renders the
+    // promoted task a SECOND time as a nested row under its old parent.
     case '[Task Shared] convertToMainTask': {
       var mainTask = actionPayload.task;
       if (mainTask && mainTask.id) {
+        detachFromParent(tasks, mainTask.id);
         var mainChanges = { parentId: undefined };
         if (actionPayload.isPlanForToday && !mainTask.dueWithTime) {
           mainChanges.dueDay = actionPayload.today || todayStr();
@@ -300,12 +379,29 @@ function applyTaskAction(op, actionPayload, state) {
       break;
     }
 
-    // The inverse of convertToMainTask: demotes a task to a subtask of
-    // targetParentId. Kept for symmetry, so a demoted task doesn't
-    // continue being (incorrectly) eligible as a main task.
-    case '[Task Shared] convertToSubTask':
-      mergeTaskChanges(tasks, actionPayload.taskId, { parentId: actionPayload.targetParentId });
+    // Mirrors handleConvertToSubTask in task-shared-crud.reducer.ts
+    // ({ taskId, targetParentId, afterTaskId }): demotes a task to a subtask
+    // of targetParentId. Setting only parentId (as this used to) made the
+    // task vanish from the watch entirely - isMainTask() now rejects it, but
+    // nothing had added it to the target parent's subTaskIds, which is the
+    // only place pushTaskAndSubtasks() looks for children. Now also inherits
+    // the parent's projectId, clears dueDay, drops backlog membership, and
+    // detaches from any previous parent - all per the real reducer.
+    case '[Task Shared] convertToSubTask': {
+      var cstId = actionPayload.taskId;
+      var cstParentId = actionPayload.targetParentId;
+      if (cstId && tasks[cstId] && cstParentId && tasks[cstParentId]) {
+        detachFromParent(tasks, cstId);
+        mergeTaskChanges(tasks, cstId, {
+          parentId: cstParentId,
+          projectId: tasks[cstParentId].projectId,
+          dueDay: undefined,
+        });
+        setInBacklog(tasks, cstId, false);
+        attachToParent(tasks, cstParentId, cstId, actionPayload.afterTaskId);
+      }
       break;
+    }
 
     // The following four, from project.actions.ts's "MOVE TASK ACTIONS"
     // section, change backlog *membership* (as opposed to the several

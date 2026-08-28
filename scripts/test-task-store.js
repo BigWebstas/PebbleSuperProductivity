@@ -46,6 +46,14 @@ function updateTask(id, changes) {
   return taskEntry('[Task Shared] updateTask', { task: { id: id, changes: changes } });
 }
 
+// task.actions.ts: addSubTask = createAction('[Task] Add SubTask',
+// props<{ task: Task; parentId: string }>()). Used for a hand-added subtask
+// and for every subTaskTemplate of a recurring task's materialized instance
+// (task-repeat-cfg.service.ts).
+function addSubTask(task, parentId) {
+  return taskEntry('[Task] Add SubTask', { task: task, parentId: parentId });
+}
+
 function planTasksForToday(date, taskIds) {
   return taskEntry('[Task Shared] planTasksForToday', { today: date, taskIds: taskIds });
 }
@@ -370,6 +378,14 @@ check('applyShortSyntax with isMoveToBacklog moves the task out of the active li
   assert.deepStrictEqual(active(state), []);
 });
 
+function convertToSubTask(taskId, targetParentId, afterTaskId) {
+  return taskEntry('[Task Shared] convertToSubTask', {
+    taskId: taskId,
+    targetParentId: targetParentId,
+    afterTaskId: afterTaskId === undefined ? null : afterTaskId,
+  });
+}
+
 check('convertToMainTask clears parentId so the task becomes eligible as a main task', () => {
   const state = store.emptyState();
   store.applyOperations(
@@ -386,17 +402,70 @@ check('convertToMainTask clears parentId so the task becomes eligible as a main 
   assert(tasks.some((t) => t.id === 'sub'), 'promoted task should now be selectable as a main task');
 });
 
-check('convertToSubTask sets parentId so the task stops being eligible as a main task', () => {
+check('convertToMainTask detaches the promoted task from its old parent (no duplicate nested row)', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
-      addTask({ id: 'a', title: 'A' }),
-      taskEntry('[Task Shared] convertToSubTask', { taskId: 'a', targetParentId: 'parent' }),
+      addTask({ id: 'parent', title: 'Parent', subTaskIds: ['sub', 'keep'] }),
+      addTask({ id: 'sub', title: 'Promote me', parentId: 'parent' }),
+      addTask({ id: 'keep', title: 'Still a sub', parentId: 'parent' }),
+      taskEntry('[Task Shared] convertToMainTask', { task: { id: 'sub' } }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(state.task.parent.subTaskIds, ['keep']);
+  // 'sub' appears exactly once (top level), not also under 'parent'.
+  assert.deepStrictEqual(active(state).map((t) => t.id), ['parent', 'keep', 'sub']);
+});
+
+check('convertToSubTask nests the demoted task under the target parent (not just hidden)', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'parent', title: 'Parent', subTaskIds: [], projectId: 'p1' }),
+      addTask({ id: 'a', title: 'Demote me', dueDay: today }, { isAddToBacklog: true }),
+      convertToSubTask('a', 'parent'),
     ],
     state
   );
   assert.strictEqual(state.task.a.parentId, 'parent');
-  assert.deepStrictEqual(active(state), []);
+  assert.strictEqual(state.task.a.projectId, 'p1');
+  assert.strictEqual(state.task.a.dueDay, undefined);
+  assert.strictEqual(state.task.a.__inBacklog, false, 'demoting drops backlog membership');
+  assert.deepStrictEqual(state.task.parent.subTaskIds, ['a']);
+  assert.deepStrictEqual(active(state).map((t) => t.id), ['parent', 'a']);
+  assert.strictEqual(active(state)[1].title, '    » Demote me');
+});
+
+check('convertToSubTask honors afterTaskId ordering and re-parents from an old parent', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'oldp', title: 'Old parent', subTaskIds: ['a'] }),
+      addTask({ id: 'newp', title: 'New parent', subTaskIds: ['x', 'y'] }),
+      addTask({ id: 'a', title: 'Mover', parentId: 'oldp' }),
+      addTask({ id: 'x', title: 'X', parentId: 'newp' }),
+      addTask({ id: 'y', title: 'Y', parentId: 'newp' }),
+      convertToSubTask('a', 'newp', 'x'),
+    ],
+    state
+  );
+  assert.deepStrictEqual(state.task.oldp.subTaskIds, []);
+  assert.deepStrictEqual(state.task.newp.subTaskIds, ['x', 'a', 'y']);
+  assert.deepStrictEqual(active(state).map((t) => t.id), ['newp', 'x', 'a', 'y', 'oldp']);
+});
+
+check('convertToSubTask with an unknown target parent is a no-op (task stays as it was)', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'A' }),
+      convertToSubTask('a', 'missing'),
+    ],
+    state
+  );
+  assert.strictEqual(state.task.a.parentId, undefined);
+  assert.deepStrictEqual(active(state).map((t) => t.id), ['a']);
 });
 
 check('addTask with isAddToBacklog excludes the task from the active list', () => {
@@ -813,6 +882,71 @@ check('getActiveTasks nests subtasks under their main task, indented', () => {
   assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1', 'sub2']);
   assert.strictEqual(tasks[1].title, '    » Book flights');
   assert.strictEqual(tasks[2].title, '    » Book hotel');
+});
+
+check('addSubTask op nests the subtask under its parent (parent addTask never listed it)', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'main', title: 'Plan trip', isDone: false, subTaskIds: [], projectId: 'p1' }),
+      addSubTask({ id: 'sub1', title: 'Book flights', isDone: false }, 'main'),
+      addSubTask({ id: 'sub2', title: 'Book hotel', isDone: false }, 'main'),
+    ],
+    state
+  );
+  const tasks = active(state);
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1', 'sub2']);
+  assert.strictEqual(tasks[1].title, '    » Book flights');
+  // projectId is forced to the parent's, tagIds cleared (mirrors the reducer).
+  assert.strictEqual(state.task.sub1.projectId, 'p1');
+  assert.deepStrictEqual(state.task.sub1.tagIds, []);
+  assert.deepStrictEqual(state.task.main.subTaskIds, ['sub1', 'sub2']);
+});
+
+check('a recurring task materialized with subTaskTemplates shows its subtasks', () => {
+  // task-repeat-cfg.service.ts: addTask for the instance, then one
+  // addSubTask per subTaskTemplate - the shape another client writes to the
+  // op-log each day. Before the '[Task] Add SubTask' handler existed this
+  // listed only the bare "Daily standup" row.
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask(
+        { id: 'rcfg_2026-08-28', title: 'Daily standup', isDone: false, dueDay: today, subTaskIds: [], repeatCfgId: 'rcfg' },
+        { isAddToBacklog: false }
+      ),
+      addSubTask({ id: 'rcfg_2026-08-28_s0', title: 'Blockers', isDone: false }, 'rcfg_2026-08-28'),
+      addSubTask({ id: 'rcfg_2026-08-28_s1', title: 'Wins', isDone: false }, 'rcfg_2026-08-28'),
+    ],
+    state
+  );
+  assert.deepStrictEqual(
+    active(state, 30, false, true).map((t) => t.id),
+    ['rcfg_2026-08-28', 'rcfg_2026-08-28_s0', 'rcfg_2026-08-28_s1']
+  );
+});
+
+check('addSubTask replayed twice for the same id does not duplicate it in subTaskIds', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'main', title: 'Plan trip', isDone: false, subTaskIds: [] }),
+      addSubTask({ id: 'sub1', title: 'Book flights', isDone: false }, 'main'),
+      addSubTask({ id: 'sub1', title: 'Book flights', isDone: false }, 'main'),
+    ],
+    state
+  );
+  assert.deepStrictEqual(state.task.main.subTaskIds, ['sub1']);
+  assert.deepStrictEqual(active(state).map((t) => t.id), ['main', 'sub1']);
+});
+
+check('addSubTask with an unknown parent is ignored, not surfaced as a top-level row', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addSubTask({ id: 'orphan', title: 'Nowhere', isDone: false }, 'missing-parent')],
+    state
+  );
+  assert.deepStrictEqual(active(state).map((t) => t.id), []);
 });
 
 check('getActiveTasks(hideDone=true) excludes a done main task and its whole subtask block', () => {
