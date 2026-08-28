@@ -668,14 +668,18 @@ function doSync() {
         lastSeq = points[0].serverSeq;
       });
     }).catch(function (err) {
-      // Confirmed against a live account: the server flatly refuses to hand
-      // out a server-side snapshot for E2EE accounts (400
-      // ENCRYPTED_OPS_NOT_SUPPORTED - "Use the client app's Sync Now button
-      // to decrypt and restore locally"). That's the only supported path
-      // for an encrypted account, which is exactly what pullPage() below
-      // does by replaying the full op history from lastSeq 0 - so this
-      // isn't a sync failure, just a signal to skip straight to that.
-      if (err && err.body && err.body.errorCode === 'ENCRYPTED_OPS_NOT_SUPPORTED') {
+      // The snapshot endpoints are best-effort. An E2EE account gets a
+      // documented 400 ENCRYPTED_OPS_NOT_SUPPORTED ("Use the client app's
+      // Sync Now button to decrypt and restore locally"), but the server has
+      // also been seen to 500 on these same requests right after a
+      // clear-data resync. The fallback is identical either way and is the
+      // actually-supported path for an encrypted account: replay the full op
+      // history from lastSeq 0 in pullPage() below. So ANY HTTP-level error
+      // here (err.status set) is just a signal to skip straight to that, not
+      // a sync failure - only a genuine network/timeout error (no status)
+      // propagates.
+      if (err && err.status) {
+        console.log('[pkjs] snapshot bootstrap unavailable (' + err.message + '); replaying ops from seq 0');
         return;
       }
       throw err;
