@@ -18,6 +18,11 @@ Productivity's own **SuperSync** server.
 | ![Habits page](screenshots/habits.png) |
 | Habit tracking (Super Productivity's SimpleCounter feature) — increment/decrement with Select/long-Select |
 
+| | | |
+|---|---|---|
+| ![Scrolling the task list](screenshots/task-list-scroll.gif) | ![Marking a task done](screenshots/task-complete.gif) | ![Incrementing habits](screenshots/habits.gif) |
+| Scrolling the whole list — action rows, per-project groups, due times, time tracking, the Finish Day row and version footer | Select on a task toggles it done | Open Habits, Select to increment a counter toward its goal |
+
 ## Navigation and Functionality
 * Up and down buttons to scroll through the habits and task list
 * Select (Middle button)
