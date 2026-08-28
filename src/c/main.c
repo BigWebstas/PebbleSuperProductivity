@@ -577,13 +577,12 @@ static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
 static bool s_habits_enabled = true;
 static bool s_add_task_enabled = true;
 #if defined(PBL_TOUCH)
-// Mirrors the phone's "Touch navigation" pairing setting (config.touchNav).
-// Starts false (touch bridge/handler off) until the first sync's
-// MSG_SYNC_STATUS lands, same conservative 0-until-first-sync convention as
-// s_backlight_mode; the phone then sends touchNav !== false, so a Pebble
-// Time 2 ends up with it ON within a second of launch - the setting exists
-// mainly as an off switch. Whole feature is PBL_TOUCH-only, absent on the
-// button-only builds. See apply_touch_nav() below.
+// Mirrors the phone's "Touch navigation" pairing setting (config.touchNav),
+// off by default (see the touch block's own HARDWARE STATE comment for why -
+// the first-gen Time 2 touch driver isn't reliable enough yet). Starts false
+// until the first sync's MSG_SYNC_STATUS lands, same conservative
+// 0-until-first-sync convention as s_backlight_mode. Whole feature is
+// PBL_TOUCH-only, absent on the button-only builds. See apply_touch_nav().
 static bool s_touch_nav_enabled = false;
 #endif
 // Backlight override, same phone-settings mirroring convention as the two
@@ -3615,11 +3614,15 @@ static void notes_window_select_long_click_handler(ClickRecognizerRef recognizer
 // The bridge has no gesture for the two things SELECT also does on a physical
 // press: a long-press (start/stop time tracking, Finish Day, habit -1,
 // StopWatch, dictate a note) and - not reproduced here - a double-click. This
-// raw touch_service handler adds the long-press back, plus a swipe-right =
-// Back, running alongside the bridge (both see the raw stream; the bridge is
-// only suppressed per-window by window_set_touch_bridge_disabled, which we
-// don't call). It never touches vertical drags - those belong to the bridge's
-// scrolling.
+// raw touch_service handler adds only the long-press back, running alongside
+// the bridge (both see the raw stream; the bridge is only suppressed
+// per-window by window_set_touch_bridge_disabled, which we don't call).
+//
+// It does NOT handle swipe-right = Back: the bridge already turns a
+// right-swipe into a Back press on its own (confirmed on a real Time 2 -
+// having our own handler pop as well double-popped straight out of the app
+// from the notes overlay). Vertical drags belong to the bridge's scrolling
+// too. So the only gesture we synthesize is the long-press.
 //
 // The long-press acts on the MenuLayer's currently-selected row, exactly as
 // the physical long-click does (menu_select_long_click never hit-tests a
@@ -3627,20 +3630,22 @@ static void notes_window_select_long_click_handler(ClickRecognizerRef recognizer
 // row, which MenuLayer exposes no API for. Scroll (touch or button) to
 // highlight, then long-press anywhere.
 //
-// NOT YET VERIFIED ON HARDWARE: whether the bridge also fires its tap
-// single-click at the start of a >LONGPRESS_MS hold or during a swipe. A
-// standard tap recognizer needs a quick, low-movement release, so a 500ms
-// stationary hold should fail it cleanly - but if a stray toggle shows up
-// before the long action on a real Time 2, the fix is to also take over tap
-// (window_set_touch_bridge_disabled) rather than tune around it.
+// HARDWARE STATE (first-gen Time 2, firmware ~4.33): the touch driver reports
+// a large position drift toward screen centre on edge touches - a stationary
+// tap near the top/bottom/side of the screen shows up as ~130-170px of travel
+// over its ~200ms, so the bridge reads it as a swipe (scrolls) rather than a
+// tap, and our own long-press slop trips on the initial jump. Centre-of-screen
+// taps and holds are clean and work correctly. This is why the pairing
+// setting defaults OFF - the feature is opt-in until a firmware touch-
+// calibration fix lands, at which point it should "just work" with no code
+// change here. TOUCH_SLOP_PX is generous (not the usual ~5-10) to ride out
+// the smaller drift on a near-centre hold.
 
-#define TOUCH_LONGPRESS_MS 500
-#define TOUCH_SLOP_PX 12       // movement past this cancels the long-press
-#define TOUCH_SWIPE_MIN_PX 40  // horizontal travel that counts as a back-swipe
+#define TOUCH_LONGPRESS_MS 700
+#define TOUCH_SLOP_PX 25  // movement past this cancels the long-press
 
 static AppTimer *s_touch_longpress_timer = NULL;
 static GPoint s_touch_down_point;
-static bool s_touch_longpress_fired = false;
 static bool s_touch_armed = false;  // a navigational gesture is in progress
                                     // (false for a non_navigational touchdown,
                                     // so its later move/liftoff are ignored)
@@ -3654,7 +3659,7 @@ static void touch_longpress_timer_cancel(void) {
 
 static void touch_longpress_fire(void *data) {
   s_touch_longpress_timer = NULL;
-  s_touch_longpress_fired = true;
+  s_touch_armed = false;  // consumed - the eventual liftoff does nothing more
   backlight_touch();
   vibes_short_pulse();  // the only "it registered" cue before the action lands
   Window *top = window_stack_get_top_window();
@@ -3669,22 +3674,9 @@ static void touch_longpress_fire(void *data) {
   }
 }
 
-static void touch_swipe_back(void) {
-  Window *top = window_stack_get_top_window();
-  if (top == s_notes_window) {
-    hide_notes_overlay();
-  } else if (top == s_habits_window) {
-    window_stack_pop(true);
-  } else if (top == s_main_window && !s_error_overlay_active) {
-    // The only window on the stack - popping it exits the app, same as Back.
-    window_stack_pop(true);
-  }
-}
-
 static void touch_handler(const TouchEvent *event, void *context) {
   switch (event->type) {
   case TouchEvent_Touchdown:
-    s_touch_longpress_fired = false;
     touch_longpress_timer_cancel();
     // non_navigational: contact that arrived without the watch being woken
     // first - not meant to drive navigation, so don't arm anything.
@@ -3703,34 +3695,16 @@ static void touch_handler(const TouchEvent *event, void *context) {
     int dx = event->x - s_touch_down_point.x;
     int dy = event->y - s_touch_down_point.y;
     if (dx * dx + dy * dy > TOUCH_SLOP_PX * TOUCH_SLOP_PX) {
-      touch_longpress_timer_cancel();  // a moving finger isn't a long-press
+      touch_longpress_timer_cancel();  // a moving finger (scroll/swipe -
+      s_touch_armed = false;           // the bridge's job) isn't a long-press
     }
     break;
   }
 
-  case TouchEvent_Liftoff: {
+  case TouchEvent_Liftoff:
     touch_longpress_timer_cancel();
-    bool armed = s_touch_armed;
     s_touch_armed = false;
-    if (!armed) {
-      break;
-    }
-    if (s_touch_longpress_fired) {
-      s_touch_longpress_fired = false;
-      break;  // the hold already did its thing; liftoff commits nothing more
-    }
-    int dx = event->x - s_touch_down_point.x;
-    int dy = event->y - s_touch_down_point.y;
-    int adx = dx < 0 ? -dx : dx;
-    int ady = dy < 0 ? -dy : dy;
-    // Rightward, clearly horizontal drag = Back. Leftward has no forward
-    // navigation to map to; vertical drags are the bridge's to scroll.
-    if (dx > 0 && adx >= TOUCH_SWIPE_MIN_PX && adx > ady * 2) {
-      backlight_touch();
-      touch_swipe_back();
-    }
     break;
-  }
   }
 }
 

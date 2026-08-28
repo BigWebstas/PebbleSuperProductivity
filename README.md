@@ -35,17 +35,21 @@ Productivity's own **SuperSync** server.
 
 ### Touch (Pebble Time 2)
 
-With "Touch navigation" enabled in settings (on by default on a touchscreen
-watch), the watch's own touch layer handles scrolling and taps, and this app
-adds the press-and-hold gestures on top:
+Experimental, **off by default** — enable "Touch navigation" in settings.
 
-* Swipe up/down to scroll; tap a row to activate it (toggle a task done, open
-  Habits/Add Task, tap a note to dismiss it)
+* Swipe up/down to scroll; swipe right to go back
+* Tap a row to activate it — toggle a task done, open Habits/Add Task, tap a
+  note to dismiss it
 * Long-press for the same action a long Select press does — start/stop time
   tracking, Finish Day, habit −1 / StopWatch, dictate a note
-* Swipe right to go back
 * Double-click-to-view-notes stays on the physical Select button
 * The physical buttons keep working regardless
+
+Scrolling, taps, and swipe-back come from PebbleOS's own touch layer; this app
+only adds the long-press. The first-gen Time 2 touch firmware currently
+misreads taps near the screen edges (they register as swipes), so it works
+best for rows in the middle of the screen — hence off by default until that's
+fixed in firmware.
 
 ## App Settings
 

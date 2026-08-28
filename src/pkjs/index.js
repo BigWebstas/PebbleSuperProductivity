@@ -337,11 +337,10 @@ function sendStatus(code, message) {
     // open. Always included, same reasoning as the two fields above.
     AUTO_SYNC_INTERVAL_MIN: config.autoSyncIntervalMin || 0,
     // Touch navigation on/off, mirrored to the watch's s_touch_nav_enabled.
-    // Defaults on (undefined = never configured), so a Pebble Time 2 gets
-    // touch scrolling/tapping without visiting settings; ignored entirely by
-    // the button-only builds. Always included, same reasoning as the fields
-    // above.
-    TOUCH_NAV_ENABLED: config.touchNav !== false ? 1 : 0,
+    // Off by default (opt-in) - the first-gen Pebble Time 2 touch driver
+    // isn't reliable enough yet, see main.c's touch block. Ignored entirely
+    // by the button-only builds. Always included, same reasoning as above.
+    TOUCH_NAV_ENABLED: config.touchNav ? 1 : 0,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -1807,8 +1806,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableHabits: config.enableHabits !== false,
       enableAddTask: config.enableAddTask !== false,
       backlightMode: config.backlightMode || 0,
-      // Undefined (never configured) defaults to on - see sendStatus.
-      touchNav: config.touchNav !== false,
+      touchNav: !!config.touchNav,
     }
   );
   Pebble.openURL(url);

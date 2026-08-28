@@ -28,7 +28,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var projects = options.projects || [];
   var enableHabits = options.enableHabits !== false;
   var enableAddTask = options.enableAddTask !== false;
-  var touchNav = options.touchNav !== false;
+  var touchNav = !!options.touchNav;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
@@ -221,11 +221,12 @@ projectOptions + '\n' +
 '    <label for="touchNav">Touch navigation</label>\n' +
 '  </div>\n' +
 '  <p class="hint">\n' +
-'    On a touchscreen watch (Pebble Time 2), swipe to scroll the list, tap a\n' +
-'    task to toggle it done, tap a row to open it, long-press for the\n' +
-'    press-and-hold action (time tracking, Finish Day, dictate a note), and\n' +
-'    swipe right to go back. The physical buttons keep working too. No effect\n' +
-'    on watches without a touchscreen.\n' +
+'    Experimental, for the Pebble Time 2: swipe to scroll, tap a row to\n' +
+'    toggle/open it, long-press for the press-and-hold action, swipe right\n' +
+'    to go back. The physical buttons keep working too. Off by default -\n' +
+'    the current Time 2 touch firmware misreads taps near the screen edges,\n' +
+'    so it works best for rows in the middle of the screen for now. No\n' +
+'    effect on watches without a touchscreen.\n' +
 '  </p>\n' +
 '\n' +
 '  <h2>Sync</h2>\n' +
