@@ -341,6 +341,16 @@ function sendStatus(code, message) {
     // isn't reliable enough yet, see main.c's touch block. Ignored entirely
     // by the button-only builds. Always included, same reasoning as above.
     TOUCH_NAV_ENABLED: config.touchNav ? 1 : 0,
+    // "Notify when a task runs over its estimate" on/off, mirrored to the
+    // watch's s_overtime_notify_enabled. Off by default (opt-in). Drives
+    // the over-estimate banner in main.c (aplite ignores it - see that
+    // flag's comment). Always included, same reasoning as above.
+    OVERTIME_NOTIFY_ENABLED: config.overtimeNotify ? 1 : 0,
+    // "Pin the task you're tracking to the top" on/off, mirrored to the
+    // watch's s_pin_tracked_task_enabled. Off by default (opt-in). Drives
+    // the pinned "TRACKING" section in main.c (aplite ignores it - see that
+    // flag's comment). Always included, same reasoning as above.
+    PIN_TRACKED_TASK_ENABLED: config.pinTrackedTask ? 1 : 0,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -1807,6 +1817,8 @@ Pebble.addEventListener('showConfiguration', function () {
       enableAddTask: config.enableAddTask !== false,
       backlightMode: config.backlightMode || 0,
       touchNav: !!config.touchNav,
+      overtimeNotify: !!config.overtimeNotify,
+      pinTrackedTask: !!config.pinTrackedTask,
     }
   );
   Pebble.openURL(url);
@@ -1875,6 +1887,8 @@ Pebble.addEventListener('webviewclosed', function (e) {
     autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,
+    overtimeNotify: !!result.overtimeNotify,
+    pinTrackedTask: !!result.pinTrackedTask,
   };
   saveConfig(newConfig);
   scheduleAutoSync(newConfig);

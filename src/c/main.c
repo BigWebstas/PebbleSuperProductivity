@@ -43,6 +43,8 @@
 #define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
 #define KEY_TASK_TAGS MESSAGE_KEY_TASK_TAGS
 #define KEY_TOUCH_NAV_ENABLED MESSAGE_KEY_TOUCH_NAV_ENABLED
+#define KEY_OVERTIME_NOTIFY_ENABLED MESSAGE_KEY_OVERTIME_NOTIFY_ENABLED
+#define KEY_PIN_TRACKED_TASK_ENABLED MESSAGE_KEY_PIN_TRACKED_TASK_ENABLED
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -514,6 +516,53 @@ static time_t s_tracking_start_epoch = 0;
 static AppTimer *s_tracking_tick_timer = NULL;
 #define TRACKING_TICK_INTERVAL_MS 1000
 
+#ifndef PBL_PLATFORM_APLITE
+// "Task ran over its estimate" banner - a red strip across the top of the
+// task list, shown (with a double vibe) the moment the tracked task's
+// effective time - its synced time_spent_ms plus this session's still-
+// running elapsed - first reaches its time_estimate_ms, if the phone's
+// "Notify when a task runs over its estimate" setting is on
+// (s_overtime_notify_enabled). Auto-dismisses after OVERTIME_BANNER_MS, or
+// on the next Select press (see menu_select_click) - it's an at-a-glance
+// heads-up, not a blocking prompt like the error overlay.
+//
+// #ifndef PBL_PLATFORM_APLITE, same reasoning (and confirmed-via-memory-
+// report standard) as every other aplite exclusion in this file: aplite
+// was already at its RAM ceiling before this, and a whole extra TextLayer
+// overflowed it once before (see s_sync_progress_layer's own comment).
+// Time tracking itself still works there - it just never shows this banner
+// (s_overtime_notify_enabled is inert on aplite regardless of its value).
+static TextLayer *s_overtime_banner_layer = NULL;
+static AppTimer *s_overtime_banner_timer = NULL;
+// Latched true once the banner has fired for the CURRENT tracking session,
+// so the once-per-second tick (see maybe_notify_overtime) doesn't re-fire
+// it every tick once the estimate is crossed. Reset by start_tracking()
+// and stop_tracking_and_report(); also self-re-arms if the effective time
+// drops back below the estimate (e.g. the estimate was raised on the
+// desktop and picked up by a resync). Primed to true in init() when a
+// resumed session is already over its estimate at launch, so reopening the
+// app mid-overrun doesn't nag.
+static bool s_overtime_notified = false;
+static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
+#define OVERTIME_BANNER_MS 6000
+#define OVERTIME_BANNER_HEIGHT 52
+
+// Pinned "TRACKING" section - when the phone's "Pin the task you're
+// tracking to the top" setting is on (s_pin_tracked_task_enabled), the task
+// whose id this holds is shown in its own section directly below the
+// Resync/Habits/Add Task rows and hidden from its normal project group (see
+// has_pinned_row/group_section_base/menu_draw_row). Separate from
+// s_tracking_task_id: it stays set through a 10s grace period after
+// tracking stops (s_unpin_timer), so the row slides back into its group
+// smoothly rather than vanishing the instant you long-press to stop. Not
+// persisted - only a genuinely-active session re-pins on relaunch (see
+// init()).
+static char s_pinned_task_id[MAX_ID_LEN] = "";
+static AppTimer *s_unpin_timer = NULL;
+#define UNPIN_GRACE_MS 10000
+#define PINNED_HEADER_HEIGHT 22
+#endif
+
 // Same idea as s_tracking_task_id above, but for a StopWatch-type habit -
 // kept as its own independent slot (not reusing s_tracking_task_id) since
 // the real app's own currentTaskId (task) and SimpleCounter.isOn (habit)
@@ -576,6 +625,23 @@ static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
 // keeps the Add Task row permanently absent there.
 static bool s_habits_enabled = true;
 static bool s_add_task_enabled = true;
+#ifndef PBL_PLATFORM_APLITE
+// Mirrors the phone's "Notify when a task runs over its estimate" pairing
+// setting (config.overtimeNotify). Opt-in, so it starts false until the
+// first sync's MSG_SYNC_STATUS says otherwise - same conservative
+// 0-until-first-sync convention as s_touch_nav_enabled. #ifndef
+// PBL_PLATFORM_APLITE along with the whole over-estimate banner it drives
+// (see s_overtime_banner_layer's own comment) - aplite's RAM budget has no
+// room for the banner and this flag would be inert there anyway, so it's
+// not even read from the sync status message on aplite.
+static bool s_overtime_notify_enabled = false;
+// Mirrors the phone's "Pin the task you're tracking to the top" pairing
+// setting (config.pinTrackedTask). Opt-in, same 0-until-first-sync
+// convention as s_overtime_notify_enabled above, and aplite-gated for the
+// same reason - the pinned-section layout code it drives has no RAM budget
+// on aplite, where the tracked task just stays in place as it always has.
+static bool s_pin_tracked_task_enabled = false;
+#endif
 #if defined(PBL_TOUCH)
 // Mirrors the phone's "Touch navigation" pairing setting (config.touchNav),
 // off by default (see the touch block's own HARDWARE STATE comment for why -
@@ -819,6 +885,14 @@ static void request_sync(void);
 static void hide_error_overlay(void);
 static void push_habits_window(void);
 static void update_habits_empty_layer(void);
+static Task *find_task_by_id(const char *id);
+#ifndef PBL_PLATFORM_APLITE
+static void hide_overtime_banner(void);
+static void maybe_notify_overtime(void);
+static bool has_pinned_row(void);
+static int pinned_task_index(void);
+static void refresh_pinned_section(void);
+#endif
 #ifndef PBL_PLATFORM_APLITE
 static void backlight_touch(void);
 #else
@@ -932,8 +1006,75 @@ static Section0RowKind section0_row_kind(int row) {
   return SECTION0_ROW_RESYNC; // unreachable for any row menu_get_num_rows reported
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// Index into s_tasks of the task currently shown in the pinned "TRACKING"
+// section, or -1 if s_pinned_task_id is unset or no longer in the list
+// (completed + hidden, or removed on the phone). Does NOT consult the
+// enable flag - see has_pinned_row() for that.
+static int pinned_task_index(void) {
+  if (s_pinned_task_id[0] == '\0') {
+    return -1;
+  }
+  for (int i = 0; i < s_task_count; i++) {
+    if (strncmp(s_tasks[i].id, s_pinned_task_id, MAX_ID_LEN) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Whether the pinned "TRACKING" section is currently shown: the phone
+// setting is on AND there's a real task to put in it.
+static bool has_pinned_row(void) {
+  return s_pin_tracked_task_enabled && pinned_task_index() >= 0;
+}
+
+// Section index of project group 0 - 1 normally, or 2 when the pinned
+// section sits between section 0 (Resync/Habits/Add Task) and the groups.
+// Every task-menu callback that maps section_index to a group derives the
+// group index as (section_index - group_section_base()).
+static int group_section_base(void) {
+  return 1 + (has_pinned_row() ? 1 : 0);
+}
+#endif
+
+// Section index of project group 0, as a plain constant on aplite (which
+// has no pinned section) and the runtime value elsewhere. Lets the shared
+// menu callbacks below write `(int)section_index - GROUP_SECTION_BASE`
+// without an #ifdef at every site.
+#ifdef PBL_PLATFORM_APLITE
+#define GROUP_SECTION_BASE 1
+#else
+#define GROUP_SECTION_BASE group_section_base()
+#endif
+
+#ifndef PBL_PLATFORM_APLITE
+
+// How many of group g's tasks are actually drawn - all of them, minus the
+// one pinned task when it falls inside this group (shown in the pinned
+// section instead). A group left with 0 visible tasks collapses entirely
+// (no rows, no header/project row - see menu_get_header_height).
+static int group_visible_task_count(int g) {
+  int count = s_groups[g].count;
+  if (has_pinned_row()) {
+    int pi = pinned_task_index();
+    if (pi >= s_groups[g].start && pi < s_groups[g].start + s_groups[g].count) {
+      count--;
+    }
+  }
+  return count;
+}
+#endif
+
 static uint16_t menu_get_num_sections(MenuLayer *menu_layer, void *context) {
-  return s_task_count > 0 ? (uint16_t)(1 + s_group_count + 1) : 1;
+  if (s_task_count == 0) {
+    return 1;
+  }
+#ifndef PBL_PLATFORM_APLITE
+  return (uint16_t)(1 + (has_pinned_row() ? 1 : 0) + s_group_count + 1);
+#else
+  return (uint16_t)(1 + s_group_count + 1);
+#endif
 }
 
 static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
@@ -953,7 +1094,14 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
   if (section_index == 0) {
     return (uint16_t)section0_row_count();
   }
-  int group_idx = (int)section_index - 1;
+#ifndef PBL_PLATFORM_APLITE
+  // The pinned "TRACKING" section (see has_pinned_row) sits at index 1,
+  // between section 0 and the groups - exactly one row, the tracked task.
+  if (has_pinned_row() && section_index == 1) {
+    return 1;
+  }
+#endif
+  int group_idx = (int)section_index - GROUP_SECTION_BASE;
   if (group_idx == s_group_count) {
     return 1; // Finish Day row
   }
@@ -968,11 +1116,17 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
   // menu_select_click). Aplite keeps the plain, non-interactive header
   // instead (no RAM budget for the notes feature this exists to reach -
   // same exclusion as every other notes-adjacent piece in this file).
-  if (s_groups[group_idx].name[0] != '\0') {
-    return (uint16_t)(s_groups[group_idx].count + 1);
+  int visible = group_visible_task_count(group_idx);
+  if (visible == 0) {
+    return 0; // whole group collapsed - its only task is pinned at the top
   }
-#endif
+  if (s_groups[group_idx].name[0] != '\0') {
+    return (uint16_t)(visible + 1);
+  }
+  return (uint16_t)visible;
+#else
   return (uint16_t)s_groups[group_idx].count;
+#endif
 }
 
 static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_index, void *context) {
@@ -985,7 +1139,13 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
   if (section_index == 0) {
     return 0;
   }
-  int group_idx = (int)section_index - 1;
+#ifndef PBL_PLATFORM_APLITE
+  // The pinned "TRACKING" section gets a short labelled header strip.
+  if (has_pinned_row() && section_index == 1) {
+    return PINNED_HEADER_HEIGHT;
+  }
+#endif
+  int group_idx = (int)section_index - GROUP_SECTION_BASE;
   // An empty group name means grouping is off (every task collapsed into
   // one '' group) - no header, so this looks exactly like the flat list
   // this had before grouping existed.
@@ -993,6 +1153,11 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
     return 0;
   }
 #ifndef PBL_PLATFORM_APLITE
+  // A group whose only task is the one pinned at the top collapses whole -
+  // no floating header over an empty section.
+  if (group_visible_task_count(group_idx) == 0) {
+    return 0;
+  }
   // The group name now lives in a selectable project ROW instead (see
   // menu_get_num_rows/menu_draw_row) - no separate header needed. Aplite
   // keeps the plain 40px header below (draw_header's own aplite-reachable
@@ -1022,7 +1187,24 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   if (section_index == 0) {
     return;
   }
-  int group_idx = (int)section_index - 1;
+#ifndef PBL_PLATFORM_APLITE
+  // The pinned "TRACKING" section's own header - a thin green strip,
+  // deliberately smaller/quieter than the bold 24pt project headers below
+  // so it reads as a distinct-but-subordinate section.
+  if (has_pinned_row() && section_index == 1) {
+    GRect hb = layer_get_bounds(cell_layer);
+    graphics_context_set_fill_color(ctx, GColorGreen);
+    graphics_fill_rect(ctx, hb, 0, GCornerNone);
+    graphics_context_set_text_color(ctx, GColorBlack);
+    graphics_draw_text(ctx, "TRACKING", fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+                        GRect(6, 0, hb.size.w - 12, hb.size.h),
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    graphics_context_set_stroke_color(ctx, GColorBlack);
+    graphics_draw_line(ctx, GPoint(0, hb.size.h - 1), GPoint(hb.size.w, hb.size.h - 1));
+    return;
+  }
+#endif
+  int group_idx = (int)section_index - GROUP_SECTION_BASE;
   if (group_idx >= s_group_count || s_groups[group_idx].name[0] == '\0') {
     return;
   }
@@ -1093,7 +1275,16 @@ static Task *resolve_task_at(MenuIndex index) {
   if (index.section == 0) {
     return NULL;
   }
-  int group_idx = (int)index.section - 1;
+#ifndef PBL_PLATFORM_APLITE
+  // The pinned "TRACKING" section's single row IS the tracked task - Select
+  // (toggle), long-Select (stop tracking) and double-click (notes) all fall
+  // through to the same handlers a normal task row uses.
+  if (has_pinned_row() && index.section == 1) {
+    int pi = pinned_task_index();
+    return pi >= 0 ? &s_tasks[pi] : NULL;
+  }
+#endif
+  int group_idx = (int)index.section - GROUP_SECTION_BASE;
   if (group_idx >= s_group_count) {
     return NULL;
   }
@@ -1108,12 +1299,30 @@ static Task *resolve_task_at(MenuIndex index) {
     }
     row -= 1;
   }
-#endif
+  // Walk the group's tasks skipping the pinned one (it's drawn in the
+  // pinned section, not here), so visible row N maps to the Nth non-pinned
+  // task rather than s_tasks[start + N].
+  int pinned_idx = has_pinned_row() ? pinned_task_index() : -1;
+  int start = s_groups[group_idx].start;
+  int end = start + s_groups[group_idx].count;
+  int seen = 0;
+  for (int i = start; i < end && i < s_task_count; i++) {
+    if (i == pinned_idx) {
+      continue;
+    }
+    if (seen == row) {
+      return &s_tasks[i];
+    }
+    seen++;
+  }
+  return NULL;
+#else
   int task_idx = s_groups[group_idx].start + row;
   if (task_idx < 0 || task_idx >= s_task_count) {
     return NULL;
   }
   return &s_tasks[task_idx];
+#endif
 }
 
 #ifndef PBL_PLATFORM_APLITE
@@ -1124,11 +1333,19 @@ static TaskGroup *resolve_project_row_at(MenuIndex index) {
   if (index.section == 0) {
     return NULL;
   }
-  int group_idx = (int)index.section - 1;
+  if (has_pinned_row() && index.section == 1) {
+    return NULL;
+  }
+  int group_idx = (int)index.section - GROUP_SECTION_BASE;
   if (group_idx >= s_group_count) {
     return NULL;
   }
   if (s_groups[group_idx].name[0] == '\0' || (int)index.row != 0) {
+    return NULL;
+  }
+  // A fully-collapsed group (its only task pinned at the top) shows no
+  // project row either.
+  if (group_visible_task_count(group_idx) == 0) {
     return NULL;
   }
   return &s_groups[group_idx];
@@ -1312,6 +1529,122 @@ static void schedule_next_wakeup(void) {
 }
 #endif // !PBL_PLATFORM_APLITE
 
+// Draws one task row into `bounds` - the marquee/ellipsized title plus the
+// "@ due  > spent / estimate" subtitle strip. Shared by the normal
+// per-group task rows and the pinned "TRACKING" row (menu_draw_row).
+// show_project draws the task's project name (task->project) right-aligned
+// on the subtitle line - only the pinned "TRACKING" row passes true, since
+// a normal row's project is already conveyed by its group header. Note
+// task->project is only populated when the phone is grouping by project, so
+// the pinned row shows no project name in a flat/ungrouped list. `bounds`
+// is always a MenuLayer cell's own bounds (origin 0,0), same as the inline
+// code this was extracted from assumed.
+static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selected, bool show_project) {
+  int16_t available = bounds.size.w - TITLE_BOX_X * 2;
+  int16_t natural_width = title_natural_width(task->title);
+  bool needs_marquee = is_selected && natural_width > available;
+
+  GColor bg = is_selected ? GColorBlack : GColorWhite;
+  GColor fg = is_selected ? GColorWhite : GColorBlack;
+  if (task->done) {
+    fg = is_selected ? GColorLightGray : GColorDarkGray;
+  }
+  graphics_context_set_fill_color(ctx, bg);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_context_set_text_color(ctx, fg);
+
+  GFont title_font = fonts_get_system_font(TITLE_FONT_KEY);
+  GSize one_line_size = graphics_text_layout_get_content_size(
+      "Ag", title_font, GRect(0, 0, 200, 100), GTextOverflowModeFill, GTextAlignmentLeft);
+  int16_t title_box_h = one_line_size.h > 0 ? one_line_size.h : (bounds.size.h - TITLE_BOX_Y);
+  GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, title_box_h);
+
+  if (needs_marquee) {
+    int16_t period = natural_width + SCROLL_GAP_PX;
+    int16_t x = -(s_scroll_offset_px % period);
+    graphics_draw_text(ctx, task->title, title_font,
+                        GRect(title_box.origin.x + x, title_box.origin.y, natural_width, title_box.size.h),
+                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, task->title, title_font,
+                        GRect(title_box.origin.x + x + period, title_box.origin.y, natural_width, title_box.size.h),
+                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  } else {
+    graphics_draw_text(ctx, task->title, title_font, title_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+
+  GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 22, bounds.size.w - TITLE_BOX_X * 2, 22);
+
+  if (task->done) {
+    graphics_draw_text(ctx, "Done", fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    return;
+  }
+
+  bool is_tracking_this = s_tracking_task_id[0] != '\0' &&
+                           strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
+  int effective_ms = task->time_spent_ms;
+  if (is_tracking_this) {
+    time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
+    if (elapsed_s > 0) {
+      effective_ms += (int)elapsed_s * 1000;
+    }
+  }
+
+  char subtitle[56] = "";
+  if (task->due_min >= 0) {
+    format_due_time(task->due_min, subtitle, sizeof(subtitle));
+  }
+  if (effective_ms > 0 || is_tracking_this) {
+    char time_text[20];
+    format_duration_ms(effective_ms, is_tracking_this, time_text, sizeof(time_text));
+    if (task->time_estimate_ms > 0) {
+      char estimate_text[20];
+      format_duration_ms(task->time_estimate_ms, false, estimate_text, sizeof(estimate_text));
+      char combined[48];
+      snprintf(combined, sizeof(combined), "%s / %s", time_text, estimate_text);
+      strncpy(time_text, combined, sizeof(time_text) - 1);
+      time_text[sizeof(time_text) - 1] = '\0';
+    }
+    size_t existing_len = strlen(subtitle);
+    if (existing_len > 0) {
+      const char *separator = is_tracking_this ? "  " : " - ";
+      snprintf(subtitle + existing_len, sizeof(subtitle) - existing_len, "%s%s", separator, time_text);
+    } else {
+      strncpy(subtitle, time_text, sizeof(subtitle) - 1);
+      subtitle[sizeof(subtitle) - 1] = '\0';
+    }
+  }
+
+  GRect left_box = subtitle_box;
+#ifndef PBL_PLATFORM_APLITE
+  // Project name for the pinned row, right-aligned on the subtitle strip.
+  // Reserve up to half the width for it and shrink the left (due/time) box
+  // to match so the two never overlap.
+  if (show_project && task->project[0] != '\0') {
+    GFont pfont = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+    GSize psize = graphics_text_layout_get_content_size(
+        task->project, pfont, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentRight);
+    int16_t pw = psize.w;
+    if (pw > subtitle_box.size.w / 2) {
+      pw = subtitle_box.size.w / 2;
+    }
+    graphics_draw_text(ctx, task->project, pfont,
+                        GRect(subtitle_box.origin.x + subtitle_box.size.w - pw, subtitle_box.origin.y + 2,
+                              pw, subtitle_box.size.h - 2),
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+    left_box.size.w -= (pw + 6);
+  }
+#else
+  (void)show_project;
+#endif
+
+  if (subtitle[0] != '\0') {
+    graphics_draw_text(ctx, subtitle, fonts_get_system_font(SUBTITLE_FONT_KEY), left_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+}
+
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
   if (s_task_count == 0 && !ACTIONABLE_EMPTY_ACTIVE()) {
     // Menu stays hidden for every empty reason except the actionable one
@@ -1426,7 +1759,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_draw_bitmap_in_rect(ctx, is_selected ? s_check_white_bitmap : s_check_bitmap, icon_rect);
     return;
   }
-  if ((int)cell_index->section - 1 == s_group_count) {
+  if ((int)cell_index->section - GROUP_SECTION_BASE == s_group_count) {
 #ifndef PBL_PLATFORM_APLITE
     // Finish Day row, always last - long-select archives every currently-
     // done task (menu_select_long_click); plain Select is a no-op here,
@@ -1508,122 +1841,11 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
   bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
                       menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
-  GRect bounds = layer_get_bounds(cell_layer);
-  int16_t available = bounds.size.w - TITLE_BOX_X * 2;
-  int16_t natural_width = title_natural_width(task->title);
-  bool needs_marquee = is_selected && natural_width > available;
-
-  // Every task row goes through this same custom draw path, not just the
-  // marquee/done ones - menu_cell_basic_draw's own title font (used for the
-  // fast path this used to take) doesn't match TITLE_FONT_KEY, so titles
-  // rendered by it looked a different size than a scrolling/done title
-  // drawn here. Using one font for every row keeps that consistent, and
-  // means the row's own background has to be redrawn here too, using colors
-  // matching the platform's own default invert-on-select cell style
-  // (confirmed in the emulator: selected rows are black background/white
-  // text, not white/black like an unselected row) - otherwise leftover
-  // framebuffer content stays behind the text.
-  GColor bg = is_selected ? GColorBlack : GColorWhite;
-  GColor fg = is_selected ? GColorWhite : GColorBlack;
-  // Dim a done task's title relative to its own row background (light gray
-  // on the selected/black row, dark gray on a normal/white one) instead of
-  // full-strength text color - this SDK has no italic system font and no
-  // text-skew API to fake one, so a muted color is the achievable "done
-  // looks different" cue here.
-  if (task->done) {
-    fg = is_selected ? GColorLightGray : GColorDarkGray;
-  }
-  graphics_context_set_fill_color(ctx, bg);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-  graphics_context_set_text_color(ctx, fg);
-
-  GFont title_font = fonts_get_system_font(TITLE_FONT_KEY);
-  // Constrained to exactly one line's height (measured, not the row's full
-  // remaining height) so GTextOverflowModeTrailingEllipsis ellipsizes at
-  // the end of line 1 instead of wrapping onto a second line - confirmed in
-  // the emulator that a taller box lets a long title wrap rather than
-  // truncate, which is what this app wants titles to never do.
-  GSize one_line_size = graphics_text_layout_get_content_size(
-      "Ag", title_font, GRect(0, 0, 200, 100), GTextOverflowModeFill, GTextAlignmentLeft);
-  int16_t title_box_h = one_line_size.h > 0 ? one_line_size.h : (bounds.size.h - TITLE_BOX_Y);
-  GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, title_box_h);
-
-  if (needs_marquee) {
-    int16_t period = natural_width + SCROLL_GAP_PX;
-    int16_t x = -(s_scroll_offset_px % period);
-    // No app-level clip-rect API exists in this SDK; relying on cell_layer's
-    // own bounds to constrain rendering the way MenuLayer's own row drawing
-    // already does for every other row - confirmed visually in the
-    // emulator, not just assumed (see the commit this landed in).
-    graphics_draw_text(ctx, task->title, title_font,
-                        GRect(title_box.origin.x + x, title_box.origin.y, natural_width, title_box.size.h),
-                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
-    graphics_draw_text(ctx, task->title, title_font,
-                        GRect(title_box.origin.x + x + period, title_box.origin.y, natural_width, title_box.size.h),
-                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
-  } else {
-    graphics_draw_text(ctx, task->title, title_font, title_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  }
-
-  if (task->done) {
-    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 22, bounds.size.w - TITLE_BOX_X * 2, 22);
-    graphics_draw_text(ctx, "Done", fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
-  } else {
-    // Tracked time is shown BEHIND (after) the due time when the task has
-    // one, both sharing the single subtitle line - not its own row, since
-    // every other subtitle here already lives in that same 22px strip.
-    bool is_tracking_this = s_tracking_task_id[0] != '\0' &&
-                             strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
-    int effective_ms = task->time_spent_ms;
-    if (is_tracking_this) {
-      time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
-      if (elapsed_s > 0) {
-        effective_ms += (int)elapsed_s * 1000;
-      }
-    }
-
-    char subtitle[56] = "";
-    if (task->due_min >= 0) {
-      format_due_time(task->due_min, subtitle, sizeof(subtitle));
-    }
-    if (effective_ms > 0 || is_tracking_this) {
-      char time_text[20];
-      format_duration_ms(effective_ms, is_tracking_this, time_text, sizeof(time_text));
-      // The estimate rides on the same time_text - "already spent / target"
-      // - rather than its own separate segment, since it's only meaningful
-      // alongside the timer, not on its own (see the "if visible" gate
-      // below).
-      if (task->time_estimate_ms > 0) {
-        char estimate_text[20];
-        format_duration_ms(task->time_estimate_ms, false, estimate_text, sizeof(estimate_text));
-        char combined[48];
-        snprintf(combined, sizeof(combined), "%s / %s", time_text, estimate_text);
-        strncpy(time_text, combined, sizeof(time_text) - 1);
-        time_text[sizeof(time_text) - 1] = '\0';
-      }
-      size_t existing_len = strlen(subtitle);
-      if (existing_len > 0) {
-        // A dash reads as "these are two separate, settled facts about this
-        // task" (due time - time already spent). While actively tracking,
-        // the ticking "> ..." number is visibly still in motion, not a
-        // settled fact yet, so it keeps the plainer double-space instead -
-        // the dash is reserved for the not-currently-tracking case.
-        const char *separator = is_tracking_this ? "  " : " - ";
-        snprintf(subtitle + existing_len, sizeof(subtitle) - existing_len, "%s%s", separator, time_text);
-      } else {
-        strncpy(subtitle, time_text, sizeof(subtitle) - 1);
-        subtitle[sizeof(subtitle) - 1] = '\0';
-      }
-    }
-
-    if (subtitle[0] != '\0') {
-      GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 22, bounds.size.w - TITLE_BOX_X * 2, 22);
-      graphics_draw_text(ctx, subtitle, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
-                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-    }
-  }
+  bool is_pinned_row = false;
+#ifndef PBL_PLATFORM_APLITE
+  is_pinned_row = has_pinned_row() && cell_index->section == 1;
+#endif
+  draw_task_row(ctx, layer_get_bounds(cell_layer), task, is_selected, is_pinned_row);
 }
 
 // ---------- outbound send retry ----------
@@ -1898,12 +2120,108 @@ static void start_note_append_dictation(void) {
 }
 #endif
 
+#ifndef PBL_PLATFORM_APLITE
+static void overtime_banner_timeout_callback(void *data) {
+  s_overtime_banner_timer = NULL;
+  hide_overtime_banner();
+}
+
+// Hides the over-estimate banner and cancels its auto-dismiss timer - safe
+// to call whether or not it's currently showing (Select press, tracking
+// stopped, setting turned off, window unload).
+static void hide_overtime_banner(void) {
+  if (s_overtime_banner_timer) {
+    app_timer_cancel(s_overtime_banner_timer);
+    s_overtime_banner_timer = NULL;
+  }
+  if (s_overtime_banner_layer) {
+    layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), true);
+  }
+}
+
+static void show_overtime_banner(const char *task_title) {
+  if (!s_overtime_banner_layer) {
+    return;
+  }
+  snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
+            "Over estimate\n%s", task_title);
+  text_layer_set_text(s_overtime_banner_layer, s_overtime_banner_text);
+  layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), false);
+  layer_mark_dirty(text_layer_get_layer(s_overtime_banner_layer));
+  vibes_double_pulse();
+  if (s_overtime_banner_timer) {
+    app_timer_cancel(s_overtime_banner_timer);
+  }
+  s_overtime_banner_timer = app_timer_register(OVERTIME_BANNER_MS, overtime_banner_timeout_callback, NULL);
+}
+
+// Called once per tracking tick: fires the over-estimate banner the first
+// time the tracked task's effective time (synced spent + this session's
+// still-running elapsed) reaches its estimate. Latched via
+// s_overtime_notified so it only fires once per crossing, and re-armed if
+// the effective time later falls back under the estimate.
+static void maybe_notify_overtime(void) {
+  if (!s_overtime_notify_enabled || s_tracking_task_id[0] == '\0') {
+    return;
+  }
+  Task *task = find_task_by_id(s_tracking_task_id);
+  if (!task || task->time_estimate_ms <= 0) {
+    return;
+  }
+  int effective_ms = task->time_spent_ms;
+  time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
+  if (elapsed_s > 0) {
+    effective_ms += (int)elapsed_s * 1000;
+  }
+  if (effective_ms < task->time_estimate_ms) {
+    s_overtime_notified = false; // re-arm for a later crossing
+    return;
+  }
+  if (s_overtime_notified || s_error_overlay_active) {
+    return;
+  }
+  s_overtime_notified = true;
+  show_overtime_banner(task->title);
+}
+
+// Re-lays-out the task list after the pinned "TRACKING" section appears or
+// disappears (tracking started/stopped, grace expired, setting toggled) -
+// the section count and every group's row count can change, so a full
+// reload_data (not just mark_dirty) is needed, plus a scroll-state refresh
+// since which row is selected/marquee-scrolling may have moved.
+static void refresh_pinned_section(void) {
+  if (!s_menu_layer) {
+    return;
+  }
+  menu_layer_reload_data(s_menu_layer);
+  refresh_scroll_state(true);
+}
+
+static void unpin_timer_callback(void *data) {
+  s_unpin_timer = NULL;
+  s_pinned_task_id[0] = '\0';
+  refresh_pinned_section();
+}
+
+// Cancels a pending unpin-grace timer (see stop_tracking_and_report) - the
+// task is about to be (re-)pinned, or the app is shutting down.
+static void cancel_unpin_timer(void) {
+  if (s_unpin_timer) {
+    app_timer_cancel(s_unpin_timer);
+    s_unpin_timer = NULL;
+  }
+}
+#endif
+
 static void tracking_tick_callback(void *data) {
   // Only the elapsed-time text changes each tick, not the row data itself -
   // mark_dirty (a repaint) rather than reload_data (which also re-asks for
   // section/row counts etc.) is the same lighter-weight choice
   // scroll_timer_callback already makes for the marquee tick.
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
+#ifndef PBL_PLATFORM_APLITE
+  maybe_notify_overtime();
+#endif
   s_tracking_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, tracking_tick_callback, NULL);
 }
 
@@ -1925,7 +2243,27 @@ static void start_tracking(Task *task) {
   s_tracking_task_id[MAX_ID_LEN - 1] = '\0';
   s_tracking_start_epoch = time(NULL);
   save_tracking();
+#ifndef PBL_PLATFORM_APLITE
+  // Fresh session - re-arm the over-estimate banner (the tick will fire it
+  // if this task is already past its estimate) and clear any stale one
+  // left over from the previous task.
+  s_overtime_notified = false;
+  hide_overtime_banner();
+  // Pin this task to the top (if the setting's on). Cancels any grace timer
+  // from a just-stopped previous task and re-lays-out the list so the
+  // pinned section appears (or switches to this task) right away.
+  cancel_unpin_timer();
+  strncpy(s_pinned_task_id, task->id, MAX_ID_LEN - 1);
+  s_pinned_task_id[MAX_ID_LEN - 1] = '\0';
+#endif
   start_tracking_tick();
+#ifndef PBL_PLATFORM_APLITE
+  if (has_pinned_row()) {
+    refresh_pinned_section();
+    // Highlight the freshly-pinned row (it's section 1, row 0).
+    menu_layer_set_selected_index(s_menu_layer, MenuIndex(1, 0), MenuRowAlignCenter, false);
+  }
+#endif
 }
 
 // Stops whatever's currently being tracked (a no-op if nothing is). When
@@ -1956,11 +2294,37 @@ static void stop_tracking_and_report(void) {
   s_tracking_task_id[0] = '\0';
   s_tracking_start_epoch = 0;
   save_tracking();
+#ifndef PBL_PLATFORM_APLITE
+  s_overtime_notified = false;
+  hide_overtime_banner();
+  // Keep the just-stopped task in the pinned section for a short grace
+  // period so it slides back into its group smoothly rather than vanishing
+  // the instant you long-press to stop. A new start_tracking() (switching
+  // to another task) cancels this. Only armed when the pin is actually
+  // showing something - not when the setting's off or nothing was pinned.
+  if (s_pin_tracked_task_enabled && s_pinned_task_id[0] != '\0') {
+    cancel_unpin_timer();
+    s_unpin_timer = app_timer_register(UNPIN_GRACE_MS, unpin_timer_callback, NULL);
+  } else {
+    s_pinned_task_id[0] = '\0';
+  }
+#endif
   stop_tracking_tick();
 }
 
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
+#ifndef PBL_PLATFORM_APLITE
+  // The over-estimate banner (see maybe_notify_overtime) is a plain layer
+  // on top of the menu, not a separate window - a Select press while it's
+  // up just dismisses it and does nothing else, same "first press clears
+  // the transient overlay" feel the error overlay has.
+  if (s_overtime_banner_layer &&
+      !layer_get_hidden(text_layer_get_layer(s_overtime_banner_layer))) {
+    hide_overtime_banner();
+    return;
+  }
+#endif
   // No s_notes_overlay_active check here (unlike the error overlay below) -
   // the notes overlay is a separate pushed Window (see s_notes_window's own
   // comment), so this callback simply never fires while it's on top; the
@@ -2086,7 +2450,7 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  if ((int)cell_index->section - 1 == s_group_count) {
+  if ((int)cell_index->section - GROUP_SECTION_BASE == s_group_count) {
     // Finish Day row - see its own comment in menu_draw_row. No optimistic
     // local change here (unlike task-toggle/habit-adjust/time-tracking) -
     // archiving needs the phone's own full-fidelity state.task cache, which
@@ -2222,6 +2586,11 @@ static void show_error_overlay(void) {
   layer_set_hidden(menu_layer_get_layer(s_menu_layer), true);
   layer_set_hidden(text_layer_get_layer(s_empty_layer), true);
   layer_set_hidden(bitmap_layer_get_layer(s_logo_layer), true);
+#ifndef PBL_PLATFORM_APLITE
+  // The over-estimate banner sits on top of this overlay's own layer - drop
+  // it so the full-screen error isn't half-covered by a stale strip.
+  hide_overtime_banner();
+#endif
   stop_syncing_animation();
 }
 
@@ -2742,6 +3111,16 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       set_status_code(STATUS_OK);
       recompute_groups();
       save_tasks();
+#ifndef PBL_PLATFORM_APLITE
+      // If the pinned task is no longer in the list (completed/archived on
+      // another client) and nothing's being tracked, drop the stale pin so
+      // it can't spuriously re-appear if that id ever comes back.
+      if (s_pinned_task_id[0] != '\0' && s_tracking_task_id[0] == '\0' &&
+          find_task_by_id(s_pinned_task_id) == NULL) {
+        cancel_unpin_timer();
+        s_pinned_task_id[0] = '\0';
+      }
+#endif
       menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
       // A refreshed list can change whether the (possibly now-different)
@@ -2876,6 +3255,34 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (touch_nav_tuple && (touch_nav_tuple->value->int32 != 0) != s_touch_nav_enabled) {
         s_touch_nav_enabled = touch_nav_tuple->value->int32 != 0;
         apply_touch_nav();
+      }
+#endif
+#ifndef PBL_PLATFORM_APLITE
+      // Same optional/absent-means-unchanged pattern as the flags above.
+      // aplite-excluded along with the banner this drives - see the flag's
+      // own comment.
+      Tuple *overtime_notify_tuple = dict_find(iterator, KEY_OVERTIME_NOTIFY_ENABLED);
+      if (overtime_notify_tuple) {
+        s_overtime_notify_enabled = overtime_notify_tuple->value->int32 != 0;
+        if (!s_overtime_notify_enabled) {
+          hide_overtime_banner();
+        }
+      }
+      // Same optional/absent-means-unchanged pattern. Toggling it off mid-
+      // session clears any pinned/grace state so the tracked task drops
+      // straight back into its group; toggling it on re-pins the currently-
+      // tracked task. The reload_data below (always runs) redraws either way.
+      Tuple *pin_tracked_tuple = dict_find(iterator, KEY_PIN_TRACKED_TASK_ENABLED);
+      if (pin_tracked_tuple) {
+        bool was = s_pin_tracked_task_enabled;
+        s_pin_tracked_task_enabled = pin_tracked_tuple->value->int32 != 0;
+        if (was && !s_pin_tracked_task_enabled) {
+          cancel_unpin_timer();
+          s_pinned_task_id[0] = '\0';
+        } else if (!was && s_pin_tracked_task_enabled && s_tracking_task_id[0] != '\0') {
+          strncpy(s_pinned_task_id, s_tracking_task_id, MAX_ID_LEN - 1);
+          s_pinned_task_id[MAX_ID_LEN - 1] = '\0';
+        }
       }
 #endif
       // update_empty_layer() only redraws the empty-state text layer, which
@@ -3967,6 +4374,25 @@ static void window_load(Window *window) {
   layer_set_hidden(text_layer_get_layer(s_error_layer), true);
   layer_add_child(window_layer, text_layer_get_layer(s_error_layer));
 
+#ifndef PBL_PLATFORM_APLITE
+  // Over-estimate banner (see maybe_notify_overtime) - a red strip across
+  // the top of the list, on top of everything except the full-screen error
+  // overlay above (which maybe_notify_overtime won't fire behind anyway).
+  // Same GColorRed + white-bold-18 styling as s_error_layer, just a
+  // top-anchored strip rather than the full content area. Hidden until a
+  // tracked task first crosses its estimate.
+  GRect overtime_bounds = GRect(content_bounds.origin.x, content_bounds.origin.y,
+                                 content_bounds.size.w, OVERTIME_BANNER_HEIGHT);
+  s_overtime_banner_layer = text_layer_create(overtime_bounds);
+  text_layer_set_text_alignment(s_overtime_banner_layer, GTextAlignmentCenter);
+  text_layer_set_font(s_overtime_banner_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_background_color(s_overtime_banner_layer, GColorRed);
+  text_layer_set_text_color(s_overtime_banner_layer, GColorWhite);
+  text_layer_set_overflow_mode(s_overtime_banner_layer, GTextOverflowModeTrailingEllipsis);
+  layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), true);
+  layer_add_child(window_layer, text_layer_get_layer(s_overtime_banner_layer));
+#endif
+
   update_empty_layer();
   request_sync();
 
@@ -3986,11 +4412,17 @@ static void window_unload(Window *window) {
   // comment) - only cancels this window's own redraw timer, since
   // s_menu_layer (what it redraws) is about to be destroyed too.
   stop_tracking_tick();
+#ifndef PBL_PLATFORM_APLITE
+  hide_overtime_banner(); // cancels its auto-dismiss timer
+  cancel_unpin_timer();   // the pinned-section grace timer
+#endif
   stop_syncing_animation();
   menu_layer_destroy(s_menu_layer);
   text_layer_destroy(s_empty_layer);
 #ifndef PBL_PLATFORM_APLITE
   text_layer_destroy(s_sync_progress_layer);
+  text_layer_destroy(s_overtime_banner_layer);
+  s_overtime_banner_layer = NULL;
 #endif
   text_layer_destroy(s_error_layer);
 #ifndef PBL_PLATFORM_APLITE
@@ -4041,6 +4473,41 @@ static void init(void) {
   load_habit_tracking();
 #endif
   recompute_groups();
+
+#ifndef PBL_PLATFORM_APLITE
+  // Re-pin a resumed tracking session (the setting itself isn't known until
+  // the first sync's MSG_SYNC_STATUS - has_pinned_row() gates on it, and
+  // that sync's own reload_data makes the section appear once it arrives).
+  // A stopped-but-still-in-grace task is deliberately NOT re-pinned: the
+  // grace period is a UI nicety, not persisted state.
+  if (s_tracking_task_id[0] != '\0') {
+    strncpy(s_pinned_task_id, s_tracking_task_id, MAX_ID_LEN - 1);
+    s_pinned_task_id[MAX_ID_LEN - 1] = '\0';
+  }
+#endif
+
+#ifndef PBL_PLATFORM_APLITE
+  // If a resumed tracking session is already past its estimate the moment
+  // the app opens, latch s_overtime_notified so the first tick doesn't fire
+  // the banner - only a crossing that happens while the app is open should
+  // notify, not just reopening the app mid-overrun. (s_overtime_notify_enabled
+  // is still false here - the first sync sets it - but the latch survives
+  // that; maybe_notify_overtime re-arms it on its own if the effective time
+  // later dips back under the estimate.)
+  if (s_tracking_task_id[0] != '\0') {
+    Task *resumed = find_task_by_id(s_tracking_task_id);
+    if (resumed && resumed->time_estimate_ms > 0) {
+      int effective_ms = resumed->time_spent_ms;
+      time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
+      if (elapsed_s > 0) {
+        effective_ms += (int)elapsed_s * 1000;
+      }
+      if (effective_ms >= resumed->time_estimate_ms) {
+        s_overtime_notified = true;
+      }
+    }
+  }
+#endif
 
   app_message_register_inbox_received(inbox_received_handler);
   app_message_register_inbox_dropped(inbox_dropped_handler);

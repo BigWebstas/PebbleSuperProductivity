@@ -28,6 +28,8 @@ Productivity's own **SuperSync** server.
 * Select (Middle button)
     * Click once to toggle Done/In-progress
     * Long hold to start time tracking when on tasks and habits
+      * Optionally (enable "Notify when a task runs over its estimate" in settings) the watch vibrates and shows a banner once the tracked task's time spent reaches its estimate — not on original Pebble/Pebble Steel (aplite)
+      * Optionally (enable "Pin the task you're tracking to the top" in settings) the task being tracked moves into its own "Tracking" section at the top of the list until ~10s after you stop — not on original Pebble/Pebble Steel (aplite)
     * Long hold to append a note when on the notes screen
     * Double click to show task and project notes, plus a task's tags (shown above its notes)
       * To show projects and project notes you must enable "Group tasks by project" in settings

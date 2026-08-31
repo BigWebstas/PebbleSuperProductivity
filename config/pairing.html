@@ -111,6 +111,29 @@
     effect on watches without a touchscreen.
   </p>
 
+  <div class="checkbox-row">
+    <input id="overtimeNotify" type="checkbox">
+    <label for="overtimeNotify">Notify when a task runs over its estimate</label>
+  </div>
+  <p class="hint">
+    While you're tracking time on a task that has a time estimate, the watch
+    vibrates and shows a banner the moment the time spent reaches that
+    estimate. Fires once per tracking session. Not available on original
+    Pebble/Pebble Steel (aplite).
+  </p>
+
+  <div class="checkbox-row">
+    <input id="pinTrackedTask" type="checkbox">
+    <label for="pinTrackedTask">Pin the task you're tracking to the top</label>
+  </div>
+  <p class="hint">
+    While a task's timer is running, show it in its own "Tracking" section at
+    the top of the list (with its live duration, and its project when "Group
+    tasks by project" is on) and hide it from its normal group. Slides back
+    into place about 10 seconds after you stop. Not available on original
+    Pebble/Pebble Steel (aplite).
+  </p>
+
   <button id="saveBtn">Save &amp; sync</button>
   <button id="cancelBtn" class="secondary">Cancel</button>
 
@@ -158,7 +181,9 @@
       defaultProjectId: document.getElementById('defaultProjectId').value,
       enableHabits: document.getElementById('enableHabits').checked,
       enableAddTask: document.getElementById('enableAddTask').checked,
-      touchNav: document.getElementById('touchNav').checked
+      touchNav: document.getElementById('touchNav').checked,
+      overtimeNotify: document.getElementById('overtimeNotify').checked,
+      pinTrackedTask: document.getElementById('pinTrackedTask').checked
     });
   });
 

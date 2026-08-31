@@ -29,6 +29,8 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var enableHabits = options.enableHabits !== false;
   var enableAddTask = options.enableAddTask !== false;
   var touchNav = !!options.touchNav;
+  var overtimeNotify = !!options.overtimeNotify;
+  var pinTrackedTask = !!options.pinTrackedTask;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
@@ -169,6 +171,30 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    completes its main task, matching Super Productivity\'s own "Automatically\n' +
 '    mark parent task done" setting. Only fires forward - undoing a subtask\n' +
 '    never reopens an already-completed main task.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="overtimeNotify" type="checkbox"' + (overtimeNotify ? ' checked' : '') + '>\n' +
+'    <label for="overtimeNotify">Notify when a task runs over its estimate</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    While you\'re tracking time on a task that has a time estimate, the\n' +
+'    watch vibrates and shows a banner the moment the time spent on it\n' +
+'    reaches that estimate. Only fires once per tracking session. Not\n' +
+'    available on original Pebble/Pebble Steel (aplite) - too little free\n' +
+'    memory left on that hardware for the banner.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="pinTrackedTask" type="checkbox"' + (pinTrackedTask ? ' checked' : '') + '>\n' +
+'    <label for="pinTrackedTask">Pin the task you\'re tracking to the top</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    While a task\'s timer is running, show it in its own "Tracking" section\n' +
+'    at the top of the list (with its live duration, and its project when\n' +
+'    "Group tasks by project" is on), and hide it from its normal group.\n' +
+'    When you stop tracking it slides back into place after about 10\n' +
+'    seconds. Not available on original Pebble/Pebble Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="backlightMode">Backlight</label>\n' +
@@ -315,6 +341,8 @@ autoSyncIntervalOptions + '\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
+'      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
+'      pinTrackedTask: document.getElementById(\'pinTrackedTask\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +
 '  });\n' +
