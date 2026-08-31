@@ -916,7 +916,7 @@ function taskIsPlannedForToday(t, today) {
 // fresh-enough doneOn through this app's own replay to matter here - which
 // is also the right scope: nobody's watching the watch in real time for a
 // completion that happened on a different device.
-var HIDE_DONE_GRACE_MS = 5000;
+var HIDE_DONE_GRACE_MS = 10000;
 
 // Shared by getActiveTasks' own main-task filter and pushTaskAndSubtasks'
 // per-subtask filter below - a done task/subtask with no doneOn at all

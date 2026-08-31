@@ -158,7 +158,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    showing it dimmed. A completed subtask under a still-open task is\n' +
 '    hidden the same way; a completed task with subtasks is hidden along\n' +
 '    with all of them. A task you complete on the watch itself stays\n' +
-'    visible for about 5 seconds first, so you can see it happen before it\n' +
+'    visible for about 10 seconds first, so you can see it happen before it\n' +
 '    disappears.\n' +
 '  </p>\n' +
 '\n' +
