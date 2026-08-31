@@ -1,14 +1,12 @@
 #include <pebble.h>
 
-// No runtime API exposes the app's own versionLabel (package.json's
-// "version") to C code - keep this in sync by hand on every version bump.
+// Keep in sync by hand with package.json "version" on every bump - no runtime
+// API exposes it to C.
 #define APP_VERSION "0.6.24"
 
-// Dictionary keys are the MESSAGE_KEY_* externs pebble.h pulls in from
-// message_keys.auto.h, generated from the "messageKeys" list in
-// package.json - NOT small hand-picked integers. AppMessage assigns each
-// key an ID starting at 10000, so a local 0-based enum silently never
-// matches what the phone sends/expects.
+// MESSAGE_KEY_* come from message_keys.auto.h (generated from package.json's
+// "messageKeys"); AppMessage assigns IDs from 10000, so a 0-based enum wouldn't
+// match the phone.
 #define KEY_MSG_TYPE MESSAGE_KEY_MSG_TYPE
 #define KEY_TASK_TOTAL MESSAGE_KEY_TASK_TOTAL
 #define KEY_TASK_INDEX MESSAGE_KEY_TASK_INDEX
@@ -68,14 +66,10 @@ enum {
   MSG_NOTE_SYNC_START = 17, // phone -> watch: TASK_ID + NOTE_TOTAL_LEN (bytes about to follow, 0 = no notes)
   MSG_NOTE_CHUNK = 18,      // phone -> watch: TASK_ID + NOTE_CHUNK_TEXT (append this chunk)
   MSG_NOTE_SYNC_END = 19,   // phone -> watch: TASK_ID (all chunks sent, render now)
-  // Project notes - selecting the project row shown when "group by project"
-  // is on (see the project-row addition to menu_draw_row/menu_select_click)
-  // reuses this exact same fetch/append machinery, just keyed by PROJECT_ID
-  // instead of TASK_ID - see s_notes_overlay_is_project's own comment. The
-  // real app has no single "project notes" field (a project has a *list* of
-  // separate Note entities, project.noteIds) - this treats the project's
-  // oldest Note (by `created`) as the one synthetic "project note" the watch
-  // shows/appends to, creating one on first append if none exists yet.
+  // Project notes reuse the task-notes fetch/append machinery, keyed by
+  // PROJECT_ID. The real app has no single "project notes" field (a project has
+  // a list of Note entities); the phone treats the oldest one as the synthetic
+  // "project note", creating it on first append.
   MSG_PROJECT_NOTE_APPEND = 20,     // watch -> phone: PROJECT_ID + NOTE_TEXT
   MSG_PROJECT_NOTE_REQUEST = 21,    // watch -> phone: PROJECT_ID
   MSG_PROJECT_NOTE_SYNC_START = 22, // phone -> watch: PROJECT_ID + NOTE_TOTAL_LEN
@@ -91,55 +85,29 @@ enum {
   STATUS_ERROR = 3,
 };
 
-// emery (Pebble Time 2) has far more free RAM than the rest of the lineup
-// (~106KB vs ~41KB on basalt/chalk/diorite, and aplite well under 1KB after
-// MAX_ID_LEN's own bump - see MAX_HABITS' comment below for the same split)
-// so it alone gets a higher cap rather than raising the shared default and
-// risking the tighter platforms.
+// emery (Pebble Time 2) has far more free RAM (~106KB vs ~41KB on
+// basalt/chalk/diorite, aplite under 1KB) so it alone gets a higher cap.
 #ifdef PBL_PLATFORM_EMERY
 #define MAX_TASKS 50
 #else
 #define MAX_TASKS 30
 #endif
 #define MAX_TITLE_LEN 64
-// Plain generated task ids are ~21 chars, but calendar-integration ids
-// (generateCalendarTaskId: `cal_${issueProviderId}_${calendarEventId}`) have
-// no fixed cap - issueProviderId alone is a ~21-char id, and calendarEventId
-// is an arbitrary iCal UID that can itself carry a recurrence-instance
-// timestamp suffix. A real one confirmed live on a real account ran 79
-// chars. 40 silently truncated it: the truncated id doesn't match any real
-// task server-side, so a toggle/track-time upload against it touches
-// nothing, while the task's TITLE (a separate field) still displayed
-// correctly - completely invisible until you act on that specific task.
+// Generated task ids are ~21 chars, but calendar-integration ids
+// (`cal_${issueProviderId}_${calendarEventId}`) have no fixed cap - a real one
+// ran 79 chars. A too-short buffer truncates the id so uploads against it
+// silently touch nothing server-side while the title still displays fine.
 #define MAX_ID_LEN 96
 #define MAX_PROJECT_LEN 32
-// Project ids are a plain nanoid() (project.service.ts), same as a habit's
-// SimpleCounter id - no calendar-integration format to accommodate, so this
-// doesn't need MAX_ID_LEN's 96-byte allowance (see MAX_HABIT_ID_LEN's own
-// comment for the same reasoning).
+// Project ids are a plain nanoid() - no calendar-id format, so 32 is enough.
 #define MAX_PROJECT_ID_LEN 32
-// A task's notes can be many paragraphs of markdown in the real app - too
-// big and too rarely-viewed to carry on every Task in the double-buffered
-// s_tasks/s_incoming arrays (MAX_TASKS * 2 copies) the way title/project/etc
-// do. This used to be a fixed MAX_NOTES_LEN-per-task field (hard-truncated,
-// glance-preview only) purely because of that multiplied cost - not because
-// notes are inherently short. Fetched on demand instead (MSG_NOTE_REQUEST/
-// MSG_NOTE_SYNC_START/MSG_NOTE_CHUNK/MSG_NOTE_SYNC_END, see
-// s_notes_full_text below) for only the one task whose notes overlay is
-// currently open, malloc'd to the exact size the phone reports up front -
-// no per-task cost, and no fixed ceiling on note length either.
-// #ifndef PBL_PLATFORM_APLITE-gated entirely, same reasoning as the
-// backlight feature above: aplite has no RAM budget left for this at all
-// (confirmed via pebble build's own memory report - see
-// BACKLIGHT_MODE_ALWAYS_ON's comment for the exact numbers), so aplite
-// keeps the plain instant single-click toggle it's always had rather than
-// paying a universal double-click commit delay for a feature it can't
-// display.
-// Unlike notes, tag names are short and already fully resolved phone-side
-// (see task-store.js's tagTitlesFor) - no fetch-on-demand machinery needed,
-// so this IS a fixed per-task field, sized to comfortably fit a handful of
-// short tag names comma-joined (matches the phone's own TASK_TAGS truncation
-// to 63 chars in index.js's sendTaskAt).
+// Notes can be many paragraphs, too big to carry on every Task in the
+// double-buffered s_tasks/s_incoming arrays. Fetched on demand instead
+// (MSG_NOTE_*, see s_notes_full_text), malloc'd to the size the phone reports -
+// no per-task cost, no length ceiling. aplite-gated (#ifndef): no RAM budget
+// for the notes feature, so it keeps the plain instant single-click toggle.
+// Tags, unlike notes, are short and pre-resolved phone-side, so they stay a
+// fixed per-task field (phone truncates TASK_TAGS to 63 chars in sendTaskAt).
 #define MAX_TASK_TAGS_LEN 64
 
 typedef struct {
@@ -147,17 +115,11 @@ typedef struct {
   char title[MAX_TITLE_LEN];
   char project[MAX_PROJECT_LEN]; // '' when the phone isn't grouping by project
 #ifndef PBL_PLATFORM_APLITE
-  // The task's project id (not just its display name above) - needed so the
-  // project row (see recompute_groups()/TaskGroup.project_id) can ask the
-  // phone for THAT project's notes. Aplite-gated along with the rest of the
-  // notes feature (see MAX_NOTES_LEN's own comment) rather than carried on
-  // every Task there for no reachable use.
+  // Project id (not just the display name above) so the project row can fetch
+  // that project's notes. aplite-gated with the rest of the notes feature.
   char project_id[MAX_PROJECT_ID_LEN];
-  // Comma-joined tag names, '' if untagged - shown as a line above the
-  // notes text in the notes overlay (double-click Select - see
-  // show_notes_overlay/s_notes_tags_line). Aplite-gated same as project_id
-  // above: another MAX_TASK_TAGS_LEN * MAX_TASKS * 2 (double-buffered)
-  // bytes aplite has no margin for.
+  // Comma-joined tag names, '' if untagged - shown above the notes text in the
+  // notes overlay. aplite-gated (no margin for another MAX_TASKS*2 field).
   char tags[MAX_TASK_TAGS_LEN];
 #endif
   bool done;
@@ -167,53 +129,26 @@ typedef struct {
 } Task;
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
-// pre-sorts by project when grouping is on, so a run IS a group). When
-// grouping is off the phone sends '' for every task, which always
-// collapses to exactly one group covering the whole list - indistinguishable
-// from the pre-grouping flat-list behavior, by construction.
+// pre-sorts by project when grouping is on). Grouping off = '' for every task =
+// one group covering the whole list, same as the old flat list.
 typedef struct {
   char name[MAX_PROJECT_LEN];
   int start; // index into s_tasks
   int count;
 #ifndef PBL_PLATFORM_APLITE
-  // Copied from the group's first task (see recompute_groups()) - lets the
-  // selectable project row (see menu_draw_row/menu_select_click) ask the
-  // phone for this project's notes without the watch needing any other
-  // notion of "which project is this group". Aplite-gated: aplite keeps the
-  // group name as a plain, non-selectable header exactly as before (see
-  // menu_get_num_rows/menu_get_header_height's own aplite branches) since it
-  // can't display notes at all.
+  // Copied from the group's first task so the selectable project row can fetch
+  // this project's notes. aplite keeps a plain non-selectable header.
   char project_id[MAX_PROJECT_ID_LEN];
 #endif
 } TaskGroup;
 
-// "Habits" are Super Productivity's SimpleCounter feature (real entityType
-// SIMPLE_COUNTER - there is no separate "Habit" entity). StopWatch-type
-// counters have a ms-valued value/goal (tracked time, not a "did you do
-// this today" count) and a long-select-to-start/stop timer, same as a
-// RepeatedCountdownReminder-type counter's own long-select-to-start/stop
-// countdown timer (see Habit.is_countdown's own comment) - both distinct
-// from the plain Select/long-select increment/decrement a ClickCounter row
-// uses. See Habit.is_stopwatch, habits_menu_select_long_click, and
-// start_habit_tracking/stop_habit_tracking_and_report below.
-// Kept low (unlike MAX_TASKS' 30) because aplite's ~24KB RAM budget is
-// already tight after MAX_ID_LEN's own 96-byte bump for calendar tasks.
-// aplite specifically, not a shared cap - basalt/chalk/diorite still have
-// ~41KB free, so holding every platform back to aplite's number here would
-// be needlessly conservative. emery gets its own higher ceiling for the
-// same reason MAX_TASKS does - ~95KB free even after every other feature
-// in this file, confirmed via pebble build's own per-platform memory
-// report (same verification standard as every other budget note here).
-// Confirmed via pebble build's own per-platform memory report: 8 overflowed
-// aplite's linked binary by 280 bytes even before the row-icon resources
-// added below; those pushed the workable aplite number down further to 3.
-// The StopWatch habit timer (see s_tracking_habit_id's own comment) is
-// excluded from aplite's VISIBLE habit list entirely rather than shown
-// read-only there (see resolve_habit_at/habits_menu_get_num_rows) - even
-// with the tracking machinery and its display path fully compiled out,
-// the Habit struct's own extra is_stopwatch field (needed on every
-// platform, to know which entries to skip) still grew aplite's habit
-// array past budget, pushing the workable number down once more to 2.
+// "Habits" are Super Productivity's SimpleCounter feature (entityType
+// SIMPLE_COUNTER). Three types: ClickCounter (plain Select/long-Select +1/-1),
+// StopWatch (ms-valued value/goal, long-Select start/stop timer), and
+// RepeatedCountdownReminder (plain count + long-Select countdown timer).
+// Caps kept low: aplite's ~24KB RAM is tight and 8 overflowed its binary by
+// 280 bytes; the is_stopwatch field alone (needed everywhere to skip those
+// rows) pushed the workable aplite number to 2. emery has ~95KB free.
 #ifdef PBL_PLATFORM_APLITE
 #define MAX_HABITS 2
 #elif defined(PBL_PLATFORM_EMERY)
@@ -221,49 +156,30 @@ typedef struct {
 #else
 #define MAX_HABITS 8
 #endif
-// SimpleCounter ids are always a plain nanoid() (simple-counter.service.ts)
-// - unlike TASK, there's no calendar-integration id format to accommodate,
-// so this doesn't need MAX_ID_LEN's 96-byte allowance; a smaller buffer
-// here matters given MAX_HABITS' own memory comment above.
+// SimpleCounter ids are plain nanoid() - no calendar-id format, so 32 is enough.
 #define MAX_HABIT_ID_LEN 32
 typedef struct {
   char id[MAX_HABIT_ID_LEN];
   char title[MAX_TITLE_LEN];
-  // The three bools are adjacent (not scattered around value/goal) so they
-  // share a single alignment-padding gap ahead of the ints instead of each
-  // opening their own - zero-cost on every platform (3 bools + 1 byte
-  // padding is the same 4 bytes 2 bools + 2 bytes padding already cost), but
-  // every byte still matters on aplite (see MAX_HABITS' own comment).
+  // Bools kept adjacent so they share one padding gap ahead of the ints.
   bool done;
-  bool is_stopwatch; // StopWatch-type counter - see the comment above
-  // RepeatedCountdownReminder-type counter: a plain count (today's completed
-  // rounds, same units as a ClickCounter's value/goal - NOT ms), but with
-  // its own long-select-to-start/stop countdown timer instead of plain
-  // Select/long-select +1/-1 - see countdown_ms below,
-  // habits_menu_select_long_click, and complete_habit_countdown. Always
-  // false on aplite: resolve_habit_at/habits_menu_get_num_rows filter these
-  // out of the visible list there, matching is_stopwatch's own aplite
-  // exclusion (same RAM reasoning - a live countdown needs the same tracking
-  // machinery a StopWatch timer does).
+  bool is_stopwatch; // StopWatch-type counter
+  // RepeatedCountdownReminder: a plain count (today's completed rounds, not ms)
+  // with a long-Select countdown timer. Always false on aplite (filtered out of
+  // the visible list there, same as is_stopwatch).
   bool is_countdown;
   int value; // today's count, or ms tracked today when is_stopwatch
-  int goal;  // streakMinValue-derived target used for the "value/goal" subtitle
+  int goal;  // streakMinValue-derived target for the "value/goal" subtitle
 #ifndef PBL_PLATFORM_APLITE
-  // Configured countdown length in ms for an is_countdown counter (0 for
-  // every other type) - only meaningful to the countdown-timer machinery
-  // below, itself aplite-excluded for the same reason the StopWatch timer
-  // is, so this field doesn't exist there either (unlike is_countdown
-  // itself, which stays a plain bool on every platform purely so
-  // resolve_habit_at can filter it out - see that field's own comment).
+  // Countdown length in ms for an is_countdown counter (0 otherwise). Only used
+  // by the countdown-timer machinery, itself aplite-excluded.
   int countdown_ms;
 #endif
 } Habit;
 
-// Single buffer, not the incoming/committed double-buffer s_tasks/s_incoming
-// use - deliberately, to save memory on the tightest platform (aplite).
-// Safe because nothing redraws the habits menu (reload_data/mark_dirty)
-// until MSG_HABIT_SYNC_END bumps s_habit_count, exactly the same guarantee
-// that already makes the task list's own mid-sync writes invisible.
+// Single buffer, not the s_tasks/s_incoming double-buffer, to save RAM on
+// aplite. Safe because nothing redraws the habits menu until MSG_HABIT_SYNC_END
+// bumps s_habit_count.
 static Habit s_habits[MAX_HABITS];
 static int s_habit_count = 0;
 static int s_habit_incoming_total = 0;
@@ -276,125 +192,71 @@ static TextLayer *s_habits_empty_layer;
 static StatusBarLayer *s_habits_status_bar;
 static StatusBarLayer *s_status_bar;
 static TextLayer *s_empty_layer;
-// Small subtitle beneath s_empty_layer's title, used only while the initial
-// (no-cached-list-yet) sync is in progress - shows the sync-progress
-// percentage (see syncing_timer_callback) or, while it's not yet available,
-// the "may take a few minutes" heads-up. Kept as its own layer rather than
-// folded into s_empty_layer's own text so the title itself ("Syncing...")
-// can use a larger font without that longer, wrapping hint text blowing
-// past the available height at the same size. aplite-excluded (#ifndef, not
-// a runtime check - same MAX_HABITS/mic-dictation precedent elsewhere in
-// this file): a second TextLayer struct overflowed aplite's already-tight
-// APP region by 120 bytes even before accounting for anything else. aplite
-// keeps the combined single-layer/single-font text it always had (see the
-// #ifdef PBL_PLATFORM_APLITE branches in start_syncing_animation/
-// syncing_timer_callback/stop_syncing_animation below) - percentage still
-// shows there, just inline rather than as a separate bigger-font title.
+// Subtitle beneath s_empty_layer's title, shown only during the initial
+// (no-cached-list) sync - the progress percentage, or a "may take a few
+// minutes" heads-up. Its own layer so the "Syncing..." title can use a bigger
+// font without the hint text overflowing. aplite-excluded (a second TextLayer
+// overflowed its APP region by 120 bytes) - there the percentage shows inline.
 #ifndef PBL_PLATFORM_APLITE
 static TextLayer *s_sync_progress_layer;
 #endif
 static BitmapLayer *s_logo_layer;
 static GBitmap *s_logo_bitmap;
-// Icons drawn directly into the Resync/Habits rows (menu_draw_row, not a
-// standing BitmapLayer - these rows are custom-painted, same as their
-// title/subtitle text). One black/white pair per icon so it can invert on
-// selection the same way the row's own text color already does -
-// GCompOpSet's alpha-aware compositing doesn't give a free color-invert for
-// an 8-bit source bitmap, so this is two actual assets, not one recolored
-// at draw time.
+// Icons drawn directly into the Resync/Habits rows (menu_draw_row). One
+// black/white pair per icon to invert on selection - GCompOpSet gives no free
+// color-invert for an 8-bit source, so this is two assets, not one recolored.
 #define ROW_ICON_SIZE 25
 static GBitmap *s_check_bitmap;
 static GBitmap *s_check_white_bitmap;
 static GBitmap *s_heart_bitmap;
 static GBitmap *s_heart_white_bitmap;
-// Mic/dictation state - compiled out entirely on aplite (#ifndef, not just
-// a runtime PBL_IF_MICROPHONE_ELSE check), matching MAX_HABITS' own
-// #ifdef PBL_PLATFORM_APLITE precedent elsewhere in this file: aplite has no
-// mic hardware and can never reach the "Add Task" row (see
-// menu_get_num_rows), so paying for this code/data there at all - not just
-// leaving it unreached at runtime - would eat into a budget this file has
-// otherwise been careful to protect (aplite's RAM headroom dropped from a
-// ~314-byte baseline to ~121 bytes when this was still a runtime-only guard,
-// confirmed via pebble build's own memory report).
+// Mic/dictation state - compiled out on aplite (#ifndef, not a runtime check):
+// no mic hardware, can never reach the "Add Task" row, and a runtime-only
+// guard cost aplite ~190 bytes of RAM headroom.
 #ifndef PBL_PLATFORM_APLITE
 static GBitmap *s_mic_bitmap;
 static GBitmap *s_mic_white_bitmap;
-// One session for the app's whole lifetime (created in window_load,
-// destroyed in window_unload) - the SDK's own dictation_session_create doc
-// confirms a session "can be used more than once" and "can be restarted
-// multiple times after the UI is exited or stopped", so there's no need to
-// recreate it per "Add Task" press.
+// One session for the app's whole lifetime - the SDK doc confirms a session
+// can be reused and restarted, so no need to recreate it per "Add Task" press.
 static DictationSession *s_dictation_session;
-// dictation_session_start()'s own return value doesn't cleanly express
-// "a session is already in progress" (it returns DictationSessionStatus,
-// not a bool, despite the header's prose describing boolean-ish semantics) -
-// this flag is a self-contained guard against a rapid double-press starting
-// a second session on top of one already running, independent of whatever
-// the SDK does internally. Set before starting, cleared unconditionally at
-// the top of the status callback (every status, not just success).
+// dictation_session_start() returns DictationSessionStatus, not a clean
+// "already in progress" signal, so this flag guards against a rapid
+// double-press. Set before starting, cleared at the top of every status
+// callback.
 static bool s_dictation_pending;
 #endif
-// A sync error's full message is otherwise only visible as a single-line,
-// easily-missed subtitle on the Resync row (or squeezed into the small
-// empty-state text when there's no cached list yet) - this takes over the
-// whole content area instead, and - unlike everything else here, which
-// just reflects whatever the latest status is - deliberately does NOT
-// auto-update/dismiss itself on the next status change, so a transient
-// retry succeeding underneath can't yank the message away before it's
-// been read. Only an explicit Select dismisses it (see menu_select_click).
+// A sync error's full message is otherwise only an easily-missed one-line
+// subtitle on the Resync row - this takes over the whole content area, and
+// deliberately does NOT auto-dismiss on the next status change so a transient
+// retry succeeding can't yank it away before it's read. Only Select dismisses.
 static TextLayer *s_error_layer;
 static bool s_error_overlay_active = false;
 #ifndef PBL_PLATFORM_APLITE
-// A task's notes are shown in their own pushed Window (not a layer toggled
-// on top of s_main_window, the way the error overlay is) specifically so
-// Back gets Pebble's own default "pop this window" behavior for free,
-// dismissing back to the task list - same reasoning, and same pattern, as
-// s_habits_window's own comment ("Back always pops this back off... no
-// click config needed here for it"). A layer-toggle overlay on the SAME
-// window doesn't get this: Back on s_main_window always falls through to
-// ITS default behavior (exit the app, since it's the bottom/only window),
-// regardless of which overlay layer happens to be drawn on top at the time
-// - this was a real, reported bug (Back on the notes overlay exited to the
-// watchface instead of returning to the task list).
+// Notes are shown in their own pushed Window, not a layer on s_main_window, so
+// Back gets Pebble's default "pop this window" for free (dismissing to the task
+// list). A layer-toggle overlay doesn't: Back on s_main_window always exits the
+// app - a real reported bug (notes-overlay Back exited to the watchface).
 static Window *s_notes_window;
 static StatusBarLayer *s_notes_status_bar;
 static ScrollLayer *s_notes_scroll_layer;
-// A fixed header sitting ABOVE s_notes_scroll_layer (not inside it), showing
-// "Tags: urgent, home" (or NOTES_TAGS_EMPTY_TEXT when the task has none) on
-// a colored background - stays on screen while the notes body scrolls
-// underneath it, rather than scrolling away together with the notes as one
-// block. Shown for ANY task, tagged or not (see notes_tags_layer_draw) -
-// zero height/invisible only for a project subject (see
-// show_project_notes_overlay), since the real app has no tags-on-project
-// concept for this to report on at all - that's a fundamentally different
-// case from a task that's merely untagged. A plain custom-drawn Layer (not
-// TextLayer) - matches menu_draw_row's own fill-then-draw-text pattern
-// elsewhere in this file, since TextLayer has no padding/inset concept of
-// its own and a colored banner reads cramped with text flush to its edges.
-// Kept as a plain always-local text line rather than baked into
-// s_notes_full_text the way NOTES_HEADER is, since it has to appear even
-// when the fetch ends up EMPTY/loading/timed-out - unlike notes content,
-// tags are already fully known before the fetch even starts.
+// A fixed header above s_notes_scroll_layer (not inside it), showing
+// "Tags: urgent, home" on a colored background - stays put while the notes body
+// scrolls under it. Shown for any task, tagged or not; zero-height only for a
+// project subject (no tags-on-project concept). A plain custom-drawn Layer, not
+// a TextLayer, so it can pad the banner text. Kept local rather than baked into
+// s_notes_full_text since it must show even while the fetch is loading/empty.
 static Layer *s_notes_tags_layer;
-// Just the comma-joined tag names, empty when the task has none (see
-// NOTES_TAGS_EMPTY_TEXT, substituted in at draw time - not baked in here,
-// so this stays a plain reflection of task->tags) - NOT prefixed with
-// "Tags: " the way this used to be, since that label is drawn in its own
-// bold font (see NOTES_TAGS_LABEL/notes_tags_layer_draw) and
-// graphics_draw_text can't mix two font weights in a single call. Kept on
-// its own line below the label rather than packed onto the same line
-// before it, so the label can stay a fixed one-liner regardless of how many
-// lines the (possibly long, wrapping) tag list itself needs.
+// Comma-joined tag names, empty when the task has none (NOTES_TAGS_EMPTY_TEXT
+// substituted at draw time). Not prefixed with "Tags: " - that label is drawn
+// separately in bold, and graphics_draw_text can't mix two weights in one call.
 static char s_notes_tags_line[MAX_TASK_TAGS_LEN + 16] = "";
 #define NOTES_TAGS_LABEL "Tags:"
 #define NOTES_TAGS_EMPTY_TEXT "No tags for this task"
 #define NOTES_TAGS_BG_COLOR GColorYellow
-// Notes body + "Tags:" label fonts, and the tags-header padding. Bumped a step
-// on emery to match the rest of the Large-content-size scaling (see the
-// TITLE_FONT_KEY block below). These MUST be used everywhere the notes text is
-// both measured and drawn (measure_notes_text_height / measure_notes_tags_parts
-// / notes_tags_layer_draw / notes_window_load) or the measured height and the
-// rendered height drift apart and the body clips - see those functions' comments.
+// Notes body + "Tags:" label fonts and tags-header padding, bumped a step on
+// emery for its Large content size. MUST be used everywhere the notes text is
+// measured and drawn or the measured and rendered heights drift and the body
+// clips.
 #ifdef PBL_PLATFORM_EMERY
 #define NOTES_BODY_FONT_KEY FONT_KEY_GOTHIC_24
 #define NOTES_LABEL_FONT_KEY FONT_KEY_GOTHIC_24_BOLD
@@ -406,45 +268,29 @@ static char s_notes_tags_line[MAX_TASK_TAGS_LEN + 16] = "";
 #define NOTES_TAGS_PADDING_X 6
 #define NOTES_TAGS_PADDING_Y 4
 #endif
-// The notes window's full content area (below the status bar) - set once in
-// notes_window_load, read by render_notes_overlay_content to re-slice
-// between the fixed tags header and the scrollable notes body every time
-// s_notes_tags_line's height changes.
+// The notes window's content area (below the status bar), set in
+// notes_window_load, read by render_notes_overlay_content to re-slice between
+// the tags header and the scrollable body as s_notes_tags_line's height changes.
 static GRect s_notes_content_bounds;
 static TextLayer *s_notes_layer;
 static bool s_notes_overlay_active = false;
-// Which task OR project the notes overlay is currently showing - a plain id
-// copy (not a Task*/TaskGroup*), same reasoning as s_pending_toggle_task_id/
-// s_tracking_task_id below: a background sync can rebuild s_tasks/s_groups
-// out from under the overlay while it's open. Needed by long-select's voice
-// note-append (see notes_window_select_long_click_handler/
-// start_note_append_dictation) to know which subject to send the dictated
-// text for. This one overlay/window is reused for both task notes and
-// project notes (see the project-row addition to menu_draw_row/
-// menu_select_click) rather than duplicating the whole fetch/scroll/dictate
-// machinery for a second subject type - only one can ever be open at a
-// time anyway. s_notes_overlay_is_project disambiguates which fetch/append
-// message type and buffer size (MAX_ID_LEN comfortably fits a project id
-// too - see MAX_PROJECT_ID_LEN) a pending request/reply is about.
+// Which task OR project the notes overlay is showing - a plain id copy (a
+// background sync can rebuild s_tasks/s_groups while it's open). The one
+// overlay/window serves both task and project notes; s_notes_overlay_is_project
+// disambiguates which fetch/append message type a pending request/reply is for.
 static char s_notes_overlay_subject_id[MAX_ID_LEN] = "";
 static bool s_notes_overlay_is_project = false;
-// Full notes text for whichever subject s_notes_overlay_subject_id names, fetched
-// on demand (MSG_NOTE_REQUEST/MSG_NOTE_SYNC_START/MSG_NOTE_CHUNK/
-// MSG_NOTE_SYNC_END) rather than carried on every Task in s_tasks/
-// s_incoming - see the removed MAX_NOTES_LEN field's own comment further up
-// for why. malloc'd to NOTES_HEADER's length plus the exact byte count the
-// phone reports in MSG_NOTE_SYNC_START (not a fixed ceiling), so it holds
-// "Notes:\n\n" followed by the chunks as they arrive; NULL whenever nothing
-// is currently owned (no notes to show, or ownership not yet established).
-// Freed and re-armed by every fresh show_notes_overlay() call and by
-// notes_window_unload - never left dangling across either.
+// Full notes text for s_notes_overlay_subject_id, fetched on demand
+// (MSG_NOTE_*). malloc'd to NOTES_HEADER + the byte count the phone reports in
+// MSG_NOTE_SYNC_START, holding "Notes:\n\n" then the chunks; NULL when nothing
+// is owned. Freed and re-armed by every show_notes_overlay() and
+// notes_window_unload - never left dangling.
 static char *s_notes_full_text = NULL;
 static int s_notes_full_len = 0;      // bytes written into s_notes_full_text so far
 static int s_notes_full_capacity = 0; // malloc'd size of s_notes_full_text, including its null terminator
-// What MSG_NOTE_SYNC_START actually told us, so MSG_NOTE_SYNC_END knows how
-// to render even when s_notes_full_text is NULL - which is legitimately
-// true both for "no notes" (nothing to malloc) and "malloc failed"/"START
-// never arrived" (a real failure), and those two need different text.
+// What MSG_NOTE_SYNC_START reported, so MSG_NOTE_SYNC_END can render even when
+// s_notes_full_text is NULL - true both for "no notes" and "malloc failed" /
+// "START never arrived", which need different text.
 typedef enum {
   NOTES_FETCH_IDLE,    // no START seen yet for the current request
   NOTES_FETCH_EMPTY,   // START reported zero-length notes
@@ -452,118 +298,71 @@ typedef enum {
   NOTES_FETCH_FAILED,  // START reported real notes but malloc failed
 } NotesFetchState;
 static NotesFetchState s_notes_fetch_state = NOTES_FETCH_IDLE;
-// What's actually shown right now - either s_notes_full_text (once
-// MSG_NOTE_SYNC_END lands on a NOTES_FETCH_STARTED transfer) or one of the
-// literals below otherwise. Never itself owned/freed - only
-// s_notes_full_text is.
+// What's shown right now - s_notes_full_text once a NOTES_FETCH_STARTED transfer
+// ends, or one of the literals below. Never owned/freed here.
 static const char *s_notes_display_text = "";
-// Whether s_notes_display_text is currently the loading placeholder -
-// tracked separately rather than compared against the NOTES_LOADING_TEXT
-// pointer (string literal pointer comparison is unspecified behavior, and
-// GCC's -Werror=address rejects it outright). True from the moment
-// show_notes_overlay sets the placeholder until whatever resolves it
-// (a completed fetch, or the timeout below) replaces it with something else.
+// Whether s_notes_display_text is the loading placeholder - tracked separately
+// rather than comparing against the NOTES_LOADING_TEXT pointer (string-literal
+// pointer comparison is UB and -Werror=address rejects it).
 static bool s_notes_is_loading = false;
 #define NOTES_LOADING_TEXT "Loading notes..."
 #define NOTES_EMPTY_TEXT "(No notes for this task)"
 #define PROJECT_NOTES_EMPTY_TEXT "(No notes for this project)"
 #define NOTES_TIMEOUT_TEXT "Couldn't load notes - back out and try again."
-// Guards against a fetch that never completes (phone not paired, dropped
-// AppMessage past its own retry budget) leaving the overlay stuck on
-// NOTES_LOADING_TEXT forever with no signal anything went wrong - same
-// "every failure should be visible" standard the rest of this app holds
-// AppMessage failures to (see CLAUDE.md's "AppMessage send failures used to
-// be completely silent"). Canceled the moment a matching SYNC_START/END
-// actually arrives; started fresh on every new request.
+// Guards a fetch that never completes (not paired, dropped AppMessage) from
+// leaving the overlay stuck on "Loading..." with no signal. Canceled when a
+// matching SYNC_START/END arrives; restarted on every new request.
 static AppTimer *s_notes_load_timeout_timer = NULL;
-// Generous on purpose: the request competes with anything else on the
-// AppMessage link, and when a sync is mid-flight the watch-side outbound
-// retry for the NOTE_REQUEST send alone can burn ~7s (1s + 2s + 4s backoff,
-// see outbox_failed_handler) before the phone even sees it, then the
-// chunked reply has its own per-chunk retries on top. 8s was tight enough
-// that a notes open right after opening the app (which may still be
-// syncing) would spuriously hit this and show the error text for notes
-// that were about to arrive. A genuinely unreachable phone still surfaces
-// its own "Couldn't reach phone app" overlay from the send-retry path well
-// before this fires.
+// Generous: the NOTE_REQUEST send's own retry backoff can burn ~7s mid-sync
+// before the phone even sees it, then the chunked reply has per-chunk retries.
+// 8s spuriously fired for notes opened right after launch. A truly unreachable
+// phone surfaces its own error from the send-retry path well before this.
 #define NOTES_LOAD_TIMEOUT_MS 20000
-// Distinguishes a dictation_status_callback firing for note-append (started
-// from the notes overlay's long-select) from one firing for Add Task
-// (started from the section-0 row) - both share the single s_dictation_session/
-// s_dictation_pending pair (see its own comment), since only one dictation
-// can ever be in flight at a time regardless of which triggered it.
+// Distinguishes a dictation_status_callback for note-append from one for Add
+// Task - both share the single s_dictation_session/s_dictation_pending pair.
 static bool s_dictation_is_note_append = false;
-// Double-click detection on Select: a single click doesn't commit its
-// task-done toggle immediately - it starts this timer instead, so a
-// second click on the SAME task arriving before it fires can cancel the
-// toggle and show notes instead of committing it. Tracked by id (not a
-// raw Task*) because a background sync can fully rebuild s_tasks out from
-// under a still-pending click (see pending_toggle_timer_callback's own
-// find_task_by_id lookup) - a stale pointer into the old array would be
-// undefined behavior, a stale id just fails to resolve and silently no-ops.
+// Double-click detection on Select: a single click starts this timer instead of
+// committing the task-done toggle, so a second click on the same task can
+// cancel it and show notes. Tracked by id, not Task* (a background sync can
+// rebuild s_tasks under a pending click; a stale id just fails to resolve).
 static AppTimer *s_pending_toggle_timer = NULL;
 static char s_pending_toggle_task_id[MAX_ID_LEN] = "";
-// Matches the SDK's own multi-click doc ("a value of 0 means to use the
-// system default 300ms") - this app can't use window_multi_click_subscribe
-// directly (MenuLayerCallbacks has no multi-click hook, and
-// menu_layer_set_click_config_onto_window owns the window's whole click
-// config already), so this timestamp-based approach reimplements the same
-// timing convention by hand.
+// Matches the SDK's default multi-click window (300ms) - reimplemented by hand
+// since MenuLayerCallbacks has no multi-click hook and MenuLayer already owns
+// the window's click config.
 #define DOUBLE_CLICK_WINDOW_MS 300
-// Same double-click detection, for the project row (see menu_draw_row/
-// menu_select_click) - simpler than s_pending_toggle_timer's pair above
-// because there's no real single-click action to commit if the second
-// click never comes (a project row has no "toggle"), so the timer callback
-// (pending_project_click_timer_callback) just clears the pending state.
+// Same double-click detection for the project row - simpler, since a project
+// row has no single-click action to commit if the second click never comes.
 static AppTimer *s_pending_project_click_timer = NULL;
 static char s_pending_project_click_id[MAX_PROJECT_ID_LEN] = "";
 #endif
 
-// Time tracking: long-select on a task starts/stops tracking it (only one
-// task at a time, mirroring the real app's single global currentTaskId -
-// see task.service.ts). s_tracking_task_id is '\0' when nothing is being
-// tracked. Persisted across an app close/relaunch (see save_tracking()/
-// load_tracking()) rather than tied to this window's lifetime - the real
-// app's "current task" isn't a UI-session concept either, and losing an
-// in-progress tracked session just because the watchapp was closed for a
-// minute would defeat the point of long-running tracking.
+// Time tracking: long-select starts/stops tracking a task (one at a time,
+// mirroring the real app's single global currentTaskId). '\0' when idle.
+// Persisted across app close/relaunch so a long-running session survives the
+// watchapp being closed for a minute.
 static char s_tracking_task_id[MAX_ID_LEN] = "";
 static time_t s_tracking_start_epoch = 0;
 static AppTimer *s_tracking_tick_timer = NULL;
 #define TRACKING_TICK_INTERVAL_MS 1000
 
 #ifndef PBL_PLATFORM_APLITE
-// "Task ran over its estimate" banner - a red strip across the top of the
-// task list, shown (with a double vibe) the moment the tracked task's
-// effective time - its synced time_spent_ms plus this session's still-
-// running elapsed - first reaches its time_estimate_ms, if the phone's
-// "Notify when a task runs over its estimate" setting is on
-// (s_overtime_notify_enabled). Auto-dismisses after OVERTIME_BANNER_MS, or
-// on the next Select press (see menu_select_click) - it's an at-a-glance
-// heads-up, not a blocking prompt like the error overlay.
-//
-// #ifndef PBL_PLATFORM_APLITE, same reasoning (and confirmed-via-memory-
-// report standard) as every other aplite exclusion in this file: aplite
-// was already at its RAM ceiling before this, and a whole extra TextLayer
-// overflowed it once before (see s_sync_progress_layer's own comment).
-// Time tracking itself still works there - it just never shows this banner
-// (s_overtime_notify_enabled is inert on aplite regardless of its value).
+// "Task ran over its estimate" banner - a red strip across the top of the list,
+// shown with a double vibe the moment the tracked task's effective time (synced
+// time_spent_ms + this session's elapsed) reaches time_estimate_ms, if
+// s_overtime_notify_enabled. Auto-dismisses after OVERTIME_BANNER_MS or on the
+// next Select. aplite-excluded (an extra TextLayer overflows its RAM) - tracking
+// still works there, just without the banner.
 static TextLayer *s_overtime_banner_layer = NULL;
 static AppTimer *s_overtime_banner_timer = NULL;
-// Latched true once the banner has fired for the CURRENT tracking session,
-// so the once-per-second tick (see maybe_notify_overtime) doesn't re-fire
-// it every tick once the estimate is crossed. Reset by start_tracking()
-// and stop_tracking_and_report(); also self-re-arms if the effective time
-// drops back below the estimate (e.g. the estimate was raised on the
-// desktop and picked up by a resync). Primed to true in init() when a
-// resumed session is already over its estimate at launch, so reopening the
-// app mid-overrun doesn't nag.
+// Latched once the banner fires for the current session so the per-second tick
+// doesn't re-fire it. Reset by start/stop_tracking; self-re-arms if effective
+// time drops back under the estimate. Primed true in init() when a resumed
+// session is already over, so reopening mid-overrun doesn't nag.
 static bool s_overtime_notified = false;
-// Epoch of the last time the banner fired for the current crossing. Only
-// consulted when the phone's "Repeat the notification every 5 minutes"
-// sub-option is on (s_overtime_repeat_enabled): maybe_notify_overtime
-// re-fires the banner once OVERTIME_REPEAT_INTERVAL_S has passed and the
-// task is still over. Reset alongside s_overtime_notified.
+// Epoch the banner last fired for the current crossing. Only used when the
+// "Repeat every 5 minutes" sub-option is on: maybe_notify_overtime re-fires
+// once OVERTIME_REPEAT_INTERVAL_S passes and the task is still over.
 static time_t s_overtime_last_notify_epoch = 0;
 static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
 #define OVERTIME_BANNER_MS 6000
@@ -574,16 +373,11 @@ static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
 #endif
 #define OVERTIME_REPEAT_INTERVAL_S (5 * 60)
 
-// Pinned "TRACKING" section - when the phone's "Pin the task you're
-// tracking to the top" setting is on (s_pin_tracked_task_enabled), the task
-// whose id this holds is shown in its own section directly below the
-// Resync/Habits/Add Task rows and hidden from its normal project group (see
-// has_pinned_row/group_section_base/menu_draw_row). Separate from
-// s_tracking_task_id: it stays set through a 10s grace period after
-// tracking stops (s_unpin_timer), so the row slides back into its group
-// smoothly rather than vanishing the instant you long-press to stop. Not
-// persisted - only a genuinely-active session re-pins on relaunch (see
-// init()).
+// Pinned "TRACKING" section - when s_pin_tracked_task_enabled, this task is
+// shown in its own section below the Resync/Habits/Add Task rows and hidden
+// from its project group. Separate from s_tracking_task_id: it lingers through
+// a 10s grace period after tracking stops (s_unpin_timer) so the row slides
+// back smoothly. Not persisted - only an active session re-pins on relaunch.
 static char s_pinned_task_id[MAX_ID_LEN] = "";
 static AppTimer *s_unpin_timer = NULL;
 #define UNPIN_GRACE_MS 10000
@@ -594,37 +388,19 @@ static AppTimer *s_unpin_timer = NULL;
 #endif
 #endif
 
-// Same idea as s_tracking_task_id above, but for a StopWatch-type habit -
-// kept as its own independent slot (not reusing s_tracking_task_id) since
-// the real app's own currentTaskId (task) and SimpleCounter.isOn (habit)
-// are independent pieces of state too: tracking a task and a habit
-// stopwatch at the same time is a real, valid scenario there, not a
-// conflict to resolve. Unlike s_tracking_tick_timer (which redraws
-// s_menu_layer, a layer that exists for the app's whole lifetime), this
-// one's tick timer only runs while the habits window is actually loaded -
-// see habits_window_load/unload - since s_habits_menu_layer is torn down
-// and rebuilt on every visit to that window.
-// Compiled out entirely on aplite (#ifndef, matching s_mic_bitmap's own
-// precedent for the same reason): the tracking machinery (persisted
-// start/stop state, tick timer, the functions below) pushed aplite's
-// already-tight budget 820 bytes over its .bss region even with
-// MAX_HABITS already down to 3 there. A StopWatch habit still shows its
-// "value / goal" progress read-only on aplite (habits_menu_draw_row) -
-// just without the ability to start/stop tracking from the watch itself.
+// Like s_tracking_task_id but for a StopWatch/countdown habit - its own slot,
+// since tracking a task and a habit stopwatch at once is valid. Its tick timer
+// only runs while the habits window is loaded (s_habits_menu_layer is rebuilt
+// per visit). aplite-excluded (#ifndef): the tracking machinery pushed aplite
+// 820 bytes over .bss; a StopWatch habit still shows value/goal read-only there.
 #ifndef PBL_PLATFORM_APLITE
 static char s_tracking_habit_id[MAX_HABIT_ID_LEN] = "";
 static time_t s_tracking_habit_start_epoch = 0;
 static AppTimer *s_habit_tracking_tick_timer = NULL;
-// Select pauses/resumes an in-progress RepeatedCountdownReminder round
-// (long-select still cancels it outright, same as it already does for a
-// StopWatch) - meaningless for a StopWatch's open-ended up-count, so this
-// only ever applies when s_tracking_habit_id refers to an is_countdown
-// habit. While paused, s_tracking_habit_start_epoch stops mattering (the
-// tick timer itself is stopped - see toggle_habit_countdown_pause) and
-// s_habit_countdown_frozen_elapsed_ms holds the total elapsed so far;
-// while running, it holds everything accumulated BEFORE the current
-// running segment, with s_tracking_habit_start_epoch marking where that
-// segment began - see countdown_elapsed_ms().
+// Select pauses/resumes an is_countdown round (long-select still cancels it);
+// meaningless for a StopWatch. While paused the tick timer is stopped and
+// s_habit_countdown_frozen_elapsed_ms holds total elapsed; while running it
+// holds elapsed before the current segment - see countdown_elapsed_ms().
 static bool s_habit_countdown_paused = false;
 static int s_habit_countdown_frozen_elapsed_ms = 0;
 #endif
@@ -633,156 +409,85 @@ static Task s_tasks[MAX_TASKS];
 static int s_task_count = 0;      // tasks currently shown (committed)
 static int s_incoming_total = 0;  // total announced by the current sync batch
 static Task s_incoming[MAX_TASKS];
-// -1, not STATUS_SYNCING (0-3, matching what actually goes over the wire) -
-// a sentinel meaning "no real status yet", never sent or matched by any
-// switch on this. Was hardcoded straight to STATUS_SYNCING before (this app
-// does show an immediate optimistic "Syncing..." screen before any phone
-// message ever arrives - see is_initial_syncing), but that bypassed
-// set_status_code() entirely: its own old-vs-new transition check saw
-// STATUS_SYNCING already equal to itself and never called light_enable(true)
-// for that very first, always-happens syncing state. init() now makes the
-// real STATUS_SYNCING transition explicit via set_status_code() itself,
-// same chokepoint every other status change already goes through.
+// -1 is a "no real status yet" sentinel, never sent or matched over the wire.
+// init() then makes the real STATUS_SYNCING transition explicit through
+// set_status_code() (the chokepoint every status change goes through) rather
+// than hardcoding it here, which would skip set_status_code's transition logic.
 static int s_status_code = -1;
 #define MAX_STATUS_MSG_LEN 64
 static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
-// Phone-side settings, mirrored here via optional fields on MSG_SYNC_STATUS
-// (see inbox_received_handler) - default true so a freshly-installed/
-// not-yet-synced watch behaves exactly as it always has until a real sync
-// says otherwise. Plain unconditional statics (not inside the mic-only
-// #ifndef PBL_PLATFORM_APLITE block below) - trivial size even on aplite,
-// and keeps that block's scope narrowly mic-specific. s_add_task_enabled is
-// inert on aplite regardless of its value: PBL_IF_MICROPHONE_ELSE already
-// keeps the Add Task row permanently absent there.
+// Phone-side settings mirrored via optional MSG_SYNC_STATUS fields - default
+// true so a not-yet-synced watch behaves as before until a real sync says
+// otherwise. Unconditional statics (trivial size); s_add_task_enabled is inert
+// on aplite anyway (PBL_IF_MICROPHONE_ELSE keeps the row absent).
 static bool s_habits_enabled = true;
 static bool s_add_task_enabled = true;
 #ifndef PBL_PLATFORM_APLITE
-// Mirrors the phone's "Notify when a task runs over its estimate" pairing
-// setting (config.overtimeNotify). Opt-in, so it starts false until the
-// first sync's MSG_SYNC_STATUS says otherwise - same conservative
-// 0-until-first-sync convention as s_touch_nav_enabled. #ifndef
-// PBL_PLATFORM_APLITE along with the whole over-estimate banner it drives
-// (see s_overtime_banner_layer's own comment) - aplite's RAM budget has no
-// room for the banner and this flag would be inert there anyway, so it's
-// not even read from the sync status message on aplite.
+// "Notify when a task runs over its estimate" (config.overtimeNotify). Opt-in,
+// false until the first sync. aplite-excluded with the banner it drives.
 static bool s_overtime_notify_enabled = false;
-// Mirrors the phone's "Repeat the notification every 5 minutes" sub-option
-// (config.overtimeRepeat), a modifier on s_overtime_notify_enabled: when
-// on, maybe_notify_overtime re-fires the banner every
-// OVERTIME_REPEAT_INTERVAL_S for as long as the tracked task stays over,
-// instead of only once per session. Inert while s_overtime_notify_enabled
-// is off. Same opt-in 0-until-first-sync / aplite-gating as above.
+// "Repeat every 5 minutes" (config.overtimeRepeat), a modifier on the above:
+// re-fire the banner every OVERTIME_REPEAT_INTERVAL_S while the task stays over.
 static bool s_overtime_repeat_enabled = false;
-// Mirrors the phone's "Pin the task you're tracking to the top" pairing
-// setting (config.pinTrackedTask). Opt-in, same 0-until-first-sync
-// convention as s_overtime_notify_enabled above, and aplite-gated for the
-// same reason - the pinned-section layout code it drives has no RAM budget
-// on aplite, where the tracked task just stays in place as it always has.
+// "Pin the task you're tracking to the top" (config.pinTrackedTask). Opt-in,
+// aplite-excluded with the pinned-section layout code.
 static bool s_pin_tracked_task_enabled = false;
 #endif
 #if defined(PBL_TOUCH)
-// Mirrors the phone's "Touch navigation" pairing setting (config.touchNav),
-// off by default (see the touch block's own HARDWARE STATE comment for why -
-// the first-gen Time 2 touch driver isn't reliable enough yet). Starts false
-// until the first sync's MSG_SYNC_STATUS lands, same conservative
-// 0-until-first-sync convention as s_backlight_mode. Whole feature is
-// PBL_TOUCH-only, absent on the button-only builds. See apply_touch_nav().
+// "Touch navigation" (config.touchNav), off by default (see the touch block's
+// HARDWARE STATE comment). PBL_TOUCH-only. See apply_touch_nav().
 static bool s_touch_nav_enabled = false;
 #endif
-// Backlight override, same phone-settings mirroring convention as the two
-// flags above: 0 (system default) until the first sync says otherwise, so
-// an unconfigured/never-synced watch never touches the backlight API at
-// all - this app shipped for a long time with zero light_enable() calls
-// anywhere, and that stays the behavior unless the phone opts into
-// something else. A negative value (BACKLIGHT_MODE_ALWAYS_ON) forces the
-// backlight on for as long as the app stays open; a positive value is a
-// custom relight-and-hold duration in seconds, applied after any button
-// press - see backlight_touch()/apply_backlight_mode() below.
-//
-// #ifndef PBL_PLATFORM_APLITE-gated entirely, same as the StopWatch habit
-// timer above - confirmed via pebble build's own memory usage report that
-// aplite had all of 10 bytes of free RAM left BEFORE this feature existed
-// (every other platform: 37KB+), so anything added here has to cost
-// aplite exactly zero, not "a little". backlight_touch() becomes a no-op
-// macro on aplite (below) so none of its 8 call sites elsewhere in this
-// file need their own #ifdef.
+// Backlight override: 0 (system default) until the first sync, so an unconfigured
+// watch never touches the backlight API. Negative (BACKLIGHT_MODE_ALWAYS_ON)
+// forces it on while the app is open; positive is a relight-and-hold duration in
+// seconds - see backlight_touch()/apply_backlight_mode(). aplite-excluded
+// (aplite had 10 bytes of free RAM before this feature); backlight_touch()
+// becomes a no-op macro there so its call sites need no #ifdef.
 #ifndef PBL_PLATFORM_APLITE
 #define BACKLIGHT_MODE_ALWAYS_ON -1
 static int32_t s_backlight_mode = 0;
 static AppTimer *s_backlight_timer = NULL;
 #endif
 
-// Mirrors the phone's "Sync automatically on a timer" pairing setting
-// (config.autoSyncIntervalMin), same 0-until-first-sync-says-otherwise
-// convention as s_backlight_mode above. This is what schedule_next_wakeup()
-// uses to periodically relaunch the app via wakeup_schedule() so a sync can
-// happen even while the app is closed - PebbleKit JS (where all the actual
-// networking lives) only runs while THIS app is the one currently open, so
-// a phone-side setInterval alone (what this setting used to rely on
-// exclusively) never fires once the watch has moved on to the watchface or
-// another app. See schedule_next_wakeup()'s own comment for the rest of
-// the mechanism.
-//
-// #ifndef PBL_PLATFORM_APLITE-gated entirely, same reasoning (and the same
-// confirmed-via-pebble-build's-own-memory-report standard) as every other
-// aplite exclusion in this file: aplite was already at its ceiling before
-// this feature existed, and this alone overflowed it by 332 bytes. Aplite
-// keeps the setting's old, more limited behavior (only actually syncs on
-// this schedule while the app happens to be open) rather than gaining
-// wakeup-based background sync.
+// "Sync automatically on a timer" (config.autoSyncIntervalMin). schedule_next_wakeup()
+// uses it to relaunch the app via wakeup_schedule() so a sync can run while the
+// app is closed - PebbleKit JS only runs while this app is open, so a phone-side
+// setInterval alone never fires once the watch moves on. aplite-excluded
+// (overflowed it by 332 bytes) - aplite keeps the old open-only behavior.
 #ifndef PBL_PLATFORM_APLITE
 static int32_t s_auto_sync_interval_min = 0;
-// Set once at init() from launch_reason() and never changed after - detects
-// whether THIS session exists because a wakeup fired (as opposed to the
-// user opening the app normally), which is what gates the auto-exit in
-// inbox_received_handler's MSG_SYNC_STATUS case below. A wakeup-launched
-// session's whole purpose is a quiet sync-and-return; a manually opened one
-// should behave exactly as it always has and stay open.
+// Set once in init() from launch_reason() - whether this session exists because
+// a wakeup fired. Gates the auto-exit in the MSG_SYNC_STATUS handler: a
+// wakeup-launched session syncs quietly and returns; a manual one stays open.
 static bool s_is_wakeup_launch = false;
-// Guards schedule_next_wakeup() from running on every single status push
-// this session (SYNCING, then OK/ERROR, plus one per watch-initiated
-// action) - only needed once the interval is first confirmed after launch,
-// and again if it later actually changes (e.g. a live settings save).
+// Guards schedule_next_wakeup() from running on every status push - only on the
+// first confirmed interval this launch, and again if it changes.
 static bool s_wakeup_rescheduled_this_launch = false;
-// Guards window_stack_pop_all() from firing more than once if multiple
-// terminal statuses arrive in the same wakeup-launched session (e.g. a
-// retried sync after an initial error).
+// Guards window_stack_pop_all() from firing twice if multiple terminal statuses
+// arrive in one wakeup-launched session (e.g. a retried sync after an error).
 static bool s_wakeup_exit_triggered = false;
 #endif
 
 static TaskGroup s_groups[MAX_TASKS]; // worst case: every task its own group
 static int s_group_count = 0;
 
-// Marquee-scrolls the title of whichever task row is currently selected,
-// if (and only if) it's too wide to fit - MenuLayer has no built-in
-// scrolling-text cell, and truncating with an ellipsis was the only
-// alternative. Only the selected row ever scrolls (not every long row at
-// once): cheaper to redraw, and it's the row the user is actually looking
-// at.
+// Marquee-scrolls the selected task row's title when it's too wide to fit
+// (MenuLayer has no scrolling-text cell). Only the selected row scrolls.
 #define SCROLL_GAP_PX 24
 
 // --- Platform-scaled UI metrics ---------------------------------------------
-// The Time 2 (emery) firmware renders third-party apps at the SDK's "Large"
-// content size (system_theme.c: [PlatformTypeEmery] = PreferredContentSizeLarge),
-// so its MenuLayer cells come out ~61px tall vs 44px everywhere else - the app
-// sets no get_cell_height callback, the firmware fills the default from the
-// platform content size. Everything below that positions text inside a cell (or
-// picks a font for one) therefore needs an emery variant, or the 44px-era
-// offsets leave the title jammed at the top and the subtitle stranded at the
-// bottom of a much taller cell. Every non-emery value here is exactly what it
-// was before this block existed - no other platform's output changes.
+// emery renders third-party apps at the SDK's "Large" content size, so its
+// MenuLayer cells are ~61px vs 44px elsewhere. Everything that positions text
+// in a cell needs an emery variant or the 44px offsets leave the title jammed
+// up top and the subtitle stranded at the bottom. Non-emery values are
+// unchanged from before this block.
 //
-// TITLE/SUBTITLE_FONT_KEY: a task/habit row's title and its due/tracked-time/
-//   "Done" (or value/goal) subtitle. SUBTITLE stays one step up from
-//   FONT_KEY_GOTHIC_14 - Pebble's system fonts are fixed sizes, no arbitrary
-//   point sizes.
-// HEADING_FONT_KEY: the bold Resync/Habits/Add Task/Finish Day/project rows and
-//   the project group headers.
-// TRACKING_FONT_KEY: the small "TRACKING" pinned-section header strip.
-// CHROME_FONT_KEY: genuinely secondary text - Resync's status line, the Finish
-//   Day row's version subtitle, the "No tasks for today." message - the stuff
-//   that reads as app chrome rather than content scanned row to row.
-// *_STRIP_H: height reserved at the bottom of a cell for its subtitle line.
+// TITLE/SUBTITLE_FONT_KEY: a row's title and its due/time/"Done" subtitle.
+// HEADING_FONT_KEY: the bold Resync/Habits/Add Task/Finish Day/project rows.
+// TRACKING_FONT_KEY: the "TRACKING" pinned-section header strip.
+// CHROME_FONT_KEY: secondary text (Resync status, version subtitle, "No tasks").
+// *_STRIP_H: height reserved at the bottom of a cell for its subtitle.
 // HEADING_TITLE_H: title-box height for the taller HEADING_FONT_KEY rows.
 #ifdef PBL_PLATFORM_EMERY
 #define SCROLL_INTERVAL_MS 100
@@ -816,18 +521,12 @@ static int s_group_count = 0;
 #define GROUP_HEADER_HEIGHT 40
 #endif
 
-// Lays out a title line of height `title_h` + a bottom subtitle strip of height
-// `strip_h` inside a cell `cell_h` tall. Pure macros, no locals or helper call -
-// aplite's RAM headroom (~50 bytes total, see the memory-budget comments
-// throughout this file) can't absorb even a couple of extra int16 stack slots
-// across the draw paths, and on non-emery these expand to exactly the fixed
-// offsets they replaced so those builds stay byte-identical.
-//
-// Non-emery: title flush at TITLE_BOX_Y, subtitle strip flush against the bottom
-// edge. Emery: the title+subtitle pair is centred as one block so the taller
-// (~61px) cell gets even top/bottom margins instead of the title clinging to the
-// top and the subtitle to the bottom with a dead band between them.
-// HEADING_TITLE_Y is the single-line (no subtitle) form, for the bold nav rows.
+// Lays out a title line (height title_h) + a bottom subtitle strip (strip_h)
+// in a cell_h-tall cell. Pure macros, no locals - aplite has no stack headroom
+// for extra int16 slots in the draw paths, and non-emery expands to the exact
+// fixed offsets it replaced. Non-emery: title at TITLE_BOX_Y, subtitle flush
+// bottom. Emery: title+subtitle centred as one block in the taller cell.
+// HEADING_TITLE_Y is the single-line form for the bold nav rows.
 #ifdef PBL_PLATFORM_EMERY
 #define ROW_TITLE_TOP_Y(cell_h, title_h, strip_h) \
   (((cell_h) - (title_h) - (strip_h)) / 2 < TITLE_BOX_Y \
@@ -844,10 +543,8 @@ static int s_group_count = 0;
 static AppTimer *s_scroll_timer = NULL;
 static int s_scroll_offset_px = 0;
 
-// Cycles "Syncing" -> "Syncing." -> "Syncing.." -> "Syncing..." on the empty
-// screen while the very first sync (no cached task list yet) is in flight -
-// otherwise that screen just sits on static text with no sign anything is
-// happening, for however long the initial full op-log replay takes.
+// Cycles "Syncing" -> "Syncing..." on the empty screen during the first sync
+// (no cached list yet) so it doesn't sit on static text through the op-log replay.
 #define SYNCING_ANIM_INTERVAL_MS 400
 static AppTimer *s_syncing_timer = NULL;
 static int s_syncing_dots = 0;
@@ -926,9 +623,8 @@ static void load_habits(void) {
 static const uint32_t PERSIST_KEY_TRACKING_ID = 110;
 static const uint32_t PERSIST_KEY_TRACKING_START = 111;
 
-// Saved/loaded as its own pair of keys, independent of save_tasks()/
-// load_tasks(), so a tracked session survives even across a resync that
-// replaces s_tasks wholesale (MSG_TASK_SYNC_END).
+// Its own key pair, independent of save_tasks(), so a tracked session survives
+// a resync that replaces s_tasks wholesale.
 static void save_tracking(void) {
   if (s_tracking_task_id[0] != '\0') {
     persist_write_string(PERSIST_KEY_TRACKING_ID, s_tracking_task_id);
@@ -952,14 +648,9 @@ static const uint32_t PERSIST_KEY_HABIT_TRACKING_START = 131;
 static const uint32_t PERSIST_KEY_HABIT_COUNTDOWN_PAUSED = 132;
 static const uint32_t PERSIST_KEY_HABIT_COUNTDOWN_FROZEN_MS = 133;
 
-// Mirrors save_tracking()/load_tracking() above, for a tracked StopWatch/
-// countdown habit instead of a tracked task - see s_tracking_habit_id's own
-// comment on why this is a separate slot rather than reusing the task one,
-// and on why this whole block is compiled out on aplite. The pause fields
-// are only ever meaningful for an is_countdown session (see
-// s_habit_countdown_paused's own comment) but are harmless to persist
-// unconditionally alongside it - StopWatch sessions just always save/load
-// paused: false.
+// Mirrors save_tracking()/load_tracking() for a tracked StopWatch/countdown
+// habit. The pause fields only matter for an is_countdown session but persist
+// unconditionally (a StopWatch just always saves paused: false).
 static void save_habit_tracking(void) {
   if (s_tracking_habit_id[0] != '\0') {
     persist_write_string(PERSIST_KEY_HABIT_TRACKING_ID, s_tracking_habit_id);
@@ -1018,60 +709,36 @@ static void start_note_append_dictation(void);
 #endif
 
 #if defined(PBL_TOUCH)
-// Touch navigation (Pebble Time 2 / emery and any other PBL_TOUCH platform).
 // Applies s_touch_nav_enabled: opts into the system touch-nav bridge and
-// arms/disarms the raw long-press + swipe-back handler below. Called from
-// init() and whenever a sync's MSG_SYNC_STATUS reports the setting changed.
+// arms/disarms the raw long-press handler below. Called from init() and when a
+// sync reports the setting changed.
 static void apply_touch_nav(void);
 #endif
 
 // ---------- menu layer callbacks ----------
 
-// Section 0 is always the "Resync" action, plus "Habits" and/or "Add Task"
-// when those features are enabled (settings toggled from the phone - see
-// s_habits_enabled/s_add_task_enabled) - a DYNAMIC row count (1 to 3), not a
-// fixed one. section0_row_count()/section0_row_kind() are the single shared
-// source of truth for this layout - menu_get_num_rows/menu_draw_row/
-// menu_select_click all defer to them so they can never disagree about
-// which row index means what. Add Task also stays gated by
-// PBL_IF_MICROPHONE_ELSE regardless of s_add_task_enabled (aplite has no
-// mic hardware and never reports/draws/routes clicks to that row at all).
-// When there are tasks, sections 1..s_group_count are one per project group
-// (see recompute_groups()), followed by one final section (group_idx ==
-// s_group_count) holding a single "Finish Day" row - always the very last
-// row in the list, centered like the version text it also still shows (as
-// a subtitle now, not the row's sole content). Long-select archives every
-// currently-done task (see menu_select_long_click, send_finish_day, and
-// handleFinishDay in index.js); plain Select is a no-op on this row, same
-// as it's always been - Finish Day is a deliberate, not-easily-undone
-// action, so it uses this app's existing "long-select is the more
-// deliberate gesture" convention (task/habit time tracking) rather than
-// the single-tap Select every other primary action uses. When the list is
-// empty, there are no further sections (no Finish Day row on that screen
-// either - there's nothing to have finished): for STATUS_NOT_PAIRED/ERROR/
-// initial-syncing, section 0 doubles as the empty/error screen's single
-// phantom retry row (see menu_get_num_rows); for STATUS_OK (e.g. Today Only
-// with nothing due) on a platform ACTIONABLE_EMPTY_ACTIVE() allows, section 0
-// instead shows its normal Resync/Habits/Add Task rows with "No tasks for
-// today." as its header (see update_empty_layer's show_actionable_empty).
+// Section 0 is "Resync", plus "Habits" and/or "Add Task" when enabled - a
+// dynamic 1-3 rows. section0_row_count()/section0_row_kind() are the single
+// source of truth; every menu callback defers to them. Add Task stays gated by
+// PBL_IF_MICROPHONE_ELSE regardless of the setting.
+// With tasks: sections 1..s_group_count are the project groups, then one final
+// section (group_idx == s_group_count) with a single "Finish Day" row - always
+// last, long-select archives every done task, plain Select is a no-op.
+// Empty list: no further sections. For NOT_PAIRED/ERROR/initial-syncing,
+// section 0 doubles as the phantom retry row; for STATUS_OK with nothing due
+// (ACTIONABLE_EMPTY_ACTIVE()), section 0 shows its normal rows with "No tasks
+// for today." as the header.
 typedef enum {
   SECTION0_ROW_RESYNC,
   SECTION0_ROW_HABITS,
   SECTION0_ROW_ADD_TASK,
 } Section0RowKind;
 
-// Whether the STATUS_OK/zero-tasks empty state (e.g. Today Only with
-// nothing due) shows section 0's normal, still-interactive rows (with a
-// header carrying the "No tasks for today." message) instead of the old
-// single hidden phantom retry row. Aplite unconditionally keeps the old
-// behavior - the extra header/row-count/click-routing logic this needs
-// pushed a debug build 176 bytes past aplite's combined flash+RAM "APP"
-// region even with no new persistent state, confirmed via pebble build's
-// own memory usage report (same tight-budget reasoning as MAX_HABITS/
-// MAX_ID_LEN's own comments). A compile-time-constant macro (same idiom as
-// the SDK's own PBL_IF_MICROPHONE_ELSE, already used above for Add Task)
-// rather than a runtime check, so the dead branches it guards are fully
-// eliminated on aplite instead of merely unreachable.
+// Whether the STATUS_OK/zero-tasks empty state shows section 0's normal
+// interactive rows (with a "No tasks for today." header) instead of the hidden
+// phantom retry row. aplite keeps the old behavior - the extra logic pushed it
+// 176 bytes past its APP region. A compile-time macro, not a runtime check, so
+// the dead branches are eliminated on aplite.
 #ifdef PBL_PLATFORM_APLITE
 #define ACTIONABLE_EMPTY_ACTIVE() false
 #else
@@ -1089,9 +756,8 @@ static int section0_row_count(void) {
   return count;
 }
 
-// Maps a section-0 row index to which action occupies it. Resync is always
-// row 0; Habits (if enabled) then Add Task (if enabled) fill in after it in
-// that fixed order - matches section0_row_count()'s own counting order.
+// Maps a section-0 row index to its action. Resync is row 0; Habits then Add
+// Task fill in after it, matching section0_row_count()'s order.
 static Section0RowKind section0_row_kind(int row) {
   if (row == 0) {
     return SECTION0_ROW_RESYNC;
@@ -1112,10 +778,9 @@ static Section0RowKind section0_row_kind(int row) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// Index into s_tasks of the task currently shown in the pinned "TRACKING"
-// section, or -1 if s_pinned_task_id is unset or no longer in the list
-// (completed + hidden, or removed on the phone). Does NOT consult the
-// enable flag - see has_pinned_row() for that.
+// Index into s_tasks of the pinned "TRACKING" task, or -1 if s_pinned_task_id
+// is unset or gone from the list. Does NOT check the enable flag - see
+// has_pinned_row().
 static int pinned_task_index(void) {
   if (s_pinned_task_id[0] == '\0') {
     return -1;
@@ -1134,19 +799,16 @@ static bool has_pinned_row(void) {
   return s_pin_tracked_task_enabled && pinned_task_index() >= 0;
 }
 
-// Section index of project group 0 - 1 normally, or 2 when the pinned
-// section sits between section 0 (Resync/Habits/Add Task) and the groups.
-// Every task-menu callback that maps section_index to a group derives the
-// group index as (section_index - group_section_base()).
+// Section index of project group 0 - 1 normally, 2 when the pinned section sits
+// between section 0 and the groups. Menu callbacks derive a group index as
+// (section_index - group_section_base()).
 static int group_section_base(void) {
   return 1 + (has_pinned_row() ? 1 : 0);
 }
 #endif
 
-// Section index of project group 0, as a plain constant on aplite (which
-// has no pinned section) and the runtime value elsewhere. Lets the shared
-// menu callbacks below write `(int)section_index - GROUP_SECTION_BASE`
-// without an #ifdef at every site.
+// group_section_base() as a plain constant on aplite (no pinned section), the
+// runtime value elsewhere - lets callbacks skip an #ifdef at every site.
 #ifdef PBL_PLATFORM_APLITE
 #define GROUP_SECTION_BASE 1
 #else
@@ -1155,10 +817,8 @@ static int group_section_base(void) {
 
 #ifndef PBL_PLATFORM_APLITE
 
-// How many of group g's tasks are actually drawn - all of them, minus the
-// one pinned task when it falls inside this group (shown in the pinned
-// section instead). A group left with 0 visible tasks collapses entirely
-// (no rows, no header/project row - see menu_get_header_height).
+// How many of group g's tasks are drawn - all, minus the pinned task if it's in
+// this group. A group with 0 visible tasks collapses entirely.
 static int group_visible_task_count(int g) {
   int count = s_groups[g].count;
   if (has_pinned_row()) {
@@ -1184,24 +844,17 @@ static uint16_t menu_get_num_sections(MenuLayer *menu_layer, void *context) {
 
 static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
-    // STATUS_OK with zero tasks (e.g. Today Only filtering out everything
-    // due) is an "actionable" empty state - see update_empty_layer's
-    // show_actionable_empty - so the menu layer stays visible with its
-    // normal section-0 rows (Resync/Habits/Add Task) reachable, same as the
-    // populated list. Every other empty reason (not paired/error/initial
-    // syncing) keeps the menu hidden behind s_empty_layer, but it still owns
-    // the window's click config, so it needs at least one reportable row
-    // for SELECT to be dispatched at all - otherwise "Select to retry" on
-    // the error screen is dead text. Never actually drawn in that case
-    // since the layer is hidden.
+    // Actionable empty state (STATUS_OK, nothing due): the menu stays visible
+    // with its normal section-0 rows. Every other empty reason hides the menu
+    // but still needs one reportable row so SELECT dispatches ("Select to
+    // retry"); that row is never drawn since the layer is hidden.
     return ACTIONABLE_EMPTY_ACTIVE() ? (uint16_t)section0_row_count() : 1;
   }
   if (section_index == 0) {
     return (uint16_t)section0_row_count();
   }
 #ifndef PBL_PLATFORM_APLITE
-  // The pinned "TRACKING" section (see has_pinned_row) sits at index 1,
-  // between section 0 and the groups - exactly one row, the tracked task.
+  // The pinned "TRACKING" section at index 1 - one row, the tracked task.
   if (has_pinned_row() && section_index == 1) {
     return 1;
   }
@@ -1214,13 +867,9 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
     return 0;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // A non-empty group name (grouping actually on) gets one extra row up
-  // front - a selectable "project row" standing in for the old plain
-  // header (see menu_get_header_height's own aplite split below), reached
-  // the same way a task row is (double-click Select shows its notes - see
-  // menu_select_click). Aplite keeps the plain, non-interactive header
-  // instead (no RAM budget for the notes feature this exists to reach -
-  // same exclusion as every other notes-adjacent piece in this file).
+  // A named group gets one extra row up front - a selectable "project row"
+  // standing in for the plain header (double-click Select shows its notes).
+  // aplite keeps the plain non-interactive header.
   int visible = group_visible_task_count(group_idx);
   if (visible == 0) {
     return 0; // whole group collapsed - its only task is pinned at the top
@@ -1236,9 +885,7 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
 
 static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
-    // Actionable empty state only (see menu_get_num_rows) - the header is
-    // where "No tasks for today." itself lives once the menu takes over
-    // from s_empty_layer, sized the same as a project group's own header.
+    // Actionable empty state only - the header holds "No tasks for today."
     return (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) ? GROUP_HEADER_HEIGHT : 0;
   }
   if (section_index == 0) {
@@ -1251,22 +898,17 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
   }
 #endif
   int group_idx = (int)section_index - GROUP_SECTION_BASE;
-  // An empty group name means grouping is off (every task collapsed into
-  // one '' group) - no header, so this looks exactly like the flat list
-  // this had before grouping existed.
+  // Empty group name = grouping off (one '' group) - no header, flat list.
   if (group_idx >= s_group_count || s_groups[group_idx].name[0] == '\0') {
     return 0;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // A group whose only task is the one pinned at the top collapses whole -
-  // no floating header over an empty section.
+  // A group whose only task is pinned at the top collapses whole - no header.
   if (group_visible_task_count(group_idx) == 0) {
     return 0;
   }
-  // The group name now lives in a selectable project ROW instead (see
-  // menu_get_num_rows/menu_draw_row) - no separate header needed. Aplite
-  // keeps the plain header below (draw_header's own aplite-reachable
-  // branch still runs there).
+  // Non-aplite: the group name lives in a selectable project row instead
+  // (menu_get_num_rows/menu_draw_row), so no separate header.
   return 0;
 #else
   return GROUP_HEADER_HEIGHT;
@@ -1276,10 +918,7 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
     if (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) {
-      // Actionable empty state (see menu_get_num_rows/update_empty_layer) -
-      // the "No tasks for today." message that used to live alone on
-      // s_empty_layer now sits above the still-reachable Resync/Habits/Add
-      // Task rows instead.
+      // "No tasks for today." above the still-reachable section-0 rows.
       GRect bounds = layer_get_bounds(cell_layer);
       graphics_context_set_fill_color(ctx, GColorWhite);
       graphics_fill_rect(ctx, bounds, 0, GCornerNone);
@@ -1293,10 +932,8 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // The pinned "TRACKING" section's own header - a thin green strip,
-  // deliberately smaller/quieter than the bold project headers/rows below
-  // so it reads as a distinct-but-subordinate section (TRACKING_FONT_KEY is
-  // one size step down from HEADING_FONT_KEY on every platform).
+  // The pinned "TRACKING" header - a thin green strip, quieter than the bold
+  // project headers (TRACKING_FONT_KEY is one step down from HEADING_FONT_KEY).
   if (has_pinned_row() && section_index == 1) {
     GRect hb = layer_get_bounds(cell_layer);
     graphics_context_set_fill_color(ctx, GColorGreen);
@@ -1319,10 +956,8 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
   GRect text_rect = GRect(6, 2, bounds.size.w - 12, bounds.size.h - 4);
 
-  // MenuLayer headers, like rows, own their whole cell background - a
-  // header has no built-in fill of its own, so this has to happen before
-  // the text/lines below or they'd draw onto whatever was already in the
-  // framebuffer instead of a solid green cell.
+  // Fill first - a MenuLayer header has no built-in background, so the text and
+  // lines below would otherwise draw onto stale framebuffer content.
   graphics_context_set_fill_color(ctx, GColorGreen);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
@@ -1330,17 +965,14 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   graphics_draw_text(ctx, name, bold_font, text_rect,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  // Full-width divider along the bottom of the header cell - separates this
-  // group from its tasks, especially once several groups are on screen at once.
+  // Full-width divider separating this group from its tasks.
   int16_t divider_y = bounds.size.h - 2;
   graphics_context_set_stroke_color(ctx, GColorBlack);
   graphics_draw_line(ctx, GPoint(0, divider_y), GPoint(bounds.size.w, divider_y));
 }
 
-// Looks up a task by id (e.g. to re-find whatever's being tracked, since
-// s_tracking_task_id survives across a resync that reallocates s_tasks
-// wholesale, so any Task* captured at start_tracking() time can't be
-// trusted to still be valid).
+// Looks up a task by id - a resync can rebuild s_tasks wholesale, so a Task*
+// captured earlier (e.g. at start_tracking()) can't be trusted.
 static Task *find_task_by_id(const char *id) {
   for (int i = 0; i < s_task_count; i++) {
     if (strncmp(s_tasks[i].id, id, MAX_ID_LEN) == 0) {
@@ -1351,9 +983,8 @@ static Task *find_task_by_id(const char *id) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// Same idea as find_task_by_id, for the habits list - only needed by the
-// habit-tracking functions below, which are themselves compiled out on
-// aplite (see s_tracking_habit_id's own comment).
+// find_task_by_id for the habits list - only used by the habit-tracking
+// functions, themselves aplite-excluded.
 static Habit *find_habit_by_id(const char *id) {
   for (int i = 0; i < s_habit_count; i++) {
     if (strncmp(s_habits[i].id, id, MAX_HABIT_ID_LEN) == 0) {
@@ -1364,12 +995,9 @@ static Habit *find_habit_by_id(const char *id) {
 }
 #endif
 
-// Resolves a MenuIndex to the Task it points at, or NULL if it isn't on a
-// task row at all (the Resync row, a group header/project row, the Finish
-// Day row, or nothing there once s_group_count/s_task_count are taken into
-// account - recompute_groups() leaves s_group_count at 0 whenever
-// s_task_count is 0, so an empty list is handled by the same group_idx
-// bounds check as any other out-of-range row).
+// Resolves a MenuIndex to the Task it points at, or NULL if it isn't on a task
+// row (Resync, a project row, Finish Day, or out of range - an empty list has
+// s_group_count 0 and falls through the same group_idx bounds check).
 static Task *resolve_task_at(MenuIndex index) {
   if (index.section == 0) {
     return NULL;
@@ -1389,18 +1017,16 @@ static Task *resolve_task_at(MenuIndex index) {
   }
   int row = (int)index.row;
 #ifndef PBL_PLATFORM_APLITE
-  // Row 0 of a named group is the selectable project row (see
-  // menu_get_num_rows) standing in for the plain header aplite still uses -
-  // not a task, every other row shifts down by one to make room for it.
+  // Row 0 of a named group is the selectable project row, not a task; every
+  // other row shifts down by one.
   if (s_groups[group_idx].name[0] != '\0') {
     if (row == 0) {
       return NULL;
     }
     row -= 1;
   }
-  // Walk the group's tasks skipping the pinned one (it's drawn in the
-  // pinned section, not here), so visible row N maps to the Nth non-pinned
-  // task rather than s_tasks[start + N].
+  // Walk the group's tasks skipping the pinned one (drawn in the pinned
+  // section), so visible row N is the Nth non-pinned task.
   int pinned_idx = has_pinned_row() ? pinned_task_index() : -1;
   int start = s_groups[group_idx].start;
   int end = start + s_groups[group_idx].count;
@@ -1425,9 +1051,8 @@ static Task *resolve_task_at(MenuIndex index) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// Resolves a MenuIndex to the TaskGroup it points at IF it's on that
-// group's own selectable project row (row 0 of a named group - see
-// resolve_task_at's own comment), or NULL otherwise.
+// Resolves a MenuIndex to a TaskGroup if it's on that group's selectable
+// project row (row 0 of a named group), else NULL.
 static TaskGroup *resolve_project_row_at(MenuIndex index) {
   if (index.section == 0) {
     return NULL;
@@ -1442,8 +1067,7 @@ static TaskGroup *resolve_project_row_at(MenuIndex index) {
   if (s_groups[group_idx].name[0] == '\0' || (int)index.row != 0) {
     return NULL;
   }
-  // A fully-collapsed group (its only task pinned at the top) shows no
-  // project row either.
+  // A fully-collapsed group (its only task pinned) shows no project row.
   if (group_visible_task_count(group_idx) == 0) {
     return NULL;
   }
@@ -1464,10 +1088,8 @@ static int16_t title_natural_width(const char *title) {
   return size.w;
 }
 
-// Formats due_min (minutes since local midnight) as "@ 9:41 AM"/"@ 21:41" -
-// respecting the watch's own 12h/24h clock setting, since due_min itself is
-// timezone-less (the phone already converted to local time before sending
-// it - see sendTaskAt() in index.js).
+// Formats due_min (minutes since local midnight) as "@ 9:41 AM" / "@ 21:41",
+// respecting the watch's 12h/24h setting. The phone already sent local time.
 static void format_due_time(int due_min, char *out, size_t out_len) {
   int h = due_min / 60;
   int m = due_min % 60;
@@ -1482,15 +1104,8 @@ static void format_due_time(int due_min, char *out, size_t out_len) {
   }
 }
 
-// Formats elapsed tracked time as "1h 23m" (>= 1 hour, seconds dropped to
-// keep it compact - this ticks every second while tracking, but a second
-// digit isn't useful once the total is measured in hours), "5m 09s"
-// (>= 1 minute), or "42s". is_tracking prefixes a plain ASCII "> " marker
-// so a live-ticking number reads unambiguously as "currently running"
-// versus a static previously-accumulated total - plain ASCII here just
-// because there's no need for anything fancier, not because this codebase
-// avoids non-ASCII glyphs in general (see the subtask marker's own comment,
-// task-store.js's SUBTASK_PREFIX, for glyphs confirmed to render fine).
+// Formats tracked time as "1h 23m" (seconds dropped), "5m 09s", or "42s".
+// is_tracking prefixes "> " so a live number reads as running vs a static total.
 static void format_duration_ms(int ms, bool is_tracking, char *out, size_t out_len) {
   int total_s = ms / 1000;
   int h = total_s / 3600;
@@ -1519,10 +1134,8 @@ static void scroll_timer_callback(void *data) {
   s_scroll_timer = app_timer_register(SCROLL_INTERVAL_MS, scroll_timer_callback, NULL);
 }
 
-// Starts/stops the marquee timer to match whether the currently-selected
-// row actually needs it, and (optionally) resets the scroll position -
-// called whenever the selection moves or the task list is reloaded, since
-// either can change which title (if any) needs to scroll.
+// Starts/stops the marquee timer to match whether the selected row needs it,
+// optionally resetting the scroll position. Called on selection or list change.
 static void refresh_scroll_state(bool reset_offset) {
   if (reset_offset) {
     s_scroll_offset_px = 0;
@@ -1546,24 +1159,15 @@ static void menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, M
 #ifndef PBL_PLATFORM_APLITE
 static void backlight_timer_callback(void *data) {
   s_backlight_timer = NULL;
-  // Hands control back to the system's own automatic backlight behavior -
-  // NOT "force off". Since this fires with no real button press happening
-  // at that exact instant, automatic control has nothing to keep it lit
-  // for, so in practice this is what makes the "custom timeout" duration
-  // real: the light goes dark right as this timer expires instead of
-  // lingering under whichever duration the user's own watch Settings
-  // happen to specify.
+  // Hands control back to automatic backlight behavior, not "force off". With
+  // no button press at this instant, auto control has nothing to keep it lit,
+  // which is what makes the custom timeout duration real.
   light_enable(false);
 }
 
-// Called on every button interaction relevant to whichever menu is
-// visible (select/long-select clicks and up/down scroll - see call sites
-// in both windows' click callbacks below) - NOT on a settings change
-// itself, see apply_backlight_mode() for that. A mode of 0 (system
-// default) is a deliberate no-op: this app goes back to never touching the
-// backlight API at all unless the phone has explicitly opted into one of
-// the other two modes, same as every other watch-side feature toggle
-// defaulting to inert.
+// Called on every button interaction (select/long-select/scroll) - NOT on a
+// settings change (that's apply_backlight_mode()). Mode 0 is a no-op: the app
+// never touches the backlight API unless the phone opts into another mode.
 static void backlight_touch(void) {
   if (s_backlight_timer) {
     app_timer_cancel(s_backlight_timer);
@@ -1579,13 +1183,10 @@ static void backlight_touch(void) {
   s_backlight_timer = app_timer_register(s_backlight_mode * 1000, backlight_timer_callback, NULL);
 }
 
-// Reacts to s_backlight_mode itself changing (a settings save that arrives
-// while the app is already open, via MSG_SYNC_STATUS below) - not to user
-// interaction, see backlight_touch() for that. Leaving always-on needs an
-// explicit light_enable(false) here since nothing else ever calls it:
-// backlight_touch() only ever turns the light ON, the timeout timer is the
-// only thing that turns it back off, and that timer never runs in
-// always-on mode.
+// Reacts to s_backlight_mode changing (a settings save via MSG_SYNC_STATUS),
+// not to user interaction. Leaving always-on needs an explicit light_enable(false)
+// here - backlight_touch() only turns it on, and the timeout timer never runs
+// in always-on mode.
 static void apply_backlight_mode(void) {
   if (s_backlight_mode == 0) {
     if (s_backlight_timer) {
@@ -1600,19 +1201,11 @@ static void apply_backlight_mode(void) {
 #endif // !PBL_PLATFORM_APLITE
 
 #ifndef PBL_PLATFORM_APLITE
-// (Re)arms the single wakeup event this app ever uses, relative to NOW -
-// called once per launch as soon as s_auto_sync_interval_min is confirmed
-// by a sync status, and again whenever it actually changes (see
-// inbox_received_handler's MSG_SYNC_STATUS case). wakeup_cancel_all() first
-// is deliberate and safe: this is the only feature in this app that uses
-// the wakeup API at all, so there's never a second, unrelated wakeup to
-// preserve - and re-arming "interval minutes from whatever just happened"
-// on every confirmed sync (manual open, watch-initiated action, or a prior
-// wakeup's own sync) means the NEXT background wakeup is always exactly
-// one full interval past the most recent real activity, never sooner.
-// notify_if_missed is false: this is a quiet resync, not a reminder the
-// user needs a "you missed N notifications while your watch was off" alert
-// for if it doesn't fire exactly on time.
+// (Re)arms the single wakeup this app uses, relative to now - once per launch
+// when s_auto_sync_interval_min is first confirmed, and again when it changes.
+// wakeup_cancel_all() is safe: this is the only wakeup the app schedules.
+// Re-arming on every confirmed sync keeps the next wakeup one full interval past
+// the most recent activity. notify_if_missed is false - it's a quiet resync.
 static void schedule_next_wakeup(void) {
   wakeup_cancel_all();
   if (s_auto_sync_interval_min <= 0) {
@@ -1628,16 +1221,11 @@ static void schedule_next_wakeup(void) {
 }
 #endif // !PBL_PLATFORM_APLITE
 
-// Draws one task row into `bounds` - the marquee/ellipsized title plus the
-// "@ due  > spent / estimate" subtitle strip. Shared by the normal
-// per-group task rows and the pinned "TRACKING" row (menu_draw_row).
-// show_project draws the task's project name (task->project) right-aligned
-// on the subtitle line - only the pinned "TRACKING" row passes true, since
-// a normal row's project is already conveyed by its group header. Note
-// task->project is only populated when the phone is grouping by project, so
-// the pinned row shows no project name in a flat/ungrouped list. `bounds`
-// is always a MenuLayer cell's own bounds (origin 0,0), same as the inline
-// code this was extracted from assumed.
+// Draws one task row - marquee/ellipsized title plus the "@ due  > spent /
+// estimate" subtitle. Shared by per-group rows and the pinned "TRACKING" row.
+// show_project right-aligns task->project on the subtitle line; only the pinned
+// row passes true (and only shows it when grouping is on). `bounds` is a
+// MenuLayer cell's own bounds (origin 0,0).
 static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selected, bool show_project) {
   int16_t available = bounds.size.w - TITLE_BOX_X * 2;
   int16_t natural_width = title_natural_width(task->title);
@@ -1719,9 +1307,8 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
 
   GRect left_box = subtitle_box;
 #ifndef PBL_PLATFORM_APLITE
-  // Project name for the pinned row, right-aligned on the subtitle strip.
-  // Reserve up to half the width for it and shrink the left (due/time) box
-  // to match so the two never overlap.
+  // Project name for the pinned row, right-aligned - reserve up to half the
+  // width and shrink the left (due/time) box to match.
   if (show_project && task->project[0] != '\0') {
     GFont pfont = fonts_get_system_font(FONT_KEY_GOTHIC_14);
     GSize psize = graphics_text_layout_get_content_size(
@@ -1748,12 +1335,8 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
 
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
   if (s_task_count == 0 && !ACTIONABLE_EMPTY_ACTIVE()) {
-    // Menu stays hidden for every empty reason except the actionable one
-    // (see menu_get_num_rows) - nothing to draw. In the actionable case,
-    // section 0's Resync/Habits/Add Task rows below draw exactly as they
-    // do for a populated list; menu_get_num_sections never reports more
-    // than section 0 while s_task_count is 0, so nothing past this branch
-    // is reachable here either way.
+    // Menu hidden for every empty reason except the actionable one - nothing to
+    // draw. In the actionable case section 0 draws below as for a full list.
     return;
   }
   if (cell_index->section == 0) {
@@ -1763,9 +1346,8 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     Section0RowKind kind = section0_row_kind((int)cell_index->row);
 
     if (kind == SECTION0_ROW_HABITS) {
-      // Navigates to the habits (SimpleCounter) page - see
-      // push_habits_window(). Icon matches the real app's own "heart_check"
-      // icon for this same feature (magic-nav-config.service.ts).
+      // Navigates to the habits (SimpleCounter) page. Icon matches the real
+      // app's "heart_check" icon for this feature.
       graphics_context_set_fill_color(ctx, GColorVividCerulean);
       graphics_fill_rect(ctx, bounds, 0, GCornerNone);
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
@@ -1775,12 +1357,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                           GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
       GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
                                ROW_ICON_SIZE, ROW_ICON_SIZE);
-      // GCompOpSet (not the GCompOpAssign default) is what makes the
-      // bitmap's own alpha channel - the transparent background and the
-      // checkmark cutout - actually take effect here, same as
-      // bitmap_layer_set_compositing_mode(..., GCompOpSet) does for
-      // s_logo_layer above; a raw graphics_draw_bitmap_in_rect call doesn't
-      // inherit that, it has its own context-level compositing mode.
+      // GCompOpSet (not the GCompOpAssign default) so the bitmap's alpha (its
+      // transparent background) takes effect - a raw graphics_draw_bitmap_in_rect
+      // uses the context's own compositing mode.
       graphics_context_set_compositing_mode(ctx, GCompOpSet);
       graphics_draw_bitmap_in_rect(ctx, is_selected ? s_heart_white_bitmap : s_heart_bitmap, icon_rect);
       return;
@@ -1788,12 +1367,8 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
 #ifndef PBL_PLATFORM_APLITE
     if (kind == SECTION0_ROW_ADD_TASK) {
-      // Only reachable on mic-equipped platforms with the feature enabled -
-      // section0_row_kind() never returns this on aplite, or when
-      // s_add_task_enabled is false, or (on aplite specifically) not even
-      // compiled in - see s_mic_bitmap's own comment. Starts dictation via
-      // menu_select_click; see start_add_task_dictation()/
-      // dictation_status_callback below.
+      // Mic platforms with the feature enabled only. Starts dictation via
+      // menu_select_click.
       graphics_context_set_fill_color(ctx, GColorJaegerGreen);
       graphics_fill_rect(ctx, bounds, 0, GCornerNone);
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
@@ -1809,10 +1384,8 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
 #endif
 
-    // Reflects live sync status so a resync failure is visible even while
-    // the previously-cached list is still showing, instead of being
-    // silently swallowed (only the empty/error screen showed status
-    // before this row existed).
+    // Reflects live sync status so a resync failure is visible while the
+    // cached list still shows, instead of being silently swallowed.
     static char s_resync_subtitle[MAX_STATUS_MSG_LEN + 16];
     const char *subtitle = "Synced";
     switch (s_status_code) {
@@ -1828,19 +1401,13 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
         }
         break;
       case STATUS_NOT_PAIRED:
-        // Previously only shown on the empty/first-run screen (see
-        // update_empty_layer) - invisible once a cached list is already on
-        // screen, same silent-failure shape as the outbox case above.
         subtitle = "Not paired - open phone app";
         break;
       default:
         break;
     }
-    // Bypasses menu_cell_basic_draw so this row reads as a standing
-    // call-to-action rather than just another list item - background stays
-    // red regardless of selection state, so it can't be mistaken for a task.
-    // Text itself still inverts to white on select, matching every other
-    // row's selection feedback instead of looking inert when highlighted.
+    // Background stays red regardless of selection so this row reads as a
+    // standing call-to-action, not a task; the text still inverts on select.
     graphics_context_set_fill_color(ctx, GColorRed);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
@@ -1848,17 +1415,13 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                              bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
     graphics_draw_text(ctx, "Resync", fonts_get_system_font(HEADING_FONT_KEY), title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-    // Full row width (not narrowed like title_box above) - a status message
-    // here ("Failed: ...") is more important not to truncate than leaving
-    // room to dodge the icon, which sits up in the title row's vertical
-    // band, not down here.
+    // Full row width - not truncating a "Failed: ..." status matters more than
+    // dodging the icon, which sits up in the title band.
     GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                                 bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
     graphics_draw_text(ctx, subtitle, fonts_get_system_font(CHROME_FONT_KEY), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-    // Matches the Habits row's own icon (see below) so the two pinned rows
-    // read as a consistent pair - "the sp logo" (this app's checkmark
-    // mark, already used elsewhere as IMAGE_MENU_ICON/IMAGE_LOGO_LARGE).
+    // The sp checkmark logo, matching the Habits row's icon.
     GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10,
                              ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H) + 2,
                              ROW_ICON_SIZE, ROW_ICON_SIZE);
@@ -1868,15 +1431,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   }
   if ((int)cell_index->section - GROUP_SECTION_BASE == s_group_count) {
 #ifndef PBL_PLATFORM_APLITE
-    // Finish Day row, always last - long-select archives every currently-
-    // done task (menu_select_long_click); plain Select is a no-op here,
-    // same as it's always been (resolve_task_at returns NULL for a
-    // group_idx past s_group_count). Inverts on selection like a real row
-    // now (it wasn't interactive before this existed), matching the same
-    // black-selected/white-text convention plain task rows use below.
-    // Compiled out on aplite (see MAX_HABITS/s_tracking_habit_id's own
-    // comments for the same reasoning) - the version-only footer this row
-    // used to be stays exactly as it was there instead.
+    // Finish Day row, always last - long-select archives every done task, plain
+    // Select is a no-op. Inverts on selection like a task row. aplite-excluded -
+    // the plain version-only footer stays there instead.
     bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
                         menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
     GRect bounds = layer_get_bounds(cell_layer);
@@ -1889,16 +1446,14 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                              bounds.size.w - TITLE_BOX_X * 2, HEADING_TITLE_H);
     graphics_draw_text(ctx, "Finish Day", fonts_get_system_font(HEADING_FONT_KEY), title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
-    // Version text moves down to a subtitle instead of being the row's sole
-    // content - this is the same footer slot the version display has always
-    // lived in (v0.6.5), just no longer alone here.
+    // Version text as this row's subtitle - the same footer slot it's lived in
+    // since v0.6.5, just no longer alone.
     GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                                 bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
     graphics_draw_text(ctx, "v" APP_VERSION, fonts_get_system_font(CHROME_FONT_KEY), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 #else
-    // Plain version-only footer, unchanged from before Finish Day existed -
-    // no tap/long-select action on aplite (see the #ifndef branch above).
+    // Plain version-only footer - no tap/long-select action on aplite.
     GRect bounds = layer_get_bounds(cell_layer);
     graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
@@ -1909,14 +1464,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // The project row (see menu_get_num_rows/resolve_project_row_at) - same
-  // green/divider look the old plain header used, but now a real
-  // selectable row: double-click Select shows this project's notes (see
-  // menu_select_click), same "same style, now inverts on select" treatment
-  // the Finish Day row above got when IT became interactive. Text (not the
-  // green fill) inverts on selection, matching the Resync/Habits/Add Task
-  // section-0 rows' own convention for a row that keeps its own brand color
-  // regardless of selection state.
+  // The project row - the old plain header's green/divider look, now a
+  // selectable row (double-click Select shows the project's notes). Text, not
+  // the green fill, inverts on selection.
   TaskGroup *project_row = resolve_project_row_at(*cell_index);
   if (project_row) {
     bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
@@ -1933,8 +1483,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_draw_text(ctx, project_row->name, bold_font, text_rect,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-    // Full-width divider along the bottom edge separates this project from
-    // its tasks; the green fill + bold text already read as a header.
+    // Full-width divider separating this project from its tasks.
     int16_t divider_y = bounds.size.h - 2;
     graphics_context_set_stroke_color(ctx, fg);
     graphics_draw_line(ctx, GPoint(0, divider_y), GPoint(bounds.size.w, divider_y));
@@ -1956,51 +1505,26 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 }
 
 // ---------- outbound send retry ----------
-// A watch->phone send (task toggle, resync request, ...) can fail
-// transiently - APP_MSG_SEND_TIMEOUT ("the other end did not confirm
-// receiving the sent data with an (n)ack in time", per pebble.h) is the
-// single most common real-world cause, reported live as a "Couldn't reach
-// phone app" error that clears up on its own a moment later (Bluetooth
-// momentarily congested, or the phone app briefly backgrounded/relaunching
-// - not an actual pairing problem). There's no public API to extend
-// AppMessage's own internal ack-wait duration, so this retries the exact
-// same message automatically, with a short backoff, before ever surfacing
-// the fullscreen error overlay - see is_retryable_failure()/
-// outbox_failed_handler() below for which failures actually get retried.
-// Every watch-initiated send funnels through begin_send() (not a direct
-// app_message_outbox_begin/send pair of its own) specifically so there's
-// one single place that knows how to rebuild and resend the last message -
-// AppMessage has no "resend this same dictionary" API, so retrying means
-// reconstructing it from scratch from whatever this stashed.
+// A watch->phone send can fail transiently - APP_MSG_SEND_TIMEOUT (no ack in
+// time) is the most common cause, from a briefly congested BT link or a
+// backgrounded phone app, not a real pairing problem. No API extends the
+// ack-wait, so this retries the same message with a short backoff before
+// surfacing the error overlay. Every send funnels through begin_send() so one
+// place knows how to rebuild the last message (AppMessage has no "resend").
 //
-// aplite-excluded (#ifndef, same MAX_HABITS/StopWatch-timer precedent
-// elsewhere in this file): s_retry_str alone needs to be MAX_ID_LEN (96
-// bytes, for a long calendar-task id) to retry every message type this
-// sends, which alone blows past aplite's ~10-byte margin several times
-// over. aplite keeps its original immediate-error behavior (see the
-// #ifdef PBL_PLATFORM_APLITE bodies of send_task_toggle/
-// send_track_time_stop/request_sync/send_habit_adjust below, and
-// outbox_failed_handler's own aplite branch) - a real regression in
-// resilience there specifically, but a working, honest one: an aplite user
-// still sees the same accurate error and can just manually Resync/retry
-// their action, same as every platform did before this.
+// aplite-excluded: s_retry_str needs MAX_ID_LEN (96 bytes) to cover every
+// message type, well past aplite's ~10-byte margin. aplite keeps the immediate
+// error - a real resilience regression there, but honest: the user sees the
+// same error and can Resync manually.
 #ifndef PBL_PLATFORM_APLITE
 #define MAX_SEND_RETRIES 3
 #define RETRY_BACKOFF_BASE_MS 1000
 static int s_retry_msg_type = 0; // 0 = no message to retry if this send fails
-// Sized for the largest of what this ever holds: a task id (MAX_ID_LEN, the
-// biggest - calendar-integration ids), a habit id (MAX_HABIT_ID_LEN), or a
-// dictated task title (MAX_TITLE_LEN) - MSG_REQUEST_SYNC/MSG_FINISH_DAY
-// need neither and leave this empty.
+// Sized for the largest payload: a task id (MAX_ID_LEN), habit id, or dictated
+// title. MSG_REQUEST_SYNC/MSG_FINISH_DAY leave it empty.
 static char s_retry_str[MAX_ID_LEN];
-// Second string payload, only ever populated for MSG_NOTE_APPEND (the one
-// message type that needs TWO strings at once - TASK_ID in s_retry_str
-// above, plus this, the dictated note text to append). Every other message
-// type leaves this empty; kept separate from s_retry_str rather than
-// repurposing it for a second role. Sized to MAX_TITLE_LEN, not MAX_ID_LEN -
-// the dictated text this holds can never exceed the shared dictation
-// session's own buffer size (dictation_session_create(MAX_TITLE_LEN, ...)),
-// same session Add Task's title dictation uses.
+// Second string, only for MSG_NOTE_APPEND (TASK_ID in s_retry_str + the note
+// text here). Sized to MAX_TITLE_LEN - the dictation session's own buffer size.
 static char s_retry_str2[MAX_TITLE_LEN];
 static int32_t s_retry_int = 0; // TASK_DONE / TRACKED_MS / HABIT_DELTA, whichever s_retry_msg_type needs
 static int s_retry_count = 0;
@@ -2015,10 +1539,9 @@ static void clear_pending_retry(void) {
   }
 }
 
-// Rebuilds and (re)sends whatever message s_retry_msg_type/str/int describe
-// - the single source of truth for every outbound send's actual wire
-// format, used both for a message's first attempt (via begin_send) and any
-// retry of it, so the two can never drift out of sync with each other.
+// Rebuilds and (re)sends the message s_retry_msg_type/str/int describe - the
+// single source of truth for every send's wire format, used for both the first
+// attempt (via begin_send) and any retry.
 static void send_pending_retry(void) {
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
@@ -2067,14 +1590,10 @@ static void send_pending_retry(void) {
   app_message_outbox_send();
 }
 
-// Every watch-initiated send starts here: stash what it takes to rebuild
-// this exact message (for a possible retry - see send_pending_retry), reset
-// the retry count for this new attempt, and cancel any older still-pending
-// retry timer so a stale retry for a since-superseded message (e.g. this
-// same row toggled again before its first attempt's retry ever fired)
-// doesn't also fire and resend outdated data. str_val2 is only ever
-// non-NULL for MSG_NOTE_APPEND - every other message type passes NULL and
-// leaves s_retry_str2 empty.
+// Every watch-initiated send starts here: stash what it takes to rebuild this
+// message for a retry, reset the retry count, and cancel any older pending
+// retry timer so a stale retry can't resend outdated data. str_val2 is non-NULL
+// only for MSG_NOTE_APPEND.
 static void begin_send(int msg_type, const char *str_val, const char *str_val2, int32_t int_val) {
   if (s_retry_timer) {
     app_timer_cancel(s_retry_timer);
@@ -2131,25 +1650,14 @@ static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
 
 #ifndef PBL_PLATFORM_APLITE
 // Set right before send_finish_day() queues its message; outbox_sent_handler
-// checks this to know a just-CONFIRMED send is the one that should close the
-// app, not some unrelated message (task toggle, resync, ...) that happens to
-// succeed around the same time. Closing only on confirmed send (not merely
-// "queued") is deliberate: closing eagerly and having the send fail
-// afterward would hide that failure behind an app that's no longer open to
-// show it, defeating this app's own outbox_failed_handler fix (see
-// CLAUDE.md's "AppMessage send failures used to be completely silent") for
-// this one action. outbox_failed_handler clears the flag too, so a failed
-// send doesn't leave it armed for some later, unrelated successful send to
-// wrongly trigger a close.
+// checks it to close the app only when the Finish Day send is what just
+// CONFIRMED (not just queued - an eager close would hide a later send failure).
+// outbox_failed_handler clears it too.
 static bool s_close_after_finish_day_sent = false;
 
-// No extra keys - the watch has no way to build a full-fidelity archive
-// payload itself (its own Task struct is a trimmed display projection, not
-// the real task's full field set other real clients need to persist into
-// their own permanent archive), so this is a bare trigger; the phone's own
-// state.task cache already has everything needed - see handleFinishDay in
-// index.js. Compiled out on aplite along with the rest of the Finish Day
-// row (see menu_draw_row's own comment) - nothing calls this there.
+// No extra keys - the watch's Task struct is a trimmed display projection, so it
+// can't build a full archive payload; the phone's state.task cache has
+// everything (handleFinishDay in index.js). aplite-excluded with the row.
 static void send_finish_day(void) {
   begin_send(MSG_FINISH_DAY, NULL, NULL, 0);
 }
@@ -2164,11 +1672,8 @@ static void send_note_append(const char *id, const char *note_text, bool is_proj
   begin_send(is_project ? MSG_PROJECT_NOTE_APPEND : MSG_NOTE_APPEND, id, note_text, 0);
 }
 
-// Fires when dictation finishes (success, cancel, or failure). Only ever
-// registered on mic-equipped platforms - compiled out entirely on aplite
-// (see s_mic_bitmap's own comment for why). Shared by both Add Task and
-// note-append (see s_dictation_is_note_append's own comment) since only one
-// dictation session/flag pair exists for the app's whole lifetime.
+// Fires when dictation finishes (success, cancel, or failure). Mic platforms
+// only. Shared by Add Task and note-append (s_dictation_is_note_append routes).
 static void dictation_status_callback(DictationSession *session, DictationSessionStatus status,
                                        char *transcription, void *context) {
   s_dictation_pending = false;
@@ -2181,28 +1686,19 @@ static void dictation_status_callback(DictationSession *session, DictationSessio
     return;
   }
   if (status == DictationSessionStatusFailureTranscriptionRejected) {
-    // The user declined the transcription on the confirmation screen (which
-    // this app leaves enabled - dictation_session_enable_confirmation) -
-    // this is a cancel, not a failure, so it's a silent no-op, same as
-    // long-selecting a done task is (see menu_select_long_click).
+    // User declined the transcription on the confirmation screen - a cancel,
+    // not a failure, so a silent no-op.
     return;
   }
-  // Every other failure (no speech, connectivity, disabled, internal,
-  // recognizer error) already gets a dialog from the OS's own dictation UI
-  // by default (dictation_session_enable_error_dialogs, left at its default
-  // "on" here) - duplicating that in this app's own error overlay would be
-  // redundant, not closing a silent gap the way the outbox/STATUS_NOT_PAIRED
-  // fixes did (those had no other signal at all). Logged only.
+  // Every other failure already gets a dialog from the OS's own dictation UI,
+  // so no error overlay here. Logged only.
   APP_LOG(APP_LOG_LEVEL_INFO, "dictation failed, status=%d", (int)status);
 }
 
 static void start_add_task_dictation(void) {
   if (s_dictation_pending || !s_dictation_session) {
-    // Ignores a rapid double-press (own guard, not relying on
-    // dictation_session_start()'s own return value - see s_dictation_pending's
-    // comment) and is a no-op if this ever gets called before window_load
-    // has created the session (shouldn't happen: the row that reaches this
-    // is itself gated by PBL_IF_MICROPHONE_ELSE).
+    // Ignore a rapid double-press, and a call before window_load created the
+    // session (shouldn't happen).
     return;
   }
   s_dictation_is_note_append = false;
@@ -2210,13 +1706,9 @@ static void start_add_task_dictation(void) {
   dictation_session_start(s_dictation_session);
 }
 
-// Long-select on the notes overlay (see
-// notes_window_select_long_click_handler) - dictates text to append to the
-// currently-shown task's OR project's notes (see s_notes_overlay_is_project),
-// same session/guard as start_add_task_dictation above, just tagged for the
-// callback to route differently. s_notes_overlay_subject_id is only valid
-// while s_notes_window is the pushed/visible window, which is the only way
-// this ever gets called.
+// Long-select on the notes overlay - dictates text to append to the shown
+// task's or project's notes. Same session/guard as start_add_task_dictation,
+// just tagged for the callback to route differently.
 static void start_note_append_dictation(void) {
   if (s_dictation_pending || !s_dictation_session) {
     return;
@@ -2233,9 +1725,8 @@ static void overtime_banner_timeout_callback(void *data) {
   hide_overtime_banner();
 }
 
-// Hides the over-estimate banner and cancels its auto-dismiss timer - safe
-// to call whether or not it's currently showing (Select press, tracking
-// stopped, setting turned off, window unload).
+// Hides the over-estimate banner and cancels its auto-dismiss timer - safe to
+// call whether or not it's showing.
 static void hide_overtime_banner(void) {
   if (s_overtime_banner_timer) {
     app_timer_cancel(s_overtime_banner_timer);
@@ -2262,14 +1753,11 @@ static void show_overtime_banner(const char *task_title) {
   s_overtime_banner_timer = app_timer_register(OVERTIME_BANNER_MS, overtime_banner_timeout_callback, NULL);
 }
 
-// Called once per tracking tick: fires the over-estimate banner the first
-// time the tracked task's effective time (synced spent + this session's
-// still-running elapsed) reaches its estimate. Latched via
-// s_overtime_notified so it only fires once per crossing, and re-armed if
-// the effective time later falls back under the estimate. When the phone's
-// "Repeat the notification every 5 minutes" sub-option is on
-// (s_overtime_repeat_enabled) it also re-fires every
-// OVERTIME_REPEAT_INTERVAL_S for as long as the task stays over.
+// Called once per tracking tick: fires the over-estimate banner the first time
+// effective time (synced spent + this session's elapsed) reaches the estimate.
+// Latched via s_overtime_notified (re-armed if effective time drops back under).
+// With the "repeat every 5 minutes" sub-option, re-fires every
+// OVERTIME_REPEAT_INTERVAL_S while the task stays over.
 static void maybe_notify_overtime(void) {
   if (!s_overtime_notify_enabled || s_tracking_task_id[0] == '\0') {
     return;
@@ -2296,8 +1784,7 @@ static void maybe_notify_overtime(void) {
     show_overtime_banner(task->title);
     return;
   }
-  // Already notified for this crossing - the "repeat every 5 minutes"
-  // sub-option keeps re-firing it while the task stays over its estimate.
+  // Already notified this crossing - "repeat every 5 minutes" re-fires it.
   if (s_overtime_repeat_enabled &&
       time(NULL) - s_overtime_last_notify_epoch >= OVERTIME_REPEAT_INTERVAL_S) {
     s_overtime_last_notify_epoch = time(NULL);
@@ -2306,10 +1793,8 @@ static void maybe_notify_overtime(void) {
 }
 
 // Re-lays-out the task list after the pinned "TRACKING" section appears or
-// disappears (tracking started/stopped, grace expired, setting toggled) -
-// the section count and every group's row count can change, so a full
-// reload_data (not just mark_dirty) is needed, plus a scroll-state refresh
-// since which row is selected/marquee-scrolling may have moved.
+// disappears - the section and row counts change, so a full reload_data plus a
+// scroll-state refresh.
 static void refresh_pinned_section(void) {
   if (!s_menu_layer) {
     return;
@@ -2324,8 +1809,8 @@ static void unpin_timer_callback(void *data) {
   refresh_pinned_section();
 }
 
-// Cancels a pending unpin-grace timer (see stop_tracking_and_report) - the
-// task is about to be (re-)pinned, or the app is shutting down.
+// Cancels a pending unpin-grace timer - the task is about to be re-pinned, or
+// the app is shutting down.
 static void cancel_unpin_timer(void) {
   if (s_unpin_timer) {
     app_timer_cancel(s_unpin_timer);
@@ -2335,10 +1820,8 @@ static void cancel_unpin_timer(void) {
 #endif
 
 static void tracking_tick_callback(void *data) {
-  // Only the elapsed-time text changes each tick, not the row data itself -
-  // mark_dirty (a repaint) rather than reload_data (which also re-asks for
-  // section/row counts etc.) is the same lighter-weight choice
-  // scroll_timer_callback already makes for the marquee tick.
+  // Only the elapsed-time text changes each tick - mark_dirty (repaint), not
+  // reload_data (which also re-asks for section/row counts).
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
 #ifndef PBL_PLATFORM_APLITE
   maybe_notify_overtime();
@@ -2365,15 +1848,12 @@ static void start_tracking(Task *task) {
   s_tracking_start_epoch = time(NULL);
   save_tracking();
 #ifndef PBL_PLATFORM_APLITE
-  // Fresh session - re-arm the over-estimate banner (the tick will fire it
-  // if this task is already past its estimate) and clear any stale one
-  // left over from the previous task.
+  // Fresh session - re-arm the over-estimate banner and clear any stale one.
   s_overtime_notified = false;
   s_overtime_last_notify_epoch = 0;
   hide_overtime_banner();
-  // Pin this task to the top (if the setting's on). Cancels any grace timer
-  // from a just-stopped previous task and re-lays-out the list so the
-  // pinned section appears (or switches to this task) right away.
+  // Pin this task to the top (if enabled); cancel any grace timer from a
+  // just-stopped task and re-lay-out the list.
   cancel_unpin_timer();
   strncpy(s_pinned_task_id, task->id, MAX_ID_LEN - 1);
   s_pinned_task_id[MAX_ID_LEN - 1] = '\0';
@@ -2382,18 +1862,14 @@ static void start_tracking(Task *task) {
 #ifndef PBL_PLATFORM_APLITE
   if (has_pinned_row()) {
     refresh_pinned_section();
-    // Highlight the freshly-pinned row (it's section 1, row 0).
+    // Highlight the freshly-pinned row (section 1, row 0).
     menu_layer_set_selected_index(s_menu_layer, MenuIndex(1, 0), MenuRowAlignCenter, false);
   }
 #endif
 }
 
-// Stops whatever's currently being tracked (a no-op if nothing is). When
-// send_to_phone is true, reports the elapsed session for upload (see
-// handleTrackTimeStop in index.js) - false is used when switching tracking
-// to a different task, where the elapsed session on the PREVIOUS task
-// still needs reporting first, which the caller does itself before calling
-// start_tracking() on the new one (see menu_select_long_click).
+// Stops whatever's being tracked (a no-op if nothing is) and reports the
+// elapsed session for upload (handleTrackTimeStop in index.js).
 static void stop_tracking_and_report(void) {
   if (s_tracking_task_id[0] == '\0') {
     return;
@@ -2402,11 +1878,8 @@ static void stop_tracking_and_report(void) {
   if (elapsed_s > 0) {
     int32_t elapsed_ms = (int32_t)elapsed_s * 1000;
     send_track_time_stop(s_tracking_task_id, elapsed_ms);
-    // Optimistic local bump, same idea as menu_select_click's optimistic
-    // task->done flip: the phone will report back the real synced total
-    // (merged with whatever other clients tracked in the meantime) on the
-    // next full sync, but this avoids the subtitle reverting to the stale
-    // pre-session total in the meantime.
+    // Optimistic local bump so the subtitle doesn't revert to the pre-session
+    // total until the next full sync reports the real merged total.
     Task *tracked_task = find_task_by_id(s_tracking_task_id);
     if (tracked_task) {
       tracked_task->time_spent_ms += elapsed_ms;
@@ -2420,11 +1893,8 @@ static void stop_tracking_and_report(void) {
   s_overtime_notified = false;
   s_overtime_last_notify_epoch = 0;
   hide_overtime_banner();
-  // Keep the just-stopped task in the pinned section for a short grace
-  // period so it slides back into its group smoothly rather than vanishing
-  // the instant you long-press to stop. A new start_tracking() (switching
-  // to another task) cancels this. Only armed when the pin is actually
-  // showing something - not when the setting's off or nothing was pinned.
+  // Keep the just-stopped task pinned for a short grace period so it slides
+  // back into its group smoothly. A new start_tracking() cancels this.
   if (s_pin_tracked_task_enabled && s_pinned_task_id[0] != '\0') {
     cancel_unpin_timer();
     s_unpin_timer = app_timer_register(UNPIN_GRACE_MS, unpin_timer_callback, NULL);
@@ -2438,42 +1908,29 @@ static void stop_tracking_and_report(void) {
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
 #ifndef PBL_PLATFORM_APLITE
-  // The over-estimate banner (see maybe_notify_overtime) is a plain layer
-  // on top of the menu, not a separate window - a Select press while it's
-  // up just dismisses it and does nothing else, same "first press clears
-  // the transient overlay" feel the error overlay has.
+  // The over-estimate banner is a plain layer on the menu - a Select while
+  // it's up just dismisses it, like the error overlay.
   if (s_overtime_banner_layer &&
       !layer_get_hidden(text_layer_get_layer(s_overtime_banner_layer))) {
     hide_overtime_banner();
     return;
   }
 #endif
-  // No s_notes_overlay_active check here (unlike the error overlay below) -
-  // the notes overlay is a separate pushed Window (see s_notes_window's own
-  // comment), so this callback simply never fires while it's on top; the
-  // window stack itself keeps the two from ever overlapping.
+  // No s_notes_overlay_active check - the notes overlay is a separate pushed
+  // Window, so this callback never fires while it's on top.
   if (s_error_overlay_active) {
-    // Click routing goes through MenuLayer's own config regardless of
-    // whether its layer is currently hidden (same mechanism the empty-
-    // screen's phantom row 0 below already relies on), so this fires even
-    // though s_menu_layer is hidden behind the overlay right now. Retries
-    // immediately after dismissing (same "Select to retry" convention the
-    // empty-screen's own phantom row 0 already uses below) rather than
-    // just clearing the message and leaving the user to separately find
-    // and press Resync - previously a real gap for the single most likely
-    // cause of this overlay, a transient "Couldn't reach phone app" send
-    // failure (see outbox_failed_handler), where the fix is almost always
-    // just "try again."
+    // Click routing goes through MenuLayer's config even while its layer is
+    // hidden. Retry immediately after dismissing ("Select to retry") rather
+    // than making the user find Resync - the usual cause is a transient send
+    // failure where "try again" is the fix.
     hide_error_overlay();
     request_sync();
     return;
   }
   if (s_task_count == 0 && !ACTIONABLE_EMPTY_ACTIVE()) {
-    // The empty/error screen's phantom row 0 (see menu_get_num_rows) lands
-    // here - this is what makes "Select to retry" actually retry. The
-    // actionable empty state (STATUS_OK, zero tasks) falls through to the
-    // normal section-0 routing below instead, since it exposes the real
-    // Resync/Habits/Add Task rows rather than one phantom retry row.
+    // The empty/error screen's phantom row 0 - this makes "Select to retry"
+    // retry. The actionable empty state falls through to normal section-0
+    // routing below.
     request_sync();
     return;
   }
@@ -2483,24 +1940,16 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
       push_habits_window();
 #ifndef PBL_PLATFORM_APLITE
     } else if (kind == SECTION0_ROW_ADD_TASK) {
-      // Only reachable on mic-equipped platforms with the feature enabled
-      // (see menu_get_num_rows/section0_row_kind).
       start_add_task_dictation();
 #endif
     } else {
-      // The "Resync" row atop the populated list.
-      request_sync();
+      request_sync(); // the "Resync" row
     }
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // The project row (see resolve_project_row_at/menu_draw_row) - same
-  // double-click-to-show-notes gesture as a task row below, but there's no
-  // competing single-click action to delay here (a project row doesn't
-  // "toggle"), so this just tracks whether a second click on the SAME
-  // project arrives within the window; a lone click's timer callback
-  // (pending_project_click_timer_callback) has nothing to commit, it just
-  // clears the pending state.
+  // The project row - same double-click-to-show-notes gesture as a task row,
+  // but no single-click action to delay, so this just tracks a second click.
   TaskGroup *project_row = resolve_project_row_at(*cell_index);
   if (project_row) {
     if (s_pending_project_click_timer &&
@@ -2528,10 +1977,8 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // Double-click (a second Select click on this SAME task before the
-  // pending single-click toggle below has committed) shows notes instead
-  // of toggling - see pending_toggle_timer_callback and s_notes_full_text's
-  // own comment for why this is compiled out on aplite entirely.
+  // A second Select on the SAME task before the pending toggle commits shows
+  // notes instead of toggling. aplite-excluded with the notes feature.
   if (s_pending_toggle_timer && strncmp(s_pending_toggle_task_id, task->id, MAX_ID_LEN) == 0) {
     app_timer_cancel(s_pending_toggle_timer);
     s_pending_toggle_timer = NULL;
@@ -2539,10 +1986,8 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     show_notes_overlay(task);
     return;
   }
-  // A different task's toggle was still pending (the user scrolled and
-  // clicked again before it committed) - it's clearly not getting
-  // double-clicked anymore, so let it through right away instead of
-  // silently dropping it, then start a fresh pending window for this click.
+  // A different task's toggle was still pending - let it through now (it's
+  // clearly not being double-clicked) and start a fresh window for this click.
   if (s_pending_toggle_timer) {
     app_timer_cancel(s_pending_toggle_timer);
     pending_toggle_timer_callback(NULL);
@@ -2558,29 +2003,21 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
 #endif
 }
 
-// Long-select toggles time tracking on the highlighted task: starts it if
-// nothing (or a different task) is being tracked, stops it if this task is
-// the one already being tracked. Only one task tracks at a time, so
-// starting a new one first stops-and-reports whatever was running before -
-// mirrors the real app's single global "current task", not a per-task
-// independent timer each.
+// Long-select toggles time tracking on the highlighted task. One task at a
+// time, so starting a new one first stops-and-reports the previous - mirrors
+// the real app's single global "current task".
 static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
-  // No s_notes_overlay_active check here - see menu_select_click's own
-  // comment; voice note-append is wired directly on s_notes_window's own
-  // click config now (notes_window_select_long_click_handler).
+  // No s_notes_overlay_active check - note-append is wired on s_notes_window's
+  // own click config.
   if (s_error_overlay_active || s_task_count == 0 || cell_index->section == 0) {
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
   if ((int)cell_index->section - GROUP_SECTION_BASE == s_group_count) {
-    // Finish Day row - see its own comment in menu_draw_row. No optimistic
-    // local change here (unlike task-toggle/habit-adjust/time-tracking) -
-    // archiving needs the phone's own full-fidelity state.task cache, which
-    // the watch doesn't have; this is a pure fire-and-forget trigger, and
-    // the phone pushes an updated task list back once it's actually done.
-    // Closes the app once the send is confirmed (outbox_sent_handler), not
-    // eagerly here - see s_close_after_finish_day_sent's own comment.
+    // Finish Day row. No optimistic local change - archiving needs the phone's
+    // full state.task cache; this is fire-and-forget and the phone pushes an
+    // updated list back. Closes the app once the send confirms, not eagerly.
     s_close_after_finish_day_sent = true;
     send_finish_day();
     return;
@@ -2588,9 +2025,7 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
 #endif
   Task *task = resolve_task_at(*cell_index);
   if (!task || task->done) {
-    // Tracking a completed task isn't a real scenario - not worth a
-    // separate error/feedback path, just ignore the long-press.
-    return;
+    return; // tracking a completed task isn't a real scenario - just ignore it
   }
   bool already_tracking_this = s_tracking_task_id[0] != '\0' &&
                                 strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
@@ -2609,26 +2044,18 @@ static void stop_syncing_animation(void) {
     s_syncing_timer = NULL;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // Restores s_empty_layer to the plain font every other empty-state
-  // message (not-paired/error/no-tasks) actually uses, and hides the
-  // percent/hint subtitle - both are only ever populated while syncing.
+  // Restore s_empty_layer's plain font and hide the percent/hint subtitle -
+  // both only used while syncing.
   text_layer_set_font(s_empty_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
   layer_set_hidden(text_layer_get_layer(s_sync_progress_layer), true);
 #endif
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// Refreshes s_sync_progress_layer's text from the latest s_status_msg -
-// "Decrypting NN%" while a page of ops is being decrypted (index.js's
-// applyOperations() progress callback - see its own comment for why this
-// stretch needs a heads-up at all), or the "may take a few minutes"
-// fallback before any percentage is available yet (e.g. still fetching
-// the first page, or a page with nothing to decrypt).
-//
-// The percent message gets a bigger font than the fallback - it's the one
-// thing actually worth reading closely here, and short enough ("Decrypting
-// 100%" at its longest) to never wrap within this layer's fixed height the
-// way the longer fallback sentence would at the same size.
+// Refreshes s_sync_progress_layer from s_status_msg - "Decrypting NN%" while a
+// page of ops decrypts, or the "may take a few minutes" fallback before a
+// percentage is available. The percent gets a bigger font (short enough not to
+// wrap; the fallback sentence would).
 static void update_sync_progress_text(void) {
   if (s_status_msg[0] != '\0') {
     text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
@@ -2643,9 +2070,7 @@ static void update_sync_progress_text(void) {
 static void syncing_timer_callback(void *data) {
   s_syncing_dots = (s_syncing_dots + 1) % 4;
 #ifdef PBL_PLATFORM_APLITE
-  // No spare TextLayer here (see s_sync_progress_layer's own comment) - the
-  // percentage, when available, rides on the same single line/font as
-  // everything else instead of a separate subtitle.
+  // No spare TextLayer on aplite - the percentage rides the same line/font.
   static char s_syncing_text[MAX_STATUS_MSG_LEN + 16];
   if (s_status_msg[0] != '\0') {
     snprintf(s_syncing_text, sizeof(s_syncing_text), "Syncing %s%.*s", s_status_msg, s_syncing_dots, "...");
@@ -2664,15 +2089,12 @@ static void syncing_timer_callback(void *data) {
 
 static void start_syncing_animation(void) {
 #ifndef PBL_PLATFORM_APLITE
-  // Bigger than every other empty-state message's font (see
-  // stop_syncing_animation's restore) - safe to go large here specifically
-  // because the title text itself is always short ("Syncing..."), unlike
-  // the not-paired/error messages that share this same layer and can run
-  // to a full wrapped sentence.
+  // Bigger than the other empty-state messages - safe because "Syncing..." is
+  // always short, unlike the not-paired/error text sharing this layer.
   text_layer_set_font(s_empty_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
   layer_set_hidden(text_layer_get_layer(s_sync_progress_layer), false);
   if (s_syncing_timer) {
-    update_sync_progress_text(); // a status push (new percent) mid-sync - timer's already running
+    update_sync_progress_text(); // new percent mid-sync; timer already running
     return;
   }
 #else
@@ -2690,11 +2112,8 @@ static void start_syncing_animation(void) {
   s_syncing_timer = app_timer_register(SYNCING_ANIM_INTERVAL_MS, syncing_timer_callback, NULL);
 }
 
-// Shows (or, called again while already showing, re-affirms/updates the
-// message on) the fullscreen error overlay, hiding whatever the menu/
-// empty-state layers were showing underneath. Safe to call regardless of
-// s_task_count - stop_syncing_animation() covers the case where this
-// interrupts the very first sync's "Syncing..." animation.
+// Shows (or re-affirms) the fullscreen error overlay, hiding the menu and
+// empty-state layers under it. Safe regardless of s_task_count.
 static void show_error_overlay(void) {
   s_error_overlay_active = true;
   static char s_error_overlay_text[MAX_STATUS_MSG_LEN + 48];
@@ -2710,46 +2129,31 @@ static void show_error_overlay(void) {
   layer_set_hidden(text_layer_get_layer(s_empty_layer), true);
   layer_set_hidden(bitmap_layer_get_layer(s_logo_layer), true);
 #ifndef PBL_PLATFORM_APLITE
-  // The over-estimate banner sits on top of this overlay's own layer - drop
-  // it so the full-screen error isn't half-covered by a stale strip.
+  // Drop the over-estimate banner so it doesn't half-cover the error.
   hide_overtime_banner();
 #endif
   stop_syncing_animation();
 }
 
 static void update_empty_layer(void) {
-  // The error overlay owns menu/empty-layer visibility while it's up (it
-  // hides both itself, in show_error_overlay()) - without this guard, any
-  // background status update arriving before Select dismisses it (e.g. a
-  // retry's own TASK_SYNC_END) would un-hide the menu or empty layer right
-  // out from under the overlay via the calls below, even though the
-  // overlay's own layer would still be showing on top of it too.
-  // No equivalent guard for the notes overlay - it's a separate pushed
-  // Window (s_notes_window) now, not a layer sharing s_main_window with the
-  // menu/empty layers this function touches, so it's unaffected either way
-  // (and invisible underneath while the notes window is on top), same as
-  // s_habits_window needs no such guard here either.
+  // The error overlay owns menu/empty-layer visibility while it's up - without
+  // this guard a background status update (e.g. a retry's TASK_SYNC_END) would
+  // un-hide the menu under the overlay. The notes overlay needs no such guard
+  // (it's a separate pushed Window).
   if (s_error_overlay_active) {
     return;
   }
   bool show_empty = (s_task_count == 0);
-  // STATUS_OK with zero tasks (e.g. Today Only filtering out everything due
-  // today) is an "actionable" empty state: rather than the standalone
-  // s_empty_layer/s_logo_layer pair every other empty reason uses, the menu
-  // layer itself stays visible, showing "No tasks for today." as section 0's
-  // header with the real Resync/Habits/Add Task rows still reachable below
-  // it - see menu_get_num_rows/menu_get_header_height/menu_draw_header/
-  // menu_draw_row/menu_select_click, which all key off this same
-  // ACTIONABLE_EMPTY_ACTIVE() check (always false on aplite - see its own
-  // comment).
+  // STATUS_OK with zero tasks is an "actionable" empty state: the menu stays
+  // visible with "No tasks for today." as section 0's header and the real
+  // rows reachable, rather than the standalone s_empty_layer/s_logo_layer.
   bool show_actionable_empty = show_empty && ACTIONABLE_EMPTY_ACTIVE();
   layer_set_hidden(text_layer_get_layer(s_empty_layer), !show_empty || show_actionable_empty);
   layer_set_hidden(bitmap_layer_get_layer(s_logo_layer), !show_empty || show_actionable_empty);
   layer_set_hidden(menu_layer_get_layer(s_menu_layer), show_empty && !show_actionable_empty);
 
-  // Only the empty screen (no cached list yet at all - i.e. the very first
-  // sync) gets the animation; a resync with a populated list already has
-  // its own live status via the Resync row's subtitle.
+  // Only the first sync (no cached list) gets the animation; a resync with a
+  // populated list shows status via the Resync row's subtitle.
   bool is_initial_syncing = show_empty && s_status_code == STATUS_SYNCING;
   if (is_initial_syncing) {
     start_syncing_animation();
@@ -2763,9 +2167,8 @@ static void update_empty_layer(void) {
 
   static char s_empty_text[MAX_STATUS_MSG_LEN + 32];
 
-  // Only STATUS_NOT_PAIRED and STATUS_ERROR ever reach here now -
-  // show_actionable_empty above already intercepted the STATUS_OK case,
-  // and is_initial_syncing already intercepted STATUS_SYNCING.
+  // Only STATUS_NOT_PAIRED and STATUS_ERROR reach here (STATUS_OK and
+  // STATUS_SYNCING were intercepted above).
   if (s_status_code == STATUS_NOT_PAIRED) {
     text_layer_set_text(s_empty_layer, "Open the app on\nyour phone to pair\nwith SuperSync.");
   } else {
@@ -2778,11 +2181,9 @@ static void update_empty_layer(void) {
   }
 }
 
-// Dismisses the error overlay (Select, see menu_select_click) and hands
-// visibility back to update_empty_layer() - now unguarded, since the flag
-// flips before calling it - to restore whichever of menu/empty-state is
-// correct for however s_task_count/s_status_code look right now (not
-// necessarily how they looked when the overlay first appeared).
+// Dismisses the error overlay (Select) and hands visibility back to
+// update_empty_layer() (unguarded now, since the flag flips first) to restore
+// the right layer for the current s_task_count/s_status_code.
 static void hide_error_overlay(void) {
   s_error_overlay_active = false;
   layer_set_hidden(text_layer_get_layer(s_error_layer), true);
@@ -2790,25 +2191,14 @@ static void hide_error_overlay(void) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// "Notes:\n\n" is written straight into s_notes_full_text's malloc'd buffer
-// ahead of the fetched chunks (see the MSG_NOTE_SYNC_START handler) rather
-// than composed into a second buffer at render time - the note text itself
-// is already sized exactly to what the phone reported, so there's no
-// upper bound to size a second copy against.
+// "Notes:\n\n" is written into s_notes_full_text's buffer ahead of the chunks,
+// not composed at render time (there's no bound to size a second buffer to).
 #define NOTES_HEADER "Notes:\n\n"
 
-// How tall a block of text lays out (word-wrapped) at the given width -
-// shared by notes_window_load (first open) and render_notes_overlay_content
-// (every later re-render: loading placeholder -> full text, or a fresh
-// note-append). Confirmed live on-device that this measurement runs short
-// of what TextLayer actually needs to avoid clipping its own last lines (a
-// real note measured at 198px rendered visibly cut off in a 208px-tall
-// viewport, and still stopped a line or two short of the true end after a
-// flat +24px margin) - the shortfall scales with content length rather
-// than being a fixed few px, so the margin below is proportional (10%)
-// plus a flat two-line floor, generous enough that even a long note's true
-// last line is always reachable. A short note that already fit just gets
-// a bit of harmless extra scroll room past its actual end.
+// Height a word-wrapped text block lays out to at the given width. On-device,
+// graphics_text_layout_get_content_size runs short of what TextLayer needs and
+// the shortfall scales with length, so the margin is proportional (10%) plus a
+// two-line floor. A short note just gets harmless extra scroll room.
 #define NOTES_TEXT_HEIGHT_MARGIN_FLOOR 48
 
 static int16_t measure_notes_text_height(int16_t width, const char *text) {
@@ -2822,23 +2212,16 @@ static int16_t measure_notes_text_height(int16_t width, const char *text) {
   return size.h + margin;
 }
 
-// What to actually show on the names line - the real comma-joined tags, or
-// NOTES_TAGS_EMPTY_TEXT for a legitimately untagged task (not the same as
-// "no tags header at all", which is a project subject instead - see
-// s_notes_tags_layer's own comment). Shared by measure_notes_tags_parts and
-// notes_tags_layer_draw so what gets measured and what gets drawn can never
-// disagree.
+// The names line - the comma-joined tags, or NOTES_TAGS_EMPTY_TEXT for an
+// untagged task. Shared by measure_notes_tags_parts and notes_tags_layer_draw
+// so measured and drawn never disagree.
 static const char *notes_tags_display_line(void) {
   return s_notes_tags_line[0] != '\0' ? s_notes_tags_line : NOTES_TAGS_EMPTY_TEXT;
 }
 
-// Measures the bold "Tags:" label and the (possibly multi-line, word-
-// wrapped) tag names/placeholder separately, given the already-padded
-// content width - shared by render_notes_overlay_content (which only needs
-// the combined total, to size s_notes_tags_layer's frame) and
-// notes_tags_layer_draw (which needs each piece's own height, to know where
-// the names text starts) so the two can never disagree about how tall
-// either piece is.
+// Measures the bold "Tags:" label and the (wrapped) tag names separately, given
+// the padded content width - shared by render_notes_overlay_content (needs the
+// total) and notes_tags_layer_draw (needs each height) so they can't disagree.
 static void measure_notes_tags_parts(int16_t content_w, int16_t *out_label_h, int16_t *out_names_h) {
   GSize label_size = graphics_text_layout_get_content_size(
       NOTES_TAGS_LABEL, fonts_get_system_font(NOTES_LABEL_FONT_KEY),
@@ -2850,29 +2233,17 @@ static void measure_notes_tags_parts(int16_t content_w, int16_t *out_label_h, in
   *out_names_h = names_size.h;
 }
 
-// Applies s_notes_display_text (and s_notes_tags_line, if any - see
-// show_notes_overlay) to the already-created TextLayers/ScrollLayer and
-// resizes everything to match - shared by notes_window_load (first open)
-// and every later update (a fetch landing, timing out, or a fresh
-// note-append's re-fetch). A no-op if the window isn't loaded yet
-// (s_notes_layer is only non-NULL between notes_window_load/unload) -
-// notes_window_load itself calls this once it creates the layers, picking
-// up whatever s_notes_display_text/s_notes_tags_line already hold at that
-// point.
+// Applies s_notes_display_text and s_notes_tags_line to the created
+// TextLayers/ScrollLayer and resizes to match. Shared by notes_window_load and
+// every later update. A no-op if the window isn't loaded (s_notes_layer NULL).
 static void render_notes_overlay_content(void) {
   if (!s_notes_layer) {
     return;
   }
-  // The tags line is a fixed header OUTSIDE the ScrollLayer (see
-  // notes_window_load) - stays on screen while the notes body scrolls
-  // underneath it, rather than scrolling away together with the notes as
-  // one block. Shown for any TASK subject, tagged or not (an untagged task
-  // gets NOTES_TAGS_EMPTY_TEXT via notes_tags_display_line, same "say so
-  // explicitly" convention as NOTES_EMPTY_TEXT for the notes body itself) -
-  // zero height (no visible gap) only for a PROJECT subject, which has no
-  // tags concept to report on at all. Measured against the padded width
-  // (see notes_tags_layer_draw) so the wrap point matches what's actually
-  // drawn, not the full unpadded layer width.
+  // Tags line: a fixed header outside the ScrollLayer, staying put while the
+  // body scrolls. Shown for any task subject (untagged -> NOTES_TAGS_EMPTY_TEXT),
+  // zero-height for a project subject. Measured against the padded width so the
+  // wrap point matches what's drawn.
   int16_t tags_height = 0;
   if (!s_notes_overlay_is_project) {
     int16_t label_h, names_h;
@@ -2891,10 +2262,8 @@ static void render_notes_overlay_content(void) {
   layer_set_frame(scroll_layer_get_layer(s_notes_scroll_layer), scroll_frame);
 
   text_layer_set_text(s_notes_layer, s_notes_display_text);
-  // The new text can be a very different length than what was there before
-  // (a loading placeholder swapping for the real thing, or a fresh
-  // note-append) - resize the scrollable content to match and snap back to
-  // the top rather than leaving the scroll position mid-way through text
+  // The new text can be a very different length - resize the scroll content and
+  // snap back to the top rather than leaving the position mid-way through text
   // that may no longer be there.
   int16_t text_height = measure_notes_text_height(scroll_frame.size.w, s_notes_display_text);
   if (text_height < scroll_frame.size.h) {
@@ -2908,12 +2277,8 @@ static void render_notes_overlay_content(void) {
   scroll_layer_set_content_offset(s_notes_scroll_layer, GPointZero, false);
 }
 
-// Releases whatever s_notes_full_text currently owns (safe to call whether
-// or not anything is owned - free(NULL) is a no-op) and resets the fetch
-// state, ready for a new request. Does NOT touch s_notes_display_text -
-// callers set that themselves right after, to whatever's appropriate for
-// why they're resetting (a fresh "Loading notes...", an empty-notes
-// literal, etc).
+// Frees s_notes_full_text (free(NULL) is fine) and resets the fetch state for a
+// new request. Does NOT touch s_notes_display_text - callers set that next.
 static void reset_notes_full_buffer(void) {
   free(s_notes_full_text);
   s_notes_full_text = NULL;
@@ -2929,12 +2294,8 @@ static void cancel_notes_load_timeout(void) {
   }
 }
 
-// Fires when a note fetch has gone unanswered for NOTES_LOAD_TIMEOUT_MS -
-// see s_notes_load_timeout_timer's own comment. Only acts if the overlay
-// is still open and still actually waiting (the loading placeholder is
-// still showing) - a slow-but-eventually-successful fetch already
-// canceled this timer well before it would fire, and the user may have
-// since backed out entirely.
+// Fires when a note fetch is unanswered for NOTES_LOAD_TIMEOUT_MS. Only acts if
+// the overlay is still open and still waiting.
 static void notes_load_timeout_callback(void *data) {
   s_notes_load_timeout_timer = NULL;
   if (s_notes_overlay_active && s_notes_is_loading) {
@@ -2949,26 +2310,18 @@ static void start_notes_load_timeout(void) {
   s_notes_load_timeout_timer = app_timer_register(NOTES_LOAD_TIMEOUT_MS, notes_load_timeout_callback, NULL);
 }
 
-// Asks the phone for this subject's (task's or project's) full notes
-// (MSG_NOTE_REQUEST/MSG_PROJECT_NOTE_REQUEST) - the reply arrives later as
-// MSG_(PROJECT_)NOTE_SYNC_START/CHUNK*/SYNC_END (see inbox_received_handler),
-// matched back to s_notes_overlay_subject_id/s_notes_overlay_is_project
-// rather than trusting a stale in-flight request still being about whatever
-// is currently on screen.
+// Asks the phone for this subject's full notes (MSG_NOTE_REQUEST /
+// MSG_PROJECT_NOTE_REQUEST) - the SYNC_START/CHUNK/SYNC_END reply is matched
+// back to s_notes_overlay_subject_id, not to a stale in-flight request.
 static void request_notes_full(const char *id, bool is_project) {
   begin_send(is_project ? MSG_PROJECT_NOTE_REQUEST : MSG_NOTE_REQUEST, id, NULL, 0);
   start_notes_load_timeout();
 }
 
-// Shared by show_notes_overlay (task) and show_project_notes_overlay below -
-// same pushed Window either way (see s_notes_window's own comment for why -
-// Back's default pop behavior), just a different subject id/fetch message
-// type. Also doubles as a live refresh while that window is already open
-// (see handleNoteAppend/handleProjectNoteAppend in index.js, which
-// re-trigger this same fetch for whichever subject's overlay is open after
-// a successful append): s_notes_layer is only non-NULL between
-// notes_window_load/unload, so that case just re-renders the already-visible
-// window instead of pushing a second copy of it.
+// Shared by show_notes_overlay (task) and show_project_notes_overlay - same
+// pushed Window, different subject id/fetch type. Also a live refresh while the
+// window is already open (a successful append re-triggers this): with
+// s_notes_layer non-NULL it re-renders instead of pushing a second copy.
 static void show_notes_overlay_for(const char *id, bool is_project) {
   s_notes_overlay_active = true;
   s_notes_overlay_is_project = is_project;
@@ -2985,44 +2338,33 @@ static void show_notes_overlay_for(const char *id, bool is_project) {
   push_notes_window();
 }
 
-// Shows a task's notes (double-click Select on it - see
-// pending_toggle_timer_callback/menu_select_click). s_notes_tags_line is
-// set here (synchronously - unlike notes, tag names are already fully
-// resolved and sent with every task, see Task.tags's own comment) rather
-// than baked into the fetched notes text, so it stays visible above the
-// notes content regardless of whether that fetch ends up with real text,
-// "(No notes...)", or a timeout - see render_notes_overlay_content.
+// Shows a task's notes (double-click Select). s_notes_tags_line is set here
+// synchronously (tags are sent with every task) so it stays visible above the
+// notes whatever the fetch resolves to.
 static void show_notes_overlay(Task *task) {
   strncpy(s_notes_tags_line, task->tags, sizeof(s_notes_tags_line) - 1);
   s_notes_tags_line[sizeof(s_notes_tags_line) - 1] = '\0';
   show_notes_overlay_for(task->id, false);
 }
 
-// Shows a project's notes (double-click Select on its project row - see
-// pending_project_click_timer_callback/menu_select_click). See
-// MSG_PROJECT_NOTE_APPEND's own comment for what "a project's notes" means
-// here, given the real app has no single notes field on a Project. No tags
-// line here - the real app has no tags-on-project concept either.
+// Shows a project's notes (double-click Select on its project row). See
+// MSG_PROJECT_NOTE_APPEND for what "a project's notes" means. No tags line -
+// no tags-on-project concept.
 static void show_project_notes_overlay(TaskGroup *group) {
   s_notes_tags_line[0] = '\0';
   show_notes_overlay_for(group->project_id, true);
 }
 
-// Dismisses the notes overlay (Select, see
-// notes_window_select_click_handler) - notes_window_unload clears
-// s_notes_overlay_active once the pop actually completes, same as it would
-// for a Back-triggered dismissal (Pebble's own default pop behavior, no
-// click config needed for that - see s_notes_window's own comment), so
-// both dismissal paths converge on the same cleanup.
+// Dismisses the notes overlay (Select) - notes_window_unload clears
+// s_notes_overlay_active on the pop, same as a Back-triggered dismissal, so
+// both paths share the cleanup.
 static void hide_notes_overlay(void) {
   window_stack_pop(true);
 }
 
-// Commits a single-click task-done toggle once the double-click window has
-// passed with no second click - see menu_select_click. Looks the task back
-// up by id rather than trusting a stashed pointer: a background sync can
-// fully rebuild s_tasks (double-buffered commit on TASK_SYNC_END) while
-// this timer is still pending, which would leave a raw Task* dangling.
+// Commits a single-click task-done toggle once the double-click window passes.
+// Looks the task up by id - a background sync can rebuild s_tasks while this
+// timer is pending, dangling a raw Task*.
 static void pending_toggle_timer_callback(void *data) {
   s_pending_toggle_timer = NULL;
   Task *task = find_task_by_id(s_pending_toggle_task_id);
@@ -3036,28 +2378,21 @@ static void pending_toggle_timer_callback(void *data) {
   send_task_toggle(task);
 }
 
-// Fires when a project row's double-click window passes with no second
-// click - see menu_select_click. Unlike pending_toggle_timer_callback
-// above, there's nothing to commit here (a project row has no single-click
-// action of its own), just the pending state to clear.
+// Fires when a project row's double-click window passes - nothing to commit
+// (a project row has no single-click action), just the pending state to clear.
 static void pending_project_click_timer_callback(void *data) {
   s_pending_project_click_timer = NULL;
   s_pending_project_click_id[0] = '\0';
 }
 
-// True if a MSG_(PROJECT_)NOTE_SYNC_* reply for `id`/`is_project` is about
-// whatever the notes overlay is CURRENTLY showing, as opposed to a stale
-// reply for a subject the user has since backed out of (or a different
-// subject type's reply arriving while the other kind's overlay is open) -
-// see s_notes_overlay_subject_id/s_notes_overlay_is_project's own comment.
+// True if a NOTE_SYNC_* reply for id/is_project is about what the notes overlay
+// is currently showing, not a stale reply for a subject the user backed out of.
 static bool notes_reply_matches(const char *id, bool is_project) {
   return is_project == s_notes_overlay_is_project &&
          strncmp(id, s_notes_overlay_subject_id, MAX_ID_LEN) == 0;
 }
 
-// Shared by the MSG_NOTE_SYNC_START/MSG_PROJECT_NOTE_SYNC_START inbox
-// handlers below - identical malloc/reset logic either way, just a
-// different wire message and dictionary key for the id.
+// Shared by the MSG_NOTE_SYNC_START / MSG_PROJECT_NOTE_SYNC_START handlers.
 static void handle_notes_sync_start(const char *id, bool is_project, int32_t total_len) {
   if (!notes_reply_matches(id, is_project)) {
     return;
@@ -3085,10 +2420,8 @@ static void handle_notes_chunk(const char *id, bool is_project, const char *chun
     return;
   }
   int chunk_len = (int)strlen(chunk);
-  // Bounds-checked against the capacity the matching SYNC_START already
-  // malloc'd for the total the phone declared up front - a chunk that would
-  // overflow it (a phone/watch length-accounting mismatch) is dropped
-  // rather than overrunning the buffer.
+  // Bounds-checked against the capacity SYNC_START malloc'd - a chunk that would
+  // overflow (a phone/watch length mismatch) is dropped, not overrun.
   if (s_notes_full_len + chunk_len < s_notes_full_capacity) {
     memcpy(s_notes_full_text + s_notes_full_len, chunk, (size_t)chunk_len);
     s_notes_full_len += chunk_len;
@@ -3113,9 +2446,8 @@ static void handle_notes_sync_end(const char *id, bool is_project) {
     case NOTES_FETCH_FAILED:
     case NOTES_FETCH_IDLE:
     default:
-      // Either malloc failed, or the matching SYNC_START never arrived at
-      // all - a real failure, not a legitimately empty note (that's
-      // NOTES_FETCH_EMPTY, handled above).
+      // malloc failed, or SYNC_START never arrived - a real failure, not a
+      // legitimately empty note (NOTES_FETCH_EMPTY, above).
       s_notes_display_text = NOTES_TIMEOUT_TEXT;
       break;
   }
@@ -3138,15 +2470,12 @@ static void request_sync(void) {
 #endif
 }
 
-// The single place s_status_code ever gets assigned (both from a phone-
-// pushed MSG_SYNC_STATUS below and from outbox_failed_handler's own local
-// STATUS_ERROR).
+// The single place s_status_code is assigned (from MSG_SYNC_STATUS and from
+// outbox_failed_handler's local STATUS_ERROR).
 //
-// Forcing the backlight on for as long as a sync is in progress is
-// disabled for now (#if 0 below, not // - this block itself contains
-// #ifndef/#else/#endif, which the preprocessor would still process even
-// with every C statement line-commented, so #if 0 is the only way to
-// actually take it out). Re-enable by flipping that 0 to 1.
+// Forcing the backlight on during a sync is disabled (#if 0, not //, because
+// the block contains its own #ifndef/#else the preprocessor would still see).
+// Re-enable by flipping the 0 to 1.
 static void set_status_code(int32_t new_status_code) {
 #if 0
   bool was_syncing = (s_status_code == STATUS_SYNCING);
@@ -3216,14 +2545,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
 #endif
       s_incoming[idx].done = done_tuple && done_tuple->value->int32 != 0;
-      // Absent (not just 0, which is a legitimate 12:00am) means "no
-      // dueWithTime" - the phone only includes this key at all when the
-      // task actually has one, see sendTaskAt() in index.js.
+      // Key absent (not 0, a valid 12:00am) means "no dueWithTime" - the phone
+      // only sends it when the task has one. Same for the two below.
       s_incoming[idx].due_min = due_min_tuple ? due_min_tuple->value->int32 : -1;
-      // Absent means "phone has no tracked time for this task" - see
-      // sendTaskAt() in index.js, same convention as due_min above.
       s_incoming[idx].time_spent_ms = time_spent_tuple ? time_spent_tuple->value->int32 : 0;
-      // Absent means "no timeEstimate" - same convention as time_spent_ms.
       s_incoming[idx].time_estimate_ms = time_estimate_tuple ? time_estimate_tuple->value->int32 : 0;
       break;
     }
@@ -3235,9 +2560,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       recompute_groups();
       save_tasks();
 #ifndef PBL_PLATFORM_APLITE
-      // If the pinned task is no longer in the list (completed/archived on
-      // another client) and nothing's being tracked, drop the stale pin so
-      // it can't spuriously re-appear if that id ever comes back.
+      // If the pinned task is gone from the list and nothing's being tracked,
+      // drop the stale pin so it can't spuriously re-appear.
       if (s_pinned_task_id[0] != '\0' && s_tracking_task_id[0] == '\0' &&
           find_task_by_id(s_pinned_task_id) == NULL) {
         cancel_unpin_timer();
@@ -3246,9 +2570,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 #endif
       menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
-      // A refreshed list can change whether the (possibly now-different)
-      // selected row needs to scroll at all.
-      refresh_scroll_state(true);
+      refresh_scroll_state(true); // the selected row may now be different
       break;
     }
     case MSG_HABIT_SYNC_START: {
@@ -3274,8 +2596,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (idx < 0 || idx >= MAX_HABITS) {
         break;
       }
-      // Written directly into s_habits (not a separate incoming buffer -
-      // see the Habit struct's own comment on why that's safe here).
+      // Written directly into s_habits (no separate incoming buffer - safe, see
+      // the Habit struct comment).
       strncpy(s_habits[idx].id, id_tuple->value->cstring, MAX_HABIT_ID_LEN - 1);
       s_habits[idx].id[MAX_HABIT_ID_LEN - 1] = '\0';
       strncpy(s_habits[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
@@ -3283,18 +2605,11 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habits[idx].done = done_tuple && done_tuple->value->int32 != 0;
       s_habits[idx].value = value_tuple ? value_tuple->value->int32 : 0;
       s_habits[idx].goal = goal_tuple ? goal_tuple->value->int32 : 0;
-      // 0 = ClickCounter, 1 = StopWatch, 2 = RepeatedCountdownReminder - see
-      // sendHabitAt() in index.js.
+      // habit type: 0 = ClickCounter, 1 = StopWatch, 2 = RepeatedCountdownReminder.
 #ifdef PBL_PLATFORM_APLITE
-      // Every extra byte of code costs here (aplite's linker script maps
-      // .text/.data/.bss into one shared 24KB region, unlike every other
-      // platform's separate flash/RAM regions - see MAX_HABITS' own
-      // comment), so this stays the cheap single-check form: is_countdown
-      // is never read anywhere in aplite's compiled code (resolve_habit_at/
-      // habits_menu_get_num_rows only check is_stopwatch there - see their
-      // own comments), and a RepeatedCountdownReminder is excluded from
-      // aplite's visible list exactly the same as a real StopWatch is, so
-      // collapsing both into is_stopwatch here still filters correctly.
+      // aplite has no code budget for the countdown path, and both timer types
+      // are excluded from its visible list identically, so collapse both into
+      // is_stopwatch (is_countdown is never read there).
       s_habits[idx].is_stopwatch = type_tuple && type_tuple->value->int32 != 0;
 #else
       int habit_type = type_tuple ? type_tuple->value->int32 : 0;
@@ -3328,12 +2643,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       } else {
         s_status_msg[0] = '\0';
       }
-      // Feature toggles set from the phone's own pairing settings - optional
-      // fields (same dict_find + null-check pattern as STATUS_CODE above),
-      // absent-means-unchanged so an old phone build talking to this watch
-      // (or vice versa) can't accidentally reset either flag. Read before
-      // reload_data below so a settings change is reflected in the very
-      // same redraw, not a subsequent one.
+      // Feature toggles from the phone's pairing settings - optional fields,
+      // absent-means-unchanged so a version mismatch can't reset a flag. Read
+      // before reload_data so a change shows in the same redraw.
       Tuple *habits_enabled_tuple = dict_find(iterator, KEY_HABITS_ENABLED);
       if (habits_enabled_tuple) {
         s_habits_enabled = habits_enabled_tuple->value->int32 != 0;
@@ -3342,12 +2654,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (add_task_enabled_tuple) {
         s_add_task_enabled = add_task_enabled_tuple->value->int32 != 0;
       }
-      // Same optional/absent-means-unchanged pattern as the two flags above,
-      // but only re-applied (apply_backlight_mode()) when the value actually
-      // changed - this field is sent on EVERY status push, including the
-      // routine ones a background auto-sync fires every few minutes, and
-      // re-triggering the backlight on each of those (rather than just on an
-      // actual settings save) would defeat a custom timeout's whole point.
+      // Only re-applied when the value actually changed - this field is sent on
+      // every status push (including routine background syncs), and re-triggering
+      // the backlight each time would defeat a custom timeout.
 #ifndef PBL_PLATFORM_APLITE
       Tuple *backlight_mode_tuple = dict_find(iterator, KEY_BACKLIGHT_MODE);
       if (backlight_mode_tuple && backlight_mode_tuple->value->int32 != s_backlight_mode) {
@@ -3356,11 +2665,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
 #endif
 #ifndef PBL_PLATFORM_APLITE
-      // Re-arms the background-wakeup schedule (see schedule_next_wakeup())
-      // the first time this launch confirms the interval, and again if it
-      // actually changes mid-session - not on every status push, which
-      // would otherwise fire on every SYNCING/OK tick of a single sync and
-      // on every watch-initiated action's own follow-up status.
+      // Re-arm the background-wakeup schedule on the first confirmed interval
+      // this launch and whenever it changes - not on every status push.
       Tuple *auto_sync_interval_tuple = dict_find(iterator, KEY_AUTO_SYNC_INTERVAL_MIN);
       if (auto_sync_interval_tuple &&
           (auto_sync_interval_tuple->value->int32 != s_auto_sync_interval_min || !s_wakeup_rescheduled_this_launch)) {
@@ -3370,10 +2676,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
 #endif
 #if defined(PBL_TOUCH)
-      // Same optional/absent-means-unchanged pattern as the flags above, and
-      // like backlight only acted on when the value actually changed (this
-      // fires on every routine background-sync status push, and a redundant
-      // touch_service_(un)subscribe on each of those is wasteful).
+      // Only acted on when the value changed - a redundant touch_service_(un)subscribe
+      // on every routine status push is wasteful.
       Tuple *touch_nav_tuple = dict_find(iterator, KEY_TOUCH_NAV_ENABLED);
       if (touch_nav_tuple && (touch_nav_tuple->value->int32 != 0) != s_touch_nav_enabled) {
         s_touch_nav_enabled = touch_nav_tuple->value->int32 != 0;
@@ -3381,9 +2685,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
 #endif
 #ifndef PBL_PLATFORM_APLITE
-      // Same optional/absent-means-unchanged pattern as the flags above.
-      // aplite-excluded along with the banner this drives - see the flag's
-      // own comment.
       Tuple *overtime_notify_tuple = dict_find(iterator, KEY_OVERTIME_NOTIFY_ENABLED);
       if (overtime_notify_tuple) {
         s_overtime_notify_enabled = overtime_notify_tuple->value->int32 != 0;
@@ -3391,12 +2692,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
           hide_overtime_banner();
         }
       }
-      // Sub-option of the above. Same optional/absent-means-unchanged
-      // pattern. If it's switched on while a task is already over its
-      // estimate but the per-crossing banner has already fired (so
-      // s_overtime_last_notify_epoch was never set - e.g. the init() latch
-      // primed s_overtime_notified on relaunch), start the 5-minute clock
-      // from now rather than firing immediately on the next tick.
+      // Sub-option of the above. If switched on while a task is already over but
+      // the banner has already fired (s_overtime_last_notify_epoch unset), start
+      // the 5-minute clock now rather than firing on the next tick.
       Tuple *overtime_repeat_tuple = dict_find(iterator, KEY_OVERTIME_REPEAT_ENABLED);
       if (overtime_repeat_tuple) {
         bool was = s_overtime_repeat_enabled;
@@ -3406,10 +2704,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
           s_overtime_last_notify_epoch = time(NULL);
         }
       }
-      // Same optional/absent-means-unchanged pattern. Toggling it off mid-
-      // session clears any pinned/grace state so the tracked task drops
-      // straight back into its group; toggling it on re-pins the currently-
-      // tracked task. The reload_data below (always runs) redraws either way.
+      // Toggling off mid-session clears pinned/grace state; toggling on re-pins
+      // the currently-tracked task. The reload_data below redraws either way.
       Tuple *pin_tracked_tuple = dict_find(iterator, KEY_PIN_TRACKED_TASK_ENABLED);
       if (pin_tracked_tuple) {
         bool was = s_pin_tracked_task_enabled;
@@ -3423,34 +2719,25 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         }
       }
 #endif
-      // update_empty_layer() only redraws the empty-state text layer, which
-      // stays hidden while s_task_count > 0 - reload_data is what actually
-      // refreshes the Resync row's status subtitle in that case. Both are
-      // no-ops while the error overlay is up (see its guard in
-      // update_empty_layer()) - reload_data itself is harmless against a
-      // hidden MenuLayer either way.
+      // reload_data refreshes the Resync row's status subtitle;
+      // update_empty_layer() handles the empty screen. Both no-op while the
+      // error overlay is up.
       menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
       if (s_status_code == STATUS_ERROR) {
         show_error_overlay();
       }
 #ifndef PBL_PLATFORM_APLITE
-      // A wakeup-launched session exists purely to sync quietly and get
-      // back out of the way - once the sync has actually concluded (success,
-      // failure, or "not paired", as opposed to the SYNCING status that
-      // fires first), pop back to whatever was on screen before this app
-      // was auto-launched. A manually opened session (s_is_wakeup_launch
-      // false) never takes this branch and behaves exactly as it always
-      // has. Guarded so a retried sync's own second terminal status in the
-      // same session can't pop an already-empty window stack.
+      // A wakeup-launched session syncs quietly and gets out of the way - once
+      // the sync concludes (OK/ERROR/NOT_PAIRED, not the initial SYNCING), pop
+      // back to whatever was on screen. A manual session never takes this
+      // branch. Guarded against a retried sync's second terminal status.
       if (s_is_wakeup_launch && !s_wakeup_exit_triggered &&
           (s_status_code == STATUS_OK || s_status_code == STATUS_ERROR || s_status_code == STATUS_NOT_PAIRED)) {
         s_wakeup_exit_triggered = true;
         APP_LOG(APP_LOG_LEVEL_INFO, "wakeup sync done (status %d), exiting", (int)s_status_code);
-        // Tells the system this exit was a deliberate, completed action
-        // (not the user backing out) - without this, exiting can land the
-        // user in the app launcher menu instead of back on their watchface,
-        // which would make a quiet background sync anything but quiet.
+        // Marks this a deliberate completed action so exiting lands on the
+        // watchface, not the app launcher menu.
         exit_reason_set(APP_EXIT_ACTION_PERFORMED_SUCCESSFULLY);
         window_stack_pop_all(true);
       }
@@ -3521,13 +2808,10 @@ static void inbox_dropped_handler(AppMessageResult reason, void *context) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// Fires once the phone-side OS layer actually confirms delivery (not just
-// "queued") of ANY outbound message - only closes the app when the
-// Finish Day send is what just succeeded, tracked via
-// s_close_after_finish_day_sent (see its own comment). Also the success
-// half of the outbound-send-retry mechanism (see its own top comment) -
-// clears whatever begin_send() stashed so a later, unrelated failure can't
-// mistakenly retry a message that already went through.
+// Fires once the phone confirms delivery (not just "queued") of any outbound
+// message - closes the app only when the Finish Day send just succeeded, and
+// clears the retry state so a later failure can't re-send a message that went
+// through.
 static void outbox_sent_handler(DictionaryIterator *iterator, void *context) {
   clear_pending_retry();
   if (s_close_after_finish_day_sent) {
@@ -3536,15 +2820,9 @@ static void outbox_sent_handler(DictionaryIterator *iterator, void *context) {
   }
 }
 
-// Only these AppMessageResult reasons describe something transient - a
-// momentarily busy/backgrounded phone side or Bluetooth link that a short
-// retry has a real chance of working around, per each one's own doc
-// comment in pebble.h. Deliberately excludes reasons that describe a
-// structural problem with the call/message itself (APP_MSG_INVALID_ARGS,
-// APP_MSG_OUT_OF_MEMORY, APP_MSG_CLOSED, APP_MSG_INTERNAL_ERROR,
-// APP_MSG_INVALID_STATE, APP_MSG_ALREADY_RELEASED, the CALLBACK_* pair) -
-// retrying those would just fail identically every time and delay the
-// (still accurate) error for no benefit.
+// The AppMessageResult reasons that are transient (a busy/backgrounded phone or
+// BT link) and worth a short retry. Excludes structural problems with the
+// call/message itself, which would just fail identically.
 static bool is_retryable_failure(AppMessageResult reason) {
   switch (reason) {
     case APP_MSG_SEND_TIMEOUT:
@@ -3568,14 +2846,10 @@ static void retry_timer_callback(void *data) {
 static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
   APP_LOG(APP_LOG_LEVEL_WARNING, "AppMessage send failed: %d", (int)reason);
 #ifndef PBL_PLATFORM_APLITE
-  // Don't leave the flag armed for some later, unrelated successful send to
-  // wrongly close the app - see s_close_after_finish_day_sent's own comment.
-  s_close_after_finish_day_sent = false;
-  // Retry the exact same message (short backoff) before ever surfacing the
-  // error overlay - see this file's "outbound send retry" section for why.
-  // Only for failures that look transient, and only up to MAX_SEND_RETRIES
-  // times - a genuinely unreachable phone still ends up at the same error
-  // it always did, just a few seconds later instead of on the first hiccup.
+  s_close_after_finish_day_sent = false; // don't let a later send close the app
+  // Retry the same message (short backoff) before the error overlay - transient
+  // failures only, up to MAX_SEND_RETRIES. A truly unreachable phone still ends
+  // at the same error, just seconds later.
   if (s_retry_msg_type != 0 && is_retryable_failure(reason) && s_retry_count < MAX_SEND_RETRIES) {
     s_retry_count++;
     uint32_t delay_ms = (uint32_t)RETRY_BACKOFF_BASE_MS << (s_retry_count - 1); // 1s, 2s, 4s
@@ -3584,14 +2858,9 @@ static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult
   }
   clear_pending_retry();
 #endif
-  // Previously silent (log-only): a watch->phone send (task toggle, track-
-  // time-stop, resync request) that fails here - e.g. the phone app is
-  // backgrounded or Bluetooth is momentarily busy - used to vanish with zero
-  // on-screen feedback, indistinguishable from "worked fine". Routing it
-  // through the same fullscreen overlay as a phone->watch sync error makes
-  // every send failure visible instead of just this one class of them.
-  // Reached immediately on aplite (no retry there - see this file's
-  // "outbound send retry" section) or once every retry above is exhausted.
+  // Route the failure through the same fullscreen overlay as a phone->watch
+  // sync error so every send failure is visible, not silently swallowed.
+  // Reached immediately on aplite (no retry) or once the retries above run out.
   set_status_code(STATUS_ERROR);
   strncpy(s_status_msg, "Couldn't reach phone app", MAX_STATUS_MSG_LEN - 1);
   s_status_msg[MAX_STATUS_MSG_LEN - 1] = '\0';
@@ -3605,14 +2874,9 @@ static Habit *resolve_habit_at(MenuIndex index) {
     return NULL;
   }
 #ifdef PBL_PLATFORM_APLITE
-  // StopWatch/RepeatedCountdownReminder-type habits are skipped entirely on
-  // aplite (no tracking machinery or read-only display path is compiled in
-  // there - see MAX_HABITS' own comment), so row indices here walk only the
-  // plain-count subset of s_habits, same list habits_menu_get_num_rows
-  // counts. is_stopwatch alone (not "|| is_countdown") is enough to check -
-  // aplite's own MSG_HABIT_ITEM parsing collapses both timer-based types
-  // into is_stopwatch to save code size (see its own comment); is_countdown
-  // is never true there.
+  // Timer-type habits are skipped entirely on aplite, so row indices walk only
+  // the plain-count subset (is_stopwatch alone is enough - is_countdown is
+  // never true there).
   int visible_row = 0;
   for (int i = 0; i < s_habit_count; i++) {
     if (s_habits[i].is_stopwatch) {
@@ -3647,12 +2911,9 @@ static void send_habit_adjust(Habit *habit, int32_t delta) {
 #endif
 }
 
-// Everything from here through stop_habit_tracking_and_report is the
-// StopWatch/RepeatedCountdownReminder habit timer itself - compiled out
-// entirely on aplite (see s_tracking_habit_id's own comment on why).
-// habits_menu_draw_row/select_long_click below have their own narrower
-// #ifndef guards around just the pieces that touch this state, so a
-// StopWatch habit still displays its progress read-only on aplite.
+// Everything through stop_habit_tracking_and_report is the StopWatch/countdown
+// habit timer - aplite-excluded. habits_menu_draw_row/select_long_click have
+// narrower guards so a StopWatch still shows its progress read-only there.
 #ifndef PBL_PLATFORM_APLITE
 static void send_habit_track_stop(const char *habit_id, int32_t tracked_ms) {
   begin_send(MSG_HABIT_TRACK_STOP, habit_id, NULL, tracked_ms);
@@ -3665,11 +2926,8 @@ static void stop_habit_tracking_tick(void) {
   }
 }
 
-// Total elapsed ms for the CURRENT countdown session, whether paused or
-// running - see s_habit_countdown_paused's own comment on how the two
-// fields it's built from divide up the work. Only meaningful while
-// s_tracking_habit_id refers to an is_countdown habit; callers already know
-// that from context (only ever called from is_countdown-guarded code).
+// Total elapsed ms for the current countdown session, paused or running. Only
+// meaningful while s_tracking_habit_id is an is_countdown habit.
 static int countdown_elapsed_ms(void) {
   if (s_habit_countdown_paused) {
     return s_habit_countdown_frozen_elapsed_ms;
@@ -3679,21 +2937,11 @@ static int countdown_elapsed_ms(void) {
   return s_habit_countdown_frozen_elapsed_ms + running_ms;
 }
 
-// A RepeatedCountdownReminder's timer reaching zero - the on-watch
-// equivalent of the real app's own explicit "Count up and restart!" banner
-// tap (countUpAndNextRepeatCountdownSession in simple-counter-button.
-// component.ts): +1 to today's count, uploaded via the same HABIT_ADJUST
-// path a plain ClickCounter's Select already uses (handleHabitAdjust in
-// index.js applies the delta against the phone's own cached value and
-// uploads the result as a plain replace, so this is exactly as safe/
-// idempotent as that). Unlike the real app, there's no banner/dialog to
-// wait for a tap on here, so this fires automatically the moment the timer
-// hits zero rather than waiting for one - but it deliberately does NOT
-// auto-restart the countdown for the next round: the real app also
-// requires an explicit tap to begin the next round, and auto-restarting
-// unattended here would silently rack up completions (and uploads) for a
-// countdown nobody's actually watching. Ends the tracking session outright;
-// long-select starts the next round same as starting the first one did.
+// A RepeatedCountdownReminder's timer reaching zero: +1 to today's count via
+// the same HABIT_ADJUST path a ClickCounter's Select uses (idempotent - the
+// phone applies the delta and uploads a plain replace). Fires automatically at
+// zero, but does NOT auto-restart the next round (that would rack up completions
+// unattended); long-select starts the next round.
 static void complete_habit_countdown(Habit *habit) {
   s_tracking_habit_id[0] = '\0';
   s_tracking_habit_start_epoch = 0;
@@ -3711,13 +2959,9 @@ static void complete_habit_countdown(Habit *habit) {
 }
 
 // Redraw-only ticker for a tracked StopWatch/countdown habit, mirroring
-// tracking_tick_callback for tasks - only the elapsed/remaining-time text
-// normally changes each tick, so mark_dirty rather than reload_data (a
-// countdown reaching zero is the one exception - see below). Guarded on
-// s_habits_menu_layer being non-NULL because, unlike s_menu_layer (alive
-// for the app's whole lifetime), this layer is torn down whenever the
-// habits window unloads - see stop_habit_tracking_tick() being called
-// there before the destroy.
+// tracking_tick_callback - mark_dirty, not reload_data (except a countdown
+// reaching zero). Guarded on s_habits_menu_layer being non-NULL (it's torn down
+// on habits-window unload).
 static void habit_tracking_tick_callback(void *data) {
   if (s_tracking_habit_id[0] != '\0') {
     Habit *tracked_habit = find_habit_by_id(s_tracking_habit_id);
@@ -3745,29 +2989,25 @@ static void start_habit_tracking(Habit *habit) {
   strncpy(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN - 1);
   s_tracking_habit_id[MAX_HABIT_ID_LEN - 1] = '\0';
   s_tracking_habit_start_epoch = time(NULL);
-  // Reset any pause state left over from a previous, since-finished session
-  // - a fresh round always starts running, never paused.
+  // A fresh round always starts running - clear any leftover pause state.
   s_habit_countdown_paused = false;
   s_habit_countdown_frozen_elapsed_ms = 0;
   save_habit_tracking();
   start_habit_tracking_tick();
 }
 
-// Select on an is_countdown row that's currently tracking (running or
-// paused) toggles between the two - long-select still ends the round
-// outright (stop_habit_tracking_and_report). Not offered for a StopWatch
-// habit (habits_menu_select_click never calls this for one) - "pause"
-// isn't a meaningful state for an open-ended up-count timer the way it is
-// for a fixed-length countdown.
+// Select on a tracking is_countdown row toggles paused/running; long-select
+// still ends the round. Not offered for a StopWatch (pause is meaningless for
+// an open-ended up-count).
 static void toggle_habit_countdown_pause(void) {
   if (s_habit_countdown_paused) {
     s_habit_countdown_paused = false;
-    s_tracking_habit_start_epoch = time(NULL); // fresh running segment; frozen_elapsed_ms already holds everything before it
+    s_tracking_habit_start_epoch = time(NULL); // start a fresh running segment
     start_habit_tracking_tick();
   } else {
-    s_habit_countdown_frozen_elapsed_ms = countdown_elapsed_ms(); // fold the just-finished running segment in before flipping the flag
+    s_habit_countdown_frozen_elapsed_ms = countdown_elapsed_ms(); // fold in the running segment before flipping the flag
     s_habit_countdown_paused = true;
-    stop_habit_tracking_tick(); // nothing left to tick while frozen
+    stop_habit_tracking_tick();
   }
   save_habit_tracking();
   if (s_habits_menu_layer) {
@@ -3775,16 +3015,10 @@ static void toggle_habit_countdown_pause(void) {
   }
 }
 
-// Stops whatever StopWatch/countdown habit is currently being tracked (a
-// no-op if nothing is) - mirrors stop_tracking_and_report's task
-// equivalent, including the optimistic local bump (corrected by the next
-// full sync, same as everywhere else this app does that). For a
-// RepeatedCountdownReminder specifically, this only ever means "cancelled
-// before completion" (reaching zero is handled entirely by
-// complete_habit_countdown, which clears the session itself before this
-// would ever run) - unlike a StopWatch habit, there's no meaningful partial
-// progress to upload for a round that didn't finish, so this is a silent,
-// no-upload cancel for that type.
+// Stops whatever StopWatch/countdown habit is being tracked (a no-op if none) -
+// mirrors stop_tracking_and_report, including the optimistic local bump. For a
+// RepeatedCountdownReminder this only means "cancelled before completion" (zero
+// is handled by complete_habit_countdown), so it's a silent no-upload cancel.
 static void stop_habit_tracking_and_report(void) {
   if (s_tracking_habit_id[0] == '\0') {
     return;
@@ -3817,7 +3051,7 @@ static uint16_t habits_menu_get_num_sections(MenuLayer *menu_layer, void *contex
 
 static uint16_t habits_menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
 #ifdef PBL_PLATFORM_APLITE
-  // Matches resolve_habit_at's own aplite-only filtering - see its comment.
+  // Matches resolve_habit_at's aplite-only filtering.
   uint16_t visible = 0;
   for (int i = 0; i < s_habit_count; i++) {
     if (!s_habits[i].is_stopwatch) {
@@ -3837,29 +3071,20 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   }
   bool is_selected = menu_layer_get_selected_index(s_habits_menu_layer).row == cell_index->row;
   GRect bounds = layer_get_bounds(cell_layer);
-  // Matches the Habits nav row's own background (menu_draw_row's section-0
-  // branch) rather than the plain black every other selected row in this
-  // app uses, so a highlighted habit visually ties back to the row that
-  // brought you here.
+  // Cerulean selected background, matching the Habits nav row, so a highlighted
+  // habit ties back to the row that brought you here.
   GColor bg = is_selected ? GColorVividCerulean : GColorWhite;
-  // Unlike a done TASK's title (which dims - see menu_draw_row), a done
-  // HABIT's title stays full-strength black/white: the "- Done" subtitle
-  // already carries that signal, and a habit routinely gets incremented
-  // past goal (still "done") or decremented back below it on the same day,
-  // so dimming here would flicker on every single increment/decrement
-  // rather than mark a settled, no-longer-relevant task.
-  // Text stays black even when selected (unlike every other selectable row
-  // in this app, which inverts to white) - the cerulean selected background
-  // here is light enough that black reads better on it than white does.
+  // A done habit's title stays full-strength (unlike a done task's, which dims):
+  // the "- Done" subtitle carries the signal, and a habit gets incremented past
+  // goal / decremented below it on the same day, so dimming would flicker.
+  // Text stays black even when selected - the cerulean is light enough.
   GColor fg = GColorBlack;
   graphics_context_set_fill_color(ctx, bg);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_text_color(ctx, fg);
 
-  // Non-emery: the fixed 30px top-aligned title box this always used, byte for
-  // byte (aplite has no RAM headroom for the extra measurement). Emery: a
-  // measured, vertically-centred block matching draw_task_row so a habit row and
-  // a task row line up in the taller cell.
+  // Non-emery: the fixed 30px top-aligned title box, unchanged. Emery: a
+  // measured, vertically-centred block matching draw_task_row.
 #ifdef PBL_PLATFORM_EMERY
   GFont habit_title_font = fonts_get_system_font(TITLE_FONT_KEY);
   GSize habit_line = graphics_text_layout_get_content_size(
@@ -3875,24 +3100,16 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 #endif
 
-  // "value/goal" always visible, with " - Done" appended once today's count
-  // reaches goal - same dash-separated "two settled facts" convention the
-  // task list's own subtitle uses for due time + tracked time. Keeping the
-  // count alongside "Done" (rather than replacing it, as this used to)
-  // matters once incrementing past goal is possible: "Done" alone can't
-  // tell you 3/3 from 7/3.
-  // Sized for the worst case of the StopWatch branch below: two 20-byte
-  // format_duration_ms outputs joined by " / " plus " - Done" (matches
-  // menu_draw_row's own combined[48] sizing for the analogous task subtitle,
-  // with extra headroom for " - Done").
+  // "value/goal" always visible, " - Done" appended once the count reaches goal
+  // (kept alongside "Done" since incrementing past goal is possible - "Done"
+  // alone can't tell 3/3 from 7/3).
+  // Sized for the StopWatch worst case: two format_duration_ms outputs joined by
+  // " / " plus " - Done".
   char subtitle[56];
 #ifndef PBL_PLATFORM_APLITE
   if (habit->is_stopwatch) {
-    // Same "spent / estimate" formatting as a task's own timer subtitle
-    // (menu_draw_row), reusing format_duration_ms directly - value/goal are
-    // ms here, not a plain count. effective_ms adds this session's
-    // still-running elapsed time on top of the last-synced value, same as
-    // menu_draw_row's effective_ms does for a tracked task.
+    // "spent / goal" via format_duration_ms - value/goal are ms here.
+    // effective_ms adds this session's running elapsed to the synced value.
     bool is_tracking_this = s_tracking_habit_id[0] != '\0' &&
                              strncmp(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN) == 0;
     int effective_ms = habit->value;
@@ -3913,14 +3130,9 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
       snprintf(subtitle, sizeof(subtitle), "%s / %s", time_text, goal_text);
     }
   } else if (habit->is_countdown) {
-    // While its timer is running: remaining time counting down to zero,
-    // format_duration_ms's "> " running-prefix doubling as "this is live"
-    // same as it does for a StopWatch habit (it doesn't distinguish
-    // counting up from counting down, just static-vs-live) - dropped while
-    // paused, since a frozen number isn't "live" anymore. Otherwise: a
-    // plain completed-rounds count, identical in shape to a ClickCounter's
-    // own value/goal - a RepeatedCountdownReminder's countOnDay is rounds
-    // completed today, not ms, unlike a StopWatch's.
+    // Running: remaining time counting to zero, with format_duration_ms's "> "
+    // prefix as the "live" marker (dropped while paused). Otherwise: a plain
+    // completed-rounds count, same shape as a ClickCounter's value/goal.
     bool is_tracking_this = s_tracking_habit_id[0] != '\0' &&
                              strncmp(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN) == 0;
     if (is_tracking_this) {
@@ -3938,10 +3150,8 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     }
   } else
 #endif
-  // On aplite, habit->is_stopwatch/is_countdown are never true here -
-  // resolve_habit_at's own aplite-only filtering never returns either (see
-  // its comment) - so both branches above are unreachable there and
-  // compiled out entirely, leaving just this plain-count path.
+  // On aplite both branches above are compiled out (resolve_habit_at filters
+  // timer habits out), leaving just this plain-count path.
   if (habit->done) {
     snprintf(subtitle, sizeof(subtitle), "%d/%d - Done", habit->value, habit->goal);
   } else {
@@ -3958,19 +3168,13 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
 
-// Select bumps today's count up by one, long-select down by one (never
-// below 0) - the phone applies the delta against its own cached value and
-// uploads the resulting total as a plain replace (see handleHabitAdjust in
-// index.js), so this optimistic local bump is just a guess at what that'll
-// resolve to, corrected by the next full sync same as everywhere else
-// optimistic updates happen in this app.
+// Select +1, long-select -1 (never below 0). The phone applies the delta to its
+// cached value and uploads a plain replace, so this local bump is a guess
+// corrected by the next full sync.
 static void adjust_habit(MenuIndex index, int32_t delta) {
   Habit *habit = resolve_habit_at(index);
   if (!habit || habit->value + delta < 0) {
-    // Already at 0 and trying to go lower - a silent no-op, same as a
-    // long-press track-time attempt on an already-done task elsewhere in
-    // this app, rather than a separate error/feedback path.
-    return;
+    return; // already at 0, trying to go lower - silent no-op
   }
   habit->value += delta;
   habit->done = habit->value >= habit->goal;
@@ -3983,13 +3187,9 @@ static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
   backlight_touch();
   Habit *habit = resolve_habit_at(*cell_index);
 #ifndef PBL_PLATFORM_APLITE
-  // Select pauses/resumes an is_countdown habit's timer while IT's the one
-  // currently tracking (long-select still ends the round outright, same as
-  // it always has) - not offered for a StopWatch, since "pause" isn't a
-  // meaningful state for its open-ended up-count. If nothing (or a
-  // different habit) is tracking this row, falls through to the same
-  // no-op every other StopWatch/countdown Select already was - long-select
-  // is still what starts a fresh round.
+  // Select pauses/resumes an is_countdown habit's timer while it's tracking
+  // (long-select still ends the round). Not for a StopWatch. Otherwise falls
+  // through to the no-op below - long-select starts a fresh round.
   if (habit && habit->is_countdown) {
     bool is_tracking_this = s_tracking_habit_id[0] != '\0' &&
                              strncmp(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN) == 0;
@@ -3999,36 +3199,23 @@ static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
     return;
   }
 #endif
-  // is_countdown is never true on aplite (see MSG_HABIT_ITEM's own comment)
-  // - checking is_stopwatch alone there saves the few bytes an always-false
-  // "|| is_countdown" would otherwise cost against aplite's especially
-  // tight combined code+data budget (see MAX_HABITS' own comment).
+  // is_countdown is never true on aplite - is_stopwatch alone saves a few bytes.
 #ifdef PBL_PLATFORM_APLITE
   if (habit && habit->is_stopwatch) {
 #else
   if (habit && (habit->is_stopwatch || habit->is_countdown)) {
 #endif
-    // No plain-count action for a StopWatch/countdown habit - see
-    // long-select, which starts/stops its timer instead (same button this
-    // app's task list already uses for time tracking).
-    return;
+    return; // no plain-count action for a timer habit - long-select runs its timer
   }
   adjust_habit(*cell_index, 1);
 }
 
-// Long-select toggles the timer on a StopWatch or RepeatedCountdownReminder
-// habit (starts it if nothing, or a different habit, is being tracked;
-// stops it if this habit is the one already being tracked - mirrors
-// menu_select_long_click's task timer exactly, including only one habit
-// tracking at a time regardless of type), or decrements a plain ClickCounter
-// habit by one otherwise. stop_habit_tracking_and_report() itself knows the
-// difference between the two timer types (upload elapsed ms vs. a silent
-// cancel - see its own comment), so this code doesn't need to.
+// Long-select toggles the timer on a StopWatch/countdown habit (one at a time,
+// mirroring the task timer), or decrements a ClickCounter by one.
+// stop_habit_tracking_and_report() handles the two timer types itself.
 static void habits_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
   Habit *habit = resolve_habit_at(*cell_index);
-  // Same aplite-only is_stopwatch-alone shortcut as habits_menu_select_click
-  // above - see its comment.
 #ifdef PBL_PLATFORM_APLITE
   if (habit && habit->is_stopwatch) {
 #else
@@ -4043,21 +3230,14 @@ static void habits_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell
     }
     menu_layer_reload_data(s_habits_menu_layer);
 #endif
-    // No tracking capability on aplite (see s_tracking_habit_id's own
-    // comment) - a long-press on a StopWatch/countdown row is a silent
-    // no-op there, same as everywhere else in this app an unavailable
-    // action is ignored rather than given a separate error/feedback path.
-    return;
+    return; // no tracking on aplite - a long-press on a timer row is a no-op there
   }
   adjust_habit(*cell_index, -1);
 }
 
 static void update_habits_empty_layer(void) {
-  // habits_menu_get_num_rows(NULL, 0, NULL) rather than a plain s_habit_count
-  // check - on aplite those can disagree (a habit list containing only
-  // StopWatch-type entries has s_habit_count > 0 but zero VISIBLE rows there
-  // - see habits_menu_get_num_rows/resolve_habit_at's own aplite filtering),
-  // which would otherwise leave a blank menu instead of the empty-state text.
+  // habits_menu_get_num_rows(), not s_habit_count - on aplite a list of only
+  // StopWatch habits has s_habit_count > 0 but zero visible rows.
   bool show_empty = (habits_menu_get_num_rows(NULL, 0, NULL) == 0);
   layer_set_hidden(text_layer_get_layer(s_habits_empty_layer), !show_empty);
   layer_set_hidden(menu_layer_get_layer(s_habits_menu_layer), show_empty);
@@ -4105,14 +3285,9 @@ static void habits_window_load(Window *window) {
   update_habits_empty_layer();
 
 #ifndef PBL_PLATFORM_APLITE
-  // Resumes a StopWatch/countdown habit's live-ticking redraw if one was
-  // already being tracked (elapsed time itself is derived from the
-  // persisted start timestamp regardless - see load_habit_tracking() in
-  // init() - this is just about getting the redraw going again), same
-  // reasoning as window_load's own equivalent for task tracking. Not while
-  // paused, though - a paused countdown has nothing left to tick (see
-  // toggle_habit_countdown_pause), so this would just be a wasted timer
-  // ticking a frozen display.
+  // Resume the live-ticking redraw if a habit was already being tracked (the
+  // elapsed time comes from the persisted start timestamp; this just restarts
+  // the redraw). Not while paused - nothing to tick.
   if (s_tracking_habit_id[0] != '\0' && !s_habit_countdown_paused) {
     start_habit_tracking_tick();
   }
@@ -4121,10 +3296,8 @@ static void habits_window_load(Window *window) {
 
 static void habits_window_unload(Window *window) {
 #ifndef PBL_PLATFORM_APLITE
-  // Cancel before destroying s_habits_menu_layer, not after - the tick
-  // timer's own callback checks the pointer but a still-running timer
-  // touching a just-destroyed layer is exactly what window_unload's own
-  // stop_tracking_tick()-before-menu_layer_destroy ordering avoids too.
+  // Cancel before destroying s_habits_menu_layer - a still-running timer
+  // touching a destroyed layer is what this ordering avoids.
   stop_habit_tracking_tick();
 #endif
   menu_layer_destroy(s_habits_menu_layer);
@@ -4132,13 +3305,8 @@ static void habits_window_unload(Window *window) {
   status_bar_layer_destroy(s_habits_status_bar);
 }
 
-// Created once and reused (pushed again on every visit) rather than
-// destroyed/recreated at the Window* level - only its layers are torn down
-// and rebuilt each time (habits_window_load/unload), which is what actually
-// matters for memory: at most one window's worth of layers exists at a
-// time, since Back always pops this back off before returning to the main
-// window (Pebble's default unhandled-BACK behavior - no click config needed
-// here for it).
+// Created once and reused (pushed again on every visit) - only its layers are
+// torn down and rebuilt each time, so at most one window's worth exists.
 static void push_habits_window(void) {
   if (!s_habits_window) {
     s_habits_window = window_create();
@@ -4151,10 +3319,8 @@ static void push_habits_window(void) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// Select dismisses the notes window, same convention as every other
-// overlay's Select-to-dismiss in this app - Back also dismisses it, for
-// free, via Pebble's own default pop behavior (see s_notes_window's own
-// comment) rather than anything subscribed here.
+// Select dismisses the notes window; Back also does, for free, via Pebble's
+// default pop behavior.
 static void notes_window_select_click_handler(ClickRecognizerRef recognizer, void *context) {
   hide_notes_overlay();
 }
@@ -4166,46 +3332,27 @@ static void notes_window_select_long_click_handler(ClickRecognizerRef recognizer
 }
 
 #if defined(PBL_TOUCH)
-// ---------------------------------------------------------------------------
-// Touch navigation (Pebble Time 2 / emery and any other PBL_TOUCH platform)
-// ---------------------------------------------------------------------------
+// --- Touch navigation (emery and any other PBL_TOUCH platform) ---
 //
 // Hybrid model. The system touch-nav bridge (app_touch_navigation_enable)
-// handles the easy 80%: a swipe/drag scrolls a MenuLayer or the notes
-// ScrollLayer, and a tap on a row is delivered as a SELECT single-click, so
-// tapping a task toggles it done, tapping Habits/Add Task/Resync/a project
-// row activates it, and a tap dismisses the notes overlay - all through the
-// click handlers that already exist, no per-window code.
+// handles most of it: a swipe scrolls, a tap on a row is delivered as a SELECT
+// single-click - all through the existing click handlers, no per-window code.
 //
-// The bridge has no gesture for the two things SELECT also does on a physical
-// press: a long-press (start/stop time tracking, Finish Day, habit -1,
-// StopWatch, dictate a note) and - not reproduced here - a double-click. This
-// raw touch_service handler adds only the long-press back, running alongside
-// the bridge (both see the raw stream; the bridge is only suppressed
-// per-window by window_set_touch_bridge_disabled, which we don't call).
+// The bridge has no long-press gesture (start/stop tracking, Finish Day, habit
+// -1, dictate a note), so this raw touch_service handler adds only that,
+// running alongside the bridge. It does NOT handle swipe-right = Back (the
+// bridge already does; a second pop double-popped out of the app) or vertical
+// drags (the bridge's scrolling).
 //
-// It does NOT handle swipe-right = Back: the bridge already turns a
-// right-swipe into a Back press on its own (confirmed on a real Time 2 -
-// having our own handler pop as well double-popped straight out of the app
-// from the notes overlay). Vertical drags belong to the bridge's scrolling
-// too. So the only gesture we synthesize is the long-press.
+// The long-press acts on the MenuLayer's selected row, like the physical
+// long-click - no need to map a touch point to a row (MenuLayer has no API).
 //
-// The long-press acts on the MenuLayer's currently-selected row, exactly as
-// the physical long-click does (menu_select_long_click never hit-tests a
-// point either) - so there's no need to map the touch coordinate back to a
-// row, which MenuLayer exposes no API for. Scroll (touch or button) to
-// highlight, then long-press anywhere.
-//
-// HARDWARE STATE (first-gen Time 2, firmware ~4.33): the touch driver reports
-// a large position drift toward screen centre on edge touches - a stationary
-// tap near the top/bottom/side of the screen shows up as ~130-170px of travel
-// over its ~200ms, so the bridge reads it as a swipe (scrolls) rather than a
-// tap, and our own long-press slop trips on the initial jump. Centre-of-screen
-// taps and holds are clean and work correctly. This is why the pairing
-// setting defaults OFF - the feature is opt-in until a firmware touch-
-// calibration fix lands, at which point it should "just work" with no code
-// change here. TOUCH_SLOP_PX is generous (not the usual ~5-10) to ride out
-// the smaller drift on a near-centre hold.
+// HARDWARE STATE (first-gen Time 2, firmware ~4.33): the touch driver reports a
+// large drift toward screen centre on edge touches (~130-170px over ~200ms), so
+// the bridge reads an edge tap as a swipe and the long-press slop trips.
+// Centre taps and holds are clean. This is why the pairing setting defaults
+// OFF - opt-in until a firmware fix lands. TOUCH_SLOP_PX is generous to ride
+// out the smaller drift on a near-centre hold.
 
 #define TOUCH_LONGPRESS_MS 700
 #define TOUCH_SLOP_PX 25  // movement past this cancels the long-press
@@ -4213,8 +3360,6 @@ static void notes_window_select_long_click_handler(ClickRecognizerRef recognizer
 static AppTimer *s_touch_longpress_timer = NULL;
 static GPoint s_touch_down_point;
 static bool s_touch_armed = false;  // a navigational gesture is in progress
-                                    // (false for a non_navigational touchdown,
-                                    // so its later move/liftoff are ignored)
 
 static void touch_longpress_timer_cancel(void) {
   if (s_touch_longpress_timer) {
@@ -4244,8 +3389,7 @@ static void touch_handler(const TouchEvent *event, void *context) {
   switch (event->type) {
   case TouchEvent_Touchdown:
     touch_longpress_timer_cancel();
-    // non_navigational: contact that arrived without the watch being woken
-    // first - not meant to drive navigation, so don't arm anything.
+    // non_navigational: contact without the watch being woken first - don't arm.
     s_touch_armed = !event->non_navigational;
     if (!s_touch_armed) {
       break;
@@ -4261,8 +3405,8 @@ static void touch_handler(const TouchEvent *event, void *context) {
     int dx = event->x - s_touch_down_point.x;
     int dy = event->y - s_touch_down_point.y;
     if (dx * dx + dy * dy > TOUCH_SLOP_PX * TOUCH_SLOP_PX) {
-      touch_longpress_timer_cancel();  // a moving finger (scroll/swipe -
-      s_touch_armed = false;           // the bridge's job) isn't a long-press
+      touch_longpress_timer_cancel();  // a moving finger (scroll/swipe) isn't
+      s_touch_armed = false;           // a long-press - leave it to the bridge
     }
     break;
   }
@@ -4286,31 +3430,17 @@ static void apply_touch_nav(void) {
 }
 #endif  // PBL_TOUCH
 
-// Not menu_layer_set_click_config_onto_window - this window has no MenuLayer
-// to compose with. Installed onto the ScrollLayer (not the window directly)
-// via scroll_layer_set_click_config_onto_window/set_callbacks below, which
-// wires UP/DOWN to scrolling first and then calls this for SELECT - a note
-// long enough to need scrolling was exactly the un-openable case before the
-// ScrollLayer was added (word-wrapped text past screen height had no way to
-// bring the rest on screen). On the button-only builds UP/DOWN are the only
-// way to move it; on a touch build the touch-nav bridge also scrolls the
-// ScrollLayer by finger when the setting is on (see apply_touch_nav).
+// Installed onto the ScrollLayer (not the window) via
+// scroll_layer_set_click_config_onto_window, which wires UP/DOWN to scrolling
+// then calls this for SELECT. On touch builds the bridge also scrolls by finger.
 static void notes_window_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, notes_window_select_click_handler);
   window_long_click_subscribe(BUTTON_ID_SELECT, 0, notes_window_select_long_click_handler, NULL);
 }
 
-// Fills s_notes_tags_layer's own bounds with NOTES_TAGS_BG_COLOR and draws
-// the bold "Tags:" label followed by the (regular-weight) tag names - or
-// NOTES_TAGS_EMPTY_TEXT for an untagged task, see notes_tags_display_line -
-// on the line(s) below it, same "fill background then draw padded text"
-// pattern menu_draw_row already uses for the Resync/Habits/Add Task/project
-// rows elsewhere in this file, since TextLayer has no padding/inset concept
-// of its own. Two separate graphics_draw_text calls (not one string) since
-// a single call can't mix two font weights - see s_notes_tags_line's own
-// comment. A no-op draw when there's nothing to show (zero-height frame -
-// see render_notes_overlay_content), so this never fires for a project
-// subject, which has no tags concept at all.
+// Fills the layer with NOTES_TAGS_BG_COLOR and draws the bold "Tags:" label
+// then the tag names below it. Two graphics_draw_text calls since one can't mix
+// font weights. A no-op when the frame is zero-height (a project subject).
 static void notes_tags_layer_draw(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   graphics_context_set_fill_color(ctx, NOTES_TAGS_BG_COLOR);
@@ -4344,22 +3474,16 @@ static void notes_window_load(Window *window) {
                                 bounds.size.w, bounds.size.h - status_bar_height);
   s_notes_content_bounds = content_bounds;
 
-  // A fixed header (see s_notes_tags_layer's own comment) - added directly
-  // to window_layer, NOT the ScrollLayer, so it stays put while the notes
-  // body scrolls beneath it. Zero height/invisible only for a project
-  // subject, which has no tags concept to report on at all - shown (with
-  // NOTES_TAGS_EMPTY_TEXT) even for a task with no tags of its own.
-  // Provisional zero-height frame here - render_notes_overlay_content
-  // (called at the end of this function) sizes it for real and slices the
-  // ScrollLayer's own frame to start right below it.
+  // Fixed header added to window_layer, not the ScrollLayer, so it stays put
+  // while the body scrolls. Provisional zero-height frame -
+  // render_notes_overlay_content sizes it and slices the ScrollLayer below it.
   s_notes_tags_layer = layer_create(GRect(content_bounds.origin.x, content_bounds.origin.y,
                                            content_bounds.size.w, 0));
   layer_set_update_proc(s_notes_tags_layer, notes_tags_layer_draw);
   layer_add_child(window_layer, s_notes_tags_layer);
 
-  // Provisional full-content-area frame - render_notes_overlay_content
-  // shrinks this to make room for the tags header above, same as it sizes
-  // s_notes_tags_layer itself.
+  // Provisional full-content frame - render_notes_overlay_content shrinks it
+  // to make room for the tags header.
   s_notes_scroll_layer = scroll_layer_create(content_bounds);
   scroll_layer_set_content_size(s_notes_scroll_layer, content_bounds.size);
   scroll_layer_set_click_config_onto_window(s_notes_scroll_layer, window);
@@ -4367,13 +3491,9 @@ static void notes_window_load(Window *window) {
     .click_config_provider = notes_window_click_config_provider,
   });
 
-  // Left-aligned and top-anchored (unlike the centered, short status text
-  // s_error_layer uses) since this is body text, not a status message -
-  // word-wrap fills top-down from there. A smaller font than the error
-  // layer's bold 18pt: notes can run far longer than any error message
-  // this app ever shows. Created at the viewport's own size - immediately
-  // resized to the real content height by render_notes_overlay_content
-  // below, same as every later re-render.
+  // Left-aligned, top-anchored body text (unlike s_error_layer's centered
+  // status text), smaller font. Created at the viewport size, resized to the
+  // real content height by render_notes_overlay_content.
   s_notes_layer = text_layer_create(GRect(0, 0, content_bounds.size.w, content_bounds.size.h));
   text_layer_set_text_alignment(s_notes_layer, GTextAlignmentLeft);
   text_layer_set_font(s_notes_layer, fonts_get_system_font(NOTES_BODY_FONT_KEY));
@@ -4384,11 +3504,8 @@ static void notes_window_load(Window *window) {
 
   layer_add_child(window_layer, scroll_layer_get_layer(s_notes_scroll_layer));
 
-  // s_notes_display_text was already set by show_notes_overlay() just
-  // before this window was pushed - window_stack_push doesn't invoke this
-  // load handler synchronously, so it's already sitting somewhere this can
-  // read it back out from (the loading placeholder, most likely - the
-  // actual fetch is still in flight at this point).
+  // s_notes_display_text was set by show_notes_overlay() before the push
+  // (usually the loading placeholder - the fetch is still in flight).
   render_notes_overlay_content();
 }
 
@@ -4402,17 +3519,13 @@ static void notes_window_unload(Window *window) {
   status_bar_layer_destroy(s_notes_status_bar);
   reset_notes_full_buffer();
   cancel_notes_load_timeout();
-  // The single source of truth for "is the notes window currently up" -
-  // cleared here rather than in hide_notes_overlay() itself so a
-  // Back-triggered dismissal (which never calls hide_notes_overlay - see
-  // its own comment) still clears this exactly the same way a
-  // Select-triggered one does.
+  // Cleared here, not in hide_notes_overlay(), so a Back-triggered dismissal
+  // (which never calls hide_notes_overlay) clears it the same way.
   s_notes_overlay_active = false;
 }
 
-// Created once and reused (pushed again on every visit), same reasoning as
-// push_habits_window above - only its layers are torn down/rebuilt each
-// time.
+// Created once and reused, like push_habits_window - only its layers are
+// rebuilt each visit.
 static void push_notes_window(void) {
   if (!s_notes_window) {
     s_notes_window = window_create();
@@ -4453,13 +3566,11 @@ static void window_load(Window *window) {
   });
   menu_layer_set_click_config_onto_window(s_menu_layer, window);
   layer_add_child(window_layer, menu_layer_get_layer(s_menu_layer));
-  // Covers a persisted (previously cached) task list whose initial
-  // selection already needs to scroll, before any sync response arrives.
+  // A cached list may already have a selection that needs to scroll.
   refresh_scroll_state(true);
 
-  // Logo sits in a fixed-height strip at the bottom of the empty-state area;
-  // the text layer gets whatever's left above it, rather than the full
-  // content_bounds it used to own alone.
+  // Logo in a fixed strip at the bottom of the empty-state area; the text layer
+  // gets the space above it.
   #define LOGO_SIZE 50
   #define LOGO_STRIP_HEIGHT 58
   GRect empty_text_bounds = GRect(content_bounds.origin.x, content_bounds.origin.y,
@@ -4470,11 +3581,8 @@ static void window_load(Window *window) {
   layer_add_child(window_layer, text_layer_get_layer(s_empty_layer));
 
 #ifndef PBL_PLATFORM_APLITE
-  // Bottom slice of the same text area, reserved for s_sync_progress_layer
-  // (see its own comment) - sized off empty_text_bounds so it scales with
-  // whatever room each platform's screen actually has, same as
-  // empty_text_bounds itself. Hidden by default; only shown while the
-  // initial sync's title is up above it in the larger font.
+  // Bottom slice of the text area for s_sync_progress_layer, sized off
+  // empty_text_bounds. Hidden except during the initial sync.
   #ifdef PBL_PLATFORM_EMERY
   #define SYNC_PROGRESS_HEIGHT 42
   #else
@@ -4499,51 +3607,38 @@ static void window_load(Window *window) {
   bitmap_layer_set_compositing_mode(s_logo_layer, GCompOpSet);
   layer_add_child(window_layer, bitmap_layer_get_layer(s_logo_layer));
 
-  // Row icons for the Resync/Habits rows (menu_draw_row) - loaded once here
-  // rather than per-draw, same reasoning as s_logo_bitmap above.
+  // Row icons for the Resync/Habits rows - loaded once, not per-draw.
   s_check_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_MENU_ICON);
   s_check_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_CHECK_WHITE);
   s_heart_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_HEART_CHECK);
   s_heart_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_HEART_CHECK_WHITE);
 
-  // Add Task row + dictation session - mic-equipped platforms only, compiled
-  // out entirely on aplite (see s_mic_bitmap's own comment for why this is
-  // a real #ifndef and not just a runtime check).
+  // Add Task row + dictation session - mic platforms only.
 #ifndef PBL_PLATFORM_APLITE
   s_mic_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_MICROPHONE);
   s_mic_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_MICROPHONE_WHITE);
   s_dictation_session = dictation_session_create(MAX_TITLE_LEN, dictation_status_callback, NULL);
-  // Lets the user review/retry the transcription before it's sent, rather
-  // than blind-sending whatever the recognizer heard.
+  // Let the user review/retry the transcription before it's sent.
   dictation_session_enable_confirmation(s_dictation_session, true);
 #endif
 
-  // Full content_bounds (not the logo-strip-shrunk box the empty-state text
-  // gets), and added last so it draws on top of every other layer here
-  // when shown - covers the whole content area, not just another line of
-  // subtitle text, so a sync error is actually readable instead of easy to
-  // miss. Hidden by default; only show_error_overlay() reveals it.
+  // Full content_bounds, added last so it draws on top of every other layer.
+  // Hidden by default; only show_error_overlay() reveals it.
   s_error_layer = text_layer_create(content_bounds);
   text_layer_set_text_alignment(s_error_layer, GTextAlignmentCenter);
   text_layer_set_font(s_error_layer, fonts_get_system_font(TITLE_FONT_KEY));
   text_layer_set_background_color(s_error_layer, GColorRed);
-  // White, not black - better contrast against red, and on aplite (no true
-  // red available - see PebbleOS's own 1-bit color reduction) this also
-  // sidesteps GColorRed potentially reducing to black there, which would
-  // have made black text genuinely invisible rather than just lower
-  // contrast.
+  // White, not black - better contrast on red, and on aplite GColorRed may
+  // reduce to black, which would make black text invisible.
   text_layer_set_text_color(s_error_layer, GColorWhite);
   text_layer_set_overflow_mode(s_error_layer, GTextOverflowModeWordWrap);
   layer_set_hidden(text_layer_get_layer(s_error_layer), true);
   layer_add_child(window_layer, text_layer_get_layer(s_error_layer));
 
 #ifndef PBL_PLATFORM_APLITE
-  // Over-estimate banner (see maybe_notify_overtime) - a red strip across
-  // the top of the list, on top of everything except the full-screen error
-  // overlay above (which maybe_notify_overtime won't fire behind anyway).
-  // Same GColorRed + white-bold styling as s_error_layer, just a
-  // top-anchored strip rather than the full content area. Hidden until a
-  // tracked task first crosses its estimate.
+  // Over-estimate banner - a red strip across the top of the list, same
+  // GColorRed + white-bold as s_error_layer. Hidden until a tracked task first
+  // crosses its estimate.
   GRect overtime_bounds = GRect(content_bounds.origin.x, content_bounds.origin.y,
                                  content_bounds.size.w, OVERTIME_BANNER_HEIGHT);
   s_overtime_banner_layer = text_layer_create(overtime_bounds);
@@ -4559,11 +3654,8 @@ static void window_load(Window *window) {
   update_empty_layer();
   request_sync();
 
-  // Resumes a tracking session that was already running when the watchapp
-  // was last closed (see load_tracking() in init()) - the elapsed time is
-  // derived from the persisted start timestamp either way, so this is just
-  // about getting the live-ticking redraw going again, not about the
-  // elapsed total itself.
+  // Resume the live-ticking redraw if a session was running at last close (the
+  // elapsed total comes from the persisted start timestamp).
   if (s_tracking_task_id[0] != '\0') {
     start_tracking_tick();
   }
@@ -4571,9 +3663,8 @@ static void window_load(Window *window) {
 
 static void window_unload(Window *window) {
   stop_scroll_timer();
-  // Deliberately NOT stopping tracking here (see s_tracking_task_id's own
-  // comment) - only cancels this window's own redraw timer, since
-  // s_menu_layer (what it redraws) is about to be destroyed too.
+  // NOT stopping tracking here - only this window's redraw timer, since
+  // s_menu_layer is about to be destroyed.
   stop_tracking_tick();
 #ifndef PBL_PLATFORM_APLITE
   hide_overtime_banner(); // cancels its auto-dismiss timer
@@ -4613,17 +3704,12 @@ static void window_unload(Window *window) {
 }
 
 static void init(void) {
-  // Establishes the real starting status through set_status_code() itself
-  // (see s_status_code's own comment for why this can't just be its static
-  // initializer) - this app always shows an immediate optimistic
-  // "Syncing..." screen before any phone message ever arrives, and this is
-  // what makes that first stretch force the backlight on same as every
-  // later one.
+  // Set the starting status through set_status_code() (not its static
+  // initializer - see s_status_code's comment) so this first "Syncing..."
+  // stretch goes through the same chokepoint as every later status.
   set_status_code(STATUS_SYNCING);
 #ifndef PBL_PLATFORM_APLITE
-  // Detects a session that exists purely because schedule_next_wakeup()'s
-  // wakeup fired, as opposed to the user opening the app - see
-  // s_is_wakeup_launch's own comment for what this gates.
+  // Whether this session exists because a wakeup fired vs the user opening the app.
   s_is_wakeup_launch = launch_reason() == APP_LAUNCH_WAKEUP;
   if (s_is_wakeup_launch) {
     APP_LOG(APP_LOG_LEVEL_INFO, "launched by wakeup event");
@@ -4638,11 +3724,9 @@ static void init(void) {
   recompute_groups();
 
 #ifndef PBL_PLATFORM_APLITE
-  // Re-pin a resumed tracking session (the setting itself isn't known until
-  // the first sync's MSG_SYNC_STATUS - has_pinned_row() gates on it, and
-  // that sync's own reload_data makes the section appear once it arrives).
-  // A stopped-but-still-in-grace task is deliberately NOT re-pinned: the
-  // grace period is a UI nicety, not persisted state.
+  // Re-pin a resumed tracking session (the pin setting isn't known until the
+  // first sync; the section appears then). A stopped-but-in-grace task is NOT
+  // re-pinned - the grace period isn't persisted state.
   if (s_tracking_task_id[0] != '\0') {
     strncpy(s_pinned_task_id, s_tracking_task_id, MAX_ID_LEN - 1);
     s_pinned_task_id[MAX_ID_LEN - 1] = '\0';
@@ -4650,13 +3734,10 @@ static void init(void) {
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
-  // If a resumed tracking session is already past its estimate the moment
-  // the app opens, latch s_overtime_notified so the first tick doesn't fire
-  // the banner - only a crossing that happens while the app is open should
-  // notify, not just reopening the app mid-overrun. (s_overtime_notify_enabled
-  // is still false here - the first sync sets it - but the latch survives
-  // that; maybe_notify_overtime re-arms it on its own if the effective time
-  // later dips back under the estimate.)
+  // If a resumed session is already past its estimate at open, latch
+  // s_overtime_notified so the first tick doesn't fire the banner - only a
+  // crossing while the app is open should notify. maybe_notify_overtime re-arms
+  // it if effective time later dips back under.
   if (s_tracking_task_id[0] != '\0') {
     Task *resumed = find_task_by_id(s_tracking_task_id);
     if (resumed && resumed->time_estimate_ms > 0) {
@@ -4667,9 +3748,8 @@ static void init(void) {
       }
       if (effective_ms >= resumed->time_estimate_ms) {
         s_overtime_notified = true;
-        // If the "repeat every 5 minutes" sub-option turns out to be on
-        // (the first sync sets it), count the interval from launch rather
-        // than firing the moment the tick starts.
+        // Count any "repeat every 5 minutes" interval from launch, not from the
+        // first tick.
         s_overtime_last_notify_epoch = time(NULL);
       }
     }
@@ -4682,13 +3762,10 @@ static void init(void) {
 #ifndef PBL_PLATFORM_APLITE
   app_message_register_outbox_sent(outbox_sent_handler);
 #endif
-  // Deliberately not app_message_*_size_maximum() (~8 KB each on basalt): two
-  // maxed buffers eat ~16 KB of the ~25 KB app heap, leaving too little for the
-  // Habits window's layers to allocate on top of the still-loaded main window
-  // (text_layer_create there would return NULL and crash). The protocol's
-  // largest messages are a MSG_TASK_ITEM (~500 B) and a MSG_NOTE_CHUNK
-  // (NOTE_CHUNK_LEN 256 chars, up to ~1 KB with multi-byte UTF-8); 2 KB in /
-  // 1 KB out clears both with margin.
+  // Not app_message_*_size_maximum() (~8 KB each): two maxed buffers eat ~16 KB
+  // of the ~25 KB heap, leaving too little for the Habits window's layers.
+  // Largest messages are MSG_TASK_ITEM (~500 B) and MSG_NOTE_CHUNK (~1 KB with
+  // UTF-8); 2 KB in / 1 KB out clears both.
   app_message_open(2048, 1024);
 
   s_main_window = window_create();
@@ -4699,9 +3776,7 @@ static void init(void) {
   window_stack_push(s_main_window, true);
 
 #if defined(PBL_TOUCH)
-  // Apply the default (off) now; the first sync's MSG_SYNC_STATUS turns it on
-  // a moment later if the phone setting says so, same as every other mirrored
-  // pairing setting.
+  // Apply the default (off); the first sync turns it on if the phone says so.
   apply_touch_nav();
 #endif
 }
@@ -4712,22 +3787,10 @@ static void deinit(void) {
   apply_touch_nav();  // unsubscribe + cancel the long-press timer
 #endif
 #ifndef PBL_PLATFORM_APLITE
-  // Relinquish the backlight back to automatic control before exiting -
-  // otherwise an always-on or mid-timeout override from this session would
-  // otherwise persist past the app's own lifetime, per light_enable()'s own
-  // docs warning about battery drain from leaving it forced on.
-  // ALWAYS_ON mode is itself documented as "for as long as the app stays
-  // open" - exiting is exactly the boundary that's supposed to end it, not
-  // an exception to it.
-  //
-  // Unconditional, not gated on s_backlight_mode != 0 (as this used to be) -
-  // set_status_code() can also force the backlight on for a mid-sync exit
-  // (a wakeup-launched session's own auto-close, or the user backing out
-  // while a resync is still in flight) independent of whatever
-  // s_backlight_mode says, and that override needs relinquishing here too.
-  // Harmless to call even when nothing this app did ever actually turned
-  // the backlight on - it just hands back whatever the system's own
-  // control already was.
+  // Relinquish the backlight to automatic control before exiting - otherwise an
+  // always-on or mid-timeout override persists past the app. Unconditional
+  // (not gated on s_backlight_mode) since set_status_code() can also force it
+  // on for a mid-sync exit. Harmless if the app never touched the backlight.
   if (s_backlight_timer) {
     app_timer_cancel(s_backlight_timer);
   }
