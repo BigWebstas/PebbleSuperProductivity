@@ -72,6 +72,11 @@ fixed in firmware.
 
 See the [Releases page](https://github.com/BigWebstas/PebbleSuperProductivity/releases) for downloadable `.pbw` artifacts of each version.
 
+### [v0.6.23](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.23)
+- Add an optional "Pin the task you're tracking to the top" setting: while a task's timer is running it moves into its own "Tracking" section at the top of the list (with its live duration, and its project when grouping is on) and out of its normal group, sliding back into place about 10 seconds after you stop. Off by default; not available on original Pebble/Pebble Steel.
+- Add an optional "Notify when a task runs over its estimate" setting: while tracking a task that has a time estimate, the watch vibrates and shows a banner the moment the time spent reaches that estimate. Off by default; not available on original Pebble/Pebble Steel.
+- A task you complete on the watch with "Hide completed tasks" on now stays visible for about 10 seconds before disappearing, up from 5.
+
 ### [v0.6.22](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.22)
 - Fix the Habits screen crashing the app (out of memory) on every watch except the Pebble Time 2.
 - Show subtasks of recurring tasks on the watch, instead of just the bare parent row (also fixes any subtask added since the last full sync going missing). Existing accounts need one "Clear all data & resync" to pick up subtasks synced before this fix.
