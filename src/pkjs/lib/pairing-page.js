@@ -30,6 +30,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var enableAddTask = options.enableAddTask !== false;
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
+  var overtimeRepeat = !!options.overtimeRepeat;
   var pinTrackedTask = !!options.pinTrackedTask;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
@@ -82,6 +83,8 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }\n' +
 '  .checkbox-row input { width: auto; margin: 0; }\n' +
 '  .checkbox-row label { display: inline; margin: 0; font-weight: normal; }\n' +
+'  .checkbox-row.sub { margin-left: 26px; margin-top: 8px; }\n' +
+'  p.hint.sub { margin-left: 26px; }\n' +
 '  button { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; }\n' +
 '  button.secondary { background: #eee; color: #111; margin-top: 8px; }\n' +
 '  button.danger { background: #fff; color: #c00; border: 1px solid #c00; }\n' +
@@ -180,9 +183,20 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  <p class="hint">\n' +
 '    While you\'re tracking time on a task that has a time estimate, the\n' +
 '    watch vibrates and shows a banner the moment the time spent on it\n' +
-'    reaches that estimate. Only fires once per tracking session. Not\n' +
-'    available on original Pebble/Pebble Steel (aplite) - too little free\n' +
-'    memory left on that hardware for the banner.\n' +
+'    reaches that estimate. Fires once per tracking session unless the\n' +
+'    repeat option below is on. Not available on original Pebble/Pebble\n' +
+'    Steel (aplite) - too little free memory left on that hardware for the\n' +
+'    banner.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row sub">\n' +
+'    <input id="overtimeRepeat" type="checkbox"' + (overtimeRepeat ? ' checked' : '') + (overtimeNotify ? '' : ' disabled') + '>\n' +
+'    <label for="overtimeRepeat">Repeat the notification every 5 minutes</label>\n' +
+'  </div>\n' +
+'  <p class="hint sub">\n' +
+'    Keeps re-vibrating and re-showing the banner every 5 minutes for as\n' +
+'    long as the task you\'re tracking stays over its estimate, instead of\n' +
+'    only once. Stops when you stop tracking.\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
@@ -308,6 +322,20 @@ autoSyncIntervalOptions + '\n' +
 '    location.href = \'pebblejs://close#\' + encoded;\n' +
 '  }\n' +
 '\n' +
+'  // "Repeat every 5 minutes" only makes sense while the parent\n' +
+'  // "Notify when a task runs over its estimate" is on - grey it out\n' +
+'  // (and clear it) otherwise. The watch ignores it in that case anyway.\n' +
+'  (function () {\n' +
+'    var parent = document.getElementById(\'overtimeNotify\');\n' +
+'    var sub = document.getElementById(\'overtimeRepeat\');\n' +
+'    function sync() {\n' +
+'      sub.disabled = !parent.checked;\n' +
+'      if (!parent.checked) { sub.checked = false; }\n' +
+'    }\n' +
+'    parent.addEventListener(\'change\', sync);\n' +
+'    sync();\n' +
+'  })();\n' +
+'\n' +
 '  document.getElementById(\'openLoginBtn\').addEventListener(\'click\', function () {\n' +
 '    var baseUrl = document.getElementById(\'baseUrl\').value.replace(/\\/+$/, \'\');\n' +
 '    // sync.super-productivity.com\'s own root page is the login/"Connect"\n' +
@@ -342,6 +370,7 @@ autoSyncIntervalOptions + '\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
+'      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +
 '      pinTrackedTask: document.getElementById(\'pinTrackedTask\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +

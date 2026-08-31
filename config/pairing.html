@@ -13,6 +13,8 @@
   .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
   .checkbox-row input { width: auto; margin: 0; }
   .checkbox-row label { display: inline; margin: 0; font-weight: normal; }
+  .checkbox-row.sub { margin-left: 26px; margin-top: 8px; }
+  p.hint.sub { margin-left: 26px; }
   button { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; }
   button.secondary { background: #eee; color: #111; margin-top: 8px; }
   p.hint { font-size: 12px; color: #666; }
@@ -118,8 +120,18 @@
   <p class="hint">
     While you're tracking time on a task that has a time estimate, the watch
     vibrates and shows a banner the moment the time spent reaches that
-    estimate. Fires once per tracking session. Not available on original
-    Pebble/Pebble Steel (aplite).
+    estimate. Fires once per tracking session unless the repeat option below
+    is on. Not available on original Pebble/Pebble Steel (aplite).
+  </p>
+
+  <div class="checkbox-row sub">
+    <input id="overtimeRepeat" type="checkbox">
+    <label for="overtimeRepeat">Repeat the notification every 5 minutes</label>
+  </div>
+  <p class="hint sub">
+    Keeps re-vibrating and re-showing the banner every 5 minutes for as long
+    as the task you're tracking stays over its estimate, instead of only
+    once. Stops when you stop tracking.
   </p>
 
   <div class="checkbox-row">
@@ -158,6 +170,17 @@
     location.href = 'pebblejs://close#' + encoded;
   }
 
+  (function () {
+    var parent = document.getElementById('overtimeNotify');
+    var sub = document.getElementById('overtimeRepeat');
+    function sync() {
+      sub.disabled = !parent.checked;
+      if (!parent.checked) { sub.checked = false; }
+    }
+    parent.addEventListener('change', sync);
+    sync();
+  })();
+
   document.getElementById('openLoginBtn').addEventListener('click', function () {
     var baseUrl = document.getElementById('baseUrl').value.replace(/\/+$/, '');
     // sync.super-productivity.com's own root page is the login/"Connect"
@@ -183,6 +206,7 @@
       enableAddTask: document.getElementById('enableAddTask').checked,
       touchNav: document.getElementById('touchNav').checked,
       overtimeNotify: document.getElementById('overtimeNotify').checked,
+      overtimeRepeat: document.getElementById('overtimeRepeat').checked,
       pinTrackedTask: document.getElementById('pinTrackedTask').checked
     });
   });

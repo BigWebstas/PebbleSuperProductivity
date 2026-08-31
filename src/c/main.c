@@ -44,6 +44,7 @@
 #define KEY_TASK_TAGS MESSAGE_KEY_TASK_TAGS
 #define KEY_TOUCH_NAV_ENABLED MESSAGE_KEY_TOUCH_NAV_ENABLED
 #define KEY_OVERTIME_NOTIFY_ENABLED MESSAGE_KEY_OVERTIME_NOTIFY_ENABLED
+#define KEY_OVERTIME_REPEAT_ENABLED MESSAGE_KEY_OVERTIME_REPEAT_ENABLED
 #define KEY_PIN_TRACKED_TASK_ENABLED MESSAGE_KEY_PIN_TRACKED_TASK_ENABLED
 
 // MSG_TYPE values, watch <-> phone.
@@ -543,9 +544,16 @@ static AppTimer *s_overtime_banner_timer = NULL;
 // resumed session is already over its estimate at launch, so reopening the
 // app mid-overrun doesn't nag.
 static bool s_overtime_notified = false;
+// Epoch of the last time the banner fired for the current crossing. Only
+// consulted when the phone's "Repeat the notification every 5 minutes"
+// sub-option is on (s_overtime_repeat_enabled): maybe_notify_overtime
+// re-fires the banner once OVERTIME_REPEAT_INTERVAL_S has passed and the
+// task is still over. Reset alongside s_overtime_notified.
+static time_t s_overtime_last_notify_epoch = 0;
 static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
 #define OVERTIME_BANNER_MS 6000
 #define OVERTIME_BANNER_HEIGHT 52
+#define OVERTIME_REPEAT_INTERVAL_S (5 * 60)
 
 // Pinned "TRACKING" section - when the phone's "Pin the task you're
 // tracking to the top" setting is on (s_pin_tracked_task_enabled), the task
@@ -635,6 +643,13 @@ static bool s_add_task_enabled = true;
 // room for the banner and this flag would be inert there anyway, so it's
 // not even read from the sync status message on aplite.
 static bool s_overtime_notify_enabled = false;
+// Mirrors the phone's "Repeat the notification every 5 minutes" sub-option
+// (config.overtimeRepeat), a modifier on s_overtime_notify_enabled: when
+// on, maybe_notify_overtime re-fires the banner every
+// OVERTIME_REPEAT_INTERVAL_S for as long as the tracked task stays over,
+// instead of only once per session. Inert while s_overtime_notify_enabled
+// is off. Same opt-in 0-until-first-sync / aplite-gating as above.
+static bool s_overtime_repeat_enabled = false;
 // Mirrors the phone's "Pin the task you're tracking to the top" pairing
 // setting (config.pinTrackedTask). Opt-in, same 0-until-first-sync
 // convention as s_overtime_notify_enabled above, and aplite-gated for the
@@ -2159,7 +2174,10 @@ static void show_overtime_banner(const char *task_title) {
 // time the tracked task's effective time (synced spent + this session's
 // still-running elapsed) reaches its estimate. Latched via
 // s_overtime_notified so it only fires once per crossing, and re-armed if
-// the effective time later falls back under the estimate.
+// the effective time later falls back under the estimate. When the phone's
+// "Repeat the notification every 5 minutes" sub-option is on
+// (s_overtime_repeat_enabled) it also re-fires every
+// OVERTIME_REPEAT_INTERVAL_S for as long as the task stays over.
 static void maybe_notify_overtime(void) {
   if (!s_overtime_notify_enabled || s_tracking_task_id[0] == '\0') {
     return;
@@ -2177,11 +2195,22 @@ static void maybe_notify_overtime(void) {
     s_overtime_notified = false; // re-arm for a later crossing
     return;
   }
-  if (s_overtime_notified || s_error_overlay_active) {
+  if (s_error_overlay_active) {
     return;
   }
-  s_overtime_notified = true;
-  show_overtime_banner(task->title);
+  if (!s_overtime_notified) {
+    s_overtime_notified = true;
+    s_overtime_last_notify_epoch = time(NULL);
+    show_overtime_banner(task->title);
+    return;
+  }
+  // Already notified for this crossing - the "repeat every 5 minutes"
+  // sub-option keeps re-firing it while the task stays over its estimate.
+  if (s_overtime_repeat_enabled &&
+      time(NULL) - s_overtime_last_notify_epoch >= OVERTIME_REPEAT_INTERVAL_S) {
+    s_overtime_last_notify_epoch = time(NULL);
+    show_overtime_banner(task->title);
+  }
 }
 
 // Re-lays-out the task list after the pinned "TRACKING" section appears or
@@ -2248,6 +2277,7 @@ static void start_tracking(Task *task) {
   // if this task is already past its estimate) and clear any stale one
   // left over from the previous task.
   s_overtime_notified = false;
+  s_overtime_last_notify_epoch = 0;
   hide_overtime_banner();
   // Pin this task to the top (if the setting's on). Cancels any grace timer
   // from a just-stopped previous task and re-lays-out the list so the
@@ -2296,6 +2326,7 @@ static void stop_tracking_and_report(void) {
   save_tracking();
 #ifndef PBL_PLATFORM_APLITE
   s_overtime_notified = false;
+  s_overtime_last_notify_epoch = 0;
   hide_overtime_banner();
   // Keep the just-stopped task in the pinned section for a short grace
   // period so it slides back into its group smoothly rather than vanishing
@@ -3266,6 +3297,21 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         s_overtime_notify_enabled = overtime_notify_tuple->value->int32 != 0;
         if (!s_overtime_notify_enabled) {
           hide_overtime_banner();
+        }
+      }
+      // Sub-option of the above. Same optional/absent-means-unchanged
+      // pattern. If it's switched on while a task is already over its
+      // estimate but the per-crossing banner has already fired (so
+      // s_overtime_last_notify_epoch was never set - e.g. the init() latch
+      // primed s_overtime_notified on relaunch), start the 5-minute clock
+      // from now rather than firing immediately on the next tick.
+      Tuple *overtime_repeat_tuple = dict_find(iterator, KEY_OVERTIME_REPEAT_ENABLED);
+      if (overtime_repeat_tuple) {
+        bool was = s_overtime_repeat_enabled;
+        s_overtime_repeat_enabled = overtime_repeat_tuple->value->int32 != 0;
+        if (!was && s_overtime_repeat_enabled && s_overtime_notified &&
+            s_overtime_last_notify_epoch == 0) {
+          s_overtime_last_notify_epoch = time(NULL);
         }
       }
       // Same optional/absent-means-unchanged pattern. Toggling it off mid-
@@ -4504,6 +4550,10 @@ static void init(void) {
       }
       if (effective_ms >= resumed->time_estimate_ms) {
         s_overtime_notified = true;
+        // If the "repeat every 5 minutes" sub-option turns out to be on
+        // (the first sync sets it), count the interval from launch rather
+        // than firing the moment the tick starts.
+        s_overtime_last_notify_epoch = time(NULL);
       }
     }
   }

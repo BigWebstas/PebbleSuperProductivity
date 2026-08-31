@@ -346,6 +346,11 @@ function sendStatus(code, message) {
     // the over-estimate banner in main.c (aplite ignores it - see that
     // flag's comment). Always included, same reasoning as above.
     OVERTIME_NOTIFY_ENABLED: config.overtimeNotify ? 1 : 0,
+    // Sub-option of OVERTIME_NOTIFY_ENABLED: when on, the watch re-fires the
+    // over-estimate banner every 5 minutes for as long as the tracked task
+    // stays over, instead of just once per session. Inert on the watch when
+    // overtimeNotify itself is off. Always included, same reasoning as above.
+    OVERTIME_REPEAT_ENABLED: config.overtimeRepeat ? 1 : 0,
     // "Pin the task you're tracking to the top" on/off, mirrored to the
     // watch's s_pin_tracked_task_enabled. Off by default (opt-in). Drives
     // the pinned "TRACKING" section in main.c (aplite ignores it - see that
@@ -1818,6 +1823,7 @@ Pebble.addEventListener('showConfiguration', function () {
       backlightMode: config.backlightMode || 0,
       touchNav: !!config.touchNav,
       overtimeNotify: !!config.overtimeNotify,
+      overtimeRepeat: !!config.overtimeRepeat,
       pinTrackedTask: !!config.pinTrackedTask,
     }
   );
@@ -1888,6 +1894,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,
     overtimeNotify: !!result.overtimeNotify,
+    overtimeRepeat: !!result.overtimeRepeat,
     pinTrackedTask: !!result.pinTrackedTask,
   };
   saveConfig(newConfig);
