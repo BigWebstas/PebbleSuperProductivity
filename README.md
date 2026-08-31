@@ -72,6 +72,11 @@ fixed in firmware.
 
 See the [Releases page](https://github.com/BigWebstas/PebbleSuperProductivity/releases) for downloadable `.pbw` artifacts of each version.
 
+### [v0.6.24](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.24)
+- The over-estimate notification now has a "Repeat the notification every 5 minutes" sub-option: with it on, the watch keeps re-vibrating and re-showing the banner every 5 minutes for as long as the tracked task stays over its estimate, instead of notifying just once.
+- Bigger, better-aligned text throughout the task list, habits and notes screens on the Pebble Time 2, matching its larger display. Other watches are unchanged.
+- Dropped the underline under project group names in the task list; the green header bar already sets them apart.
+
 ### [v0.6.23](https://github.com/BigWebstas/PebbleSuperProductivity/releases/tag/v0.6.23)
 - Add an optional "Pin the task you're tracking to the top" setting: while a task's timer is running it moves into its own "Tracking" section at the top of the list (with its live duration, and its project when grouping is on) and out of its normal group, sliding back into place about 10 seconds after you stop. Off by default; not available on original Pebble/Pebble Steel.
 - Add an optional "Notify when a task runs over its estimate" setting: while tracking a task that has a time estimate, the watch vibrates and shows a banner the moment the time spent reaches that estimate. Off by default; not available on original Pebble/Pebble Steel.
