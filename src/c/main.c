@@ -389,8 +389,23 @@ static char s_notes_tags_line[MAX_TASK_TAGS_LEN + 16] = "";
 #define NOTES_TAGS_LABEL "Tags:"
 #define NOTES_TAGS_EMPTY_TEXT "No tags for this task"
 #define NOTES_TAGS_BG_COLOR GColorYellow
+// Notes body + "Tags:" label fonts, and the tags-header padding. Bumped a step
+// on emery to match the rest of the Large-content-size scaling (see the
+// TITLE_FONT_KEY block below). These MUST be used everywhere the notes text is
+// both measured and drawn (measure_notes_text_height / measure_notes_tags_parts
+// / notes_tags_layer_draw / notes_window_load) or the measured height and the
+// rendered height drift apart and the body clips - see those functions' comments.
+#ifdef PBL_PLATFORM_EMERY
+#define NOTES_BODY_FONT_KEY FONT_KEY_GOTHIC_24
+#define NOTES_LABEL_FONT_KEY FONT_KEY_GOTHIC_24_BOLD
+#define NOTES_TAGS_PADDING_X 8
+#define NOTES_TAGS_PADDING_Y 6
+#else
+#define NOTES_BODY_FONT_KEY FONT_KEY_GOTHIC_18
+#define NOTES_LABEL_FONT_KEY FONT_KEY_GOTHIC_18_BOLD
 #define NOTES_TAGS_PADDING_X 6
 #define NOTES_TAGS_PADDING_Y 4
+#endif
 // The notes window's full content area (below the status bar) - set once in
 // notes_window_load, read by render_notes_overlay_content to re-slice
 // between the fixed tags header and the scrollable notes body every time
@@ -552,7 +567,11 @@ static bool s_overtime_notified = false;
 static time_t s_overtime_last_notify_epoch = 0;
 static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
 #define OVERTIME_BANNER_MS 6000
+#ifdef PBL_PLATFORM_EMERY
+#define OVERTIME_BANNER_HEIGHT 60
+#else
 #define OVERTIME_BANNER_HEIGHT 52
+#endif
 #define OVERTIME_REPEAT_INTERVAL_S (5 * 60)
 
 // Pinned "TRACKING" section - when the phone's "Pin the task you're
@@ -568,7 +587,11 @@ static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
 static char s_pinned_task_id[MAX_ID_LEN] = "";
 static AppTimer *s_unpin_timer = NULL;
 #define UNPIN_GRACE_MS 10000
+#ifdef PBL_PLATFORM_EMERY
+#define PINNED_HEADER_HEIGHT 28
+#else
 #define PINNED_HEADER_HEIGHT 22
+#endif
 #endif
 
 // Same idea as s_tracking_task_id above, but for a StopWatch-type habit -
@@ -736,20 +759,87 @@ static int s_group_count = 0;
 // alternative. Only the selected row ever scrolls (not every long row at
 // once): cheaper to redraw, and it's the row the user is actually looking
 // at.
+#define SCROLL_GAP_PX 24
+
+// --- Platform-scaled UI metrics ---------------------------------------------
+// The Time 2 (emery) firmware renders third-party apps at the SDK's "Large"
+// content size (system_theme.c: [PlatformTypeEmery] = PreferredContentSizeLarge),
+// so its MenuLayer cells come out ~61px tall vs 44px everywhere else - the app
+// sets no get_cell_height callback, the firmware fills the default from the
+// platform content size. Everything below that positions text inside a cell (or
+// picks a font for one) therefore needs an emery variant, or the 44px-era
+// offsets leave the title jammed at the top and the subtitle stranded at the
+// bottom of a much taller cell. Every non-emery value here is exactly what it
+// was before this block existed - no other platform's output changes.
+//
+// TITLE/SUBTITLE_FONT_KEY: a task/habit row's title and its due/tracked-time/
+//   "Done" (or value/goal) subtitle. SUBTITLE stays one step up from
+//   FONT_KEY_GOTHIC_14 - Pebble's system fonts are fixed sizes, no arbitrary
+//   point sizes.
+// HEADING_FONT_KEY: the bold Resync/Habits/Add Task/Finish Day/project rows and
+//   the project group headers.
+// TRACKING_FONT_KEY: the small "TRACKING" pinned-section header strip.
+// CHROME_FONT_KEY: genuinely secondary text - Resync's status line, the Finish
+//   Day row's version subtitle, the "No tasks for today." message - the stuff
+//   that reads as app chrome rather than content scanned row to row.
+// *_STRIP_H: height reserved at the bottom of a cell for its subtitle line.
+// HEADING_TITLE_H: title-box height for the taller HEADING_FONT_KEY rows.
+#ifdef PBL_PLATFORM_EMERY
+#define SCROLL_INTERVAL_MS 100
+#define SCROLL_STEP_PX 2
+#define TITLE_FONT_KEY FONT_KEY_GOTHIC_24_BOLD
+#define SUBTITLE_FONT_KEY FONT_KEY_GOTHIC_18
+#define HEADING_FONT_KEY FONT_KEY_GOTHIC_28_BOLD
+#define TRACKING_FONT_KEY FONT_KEY_GOTHIC_24_BOLD
+#define CHROME_FONT_KEY FONT_KEY_GOTHIC_18
+#define EMPTY_MSG_FONT_KEY FONT_KEY_GOTHIC_24
+#define TITLE_BOX_X 10
+#define TITLE_BOX_Y 3
+#define SUBTITLE_STRIP_H 26
+#define CHROME_STRIP_H 22
+#define HEADING_TITLE_H 34
+#define GROUP_HEADER_HEIGHT 48
+#else
 #define SCROLL_INTERVAL_MS 300
 #define SCROLL_STEP_PX 6
-#define SCROLL_GAP_PX 24
 #define TITLE_FONT_KEY FONT_KEY_GOTHIC_18_BOLD
-// One step up from FONT_KEY_GOTHIC_14 (Pebble's system fonts only come in
-// fixed sizes, no arbitrary point sizes) - used for a task row's due/
-// tracked-time/"Done" subtitle and a habit row's value/goal subtitle
-// specifically, not every small-text use in the app (Resync's status line,
-// the Finish Day row's version subtitle, and the empty-list version footer
-// stay at FONT_KEY_GOTHIC_14 - those read more as app chrome than content
-// the user is actively scanning row to row).
 #define SUBTITLE_FONT_KEY FONT_KEY_GOTHIC_18
+#define HEADING_FONT_KEY FONT_KEY_GOTHIC_24_BOLD
+#define TRACKING_FONT_KEY FONT_KEY_GOTHIC_18_BOLD
+#define CHROME_FONT_KEY FONT_KEY_GOTHIC_14
+#define EMPTY_MSG_FONT_KEY FONT_KEY_GOTHIC_18
 #define TITLE_BOX_X 6
 #define TITLE_BOX_Y 2
+#define SUBTITLE_STRIP_H 22
+#define CHROME_STRIP_H 18
+#define HEADING_TITLE_H 30
+#define GROUP_HEADER_HEIGHT 40
+#endif
+
+// Lays out a title line of height `title_h` + a bottom subtitle strip of height
+// `strip_h` inside a cell `cell_h` tall. Pure macros, no locals or helper call -
+// aplite's RAM headroom (~50 bytes total, see the memory-budget comments
+// throughout this file) can't absorb even a couple of extra int16 stack slots
+// across the draw paths, and on non-emery these expand to exactly the fixed
+// offsets they replaced so those builds stay byte-identical.
+//
+// Non-emery: title flush at TITLE_BOX_Y, subtitle strip flush against the bottom
+// edge. Emery: the title+subtitle pair is centred as one block so the taller
+// (~61px) cell gets even top/bottom margins instead of the title clinging to the
+// top and the subtitle to the bottom with a dead band between them.
+// HEADING_TITLE_Y is the single-line (no subtitle) form, for the bold nav rows.
+#ifdef PBL_PLATFORM_EMERY
+#define ROW_TITLE_TOP_Y(cell_h, title_h, strip_h) \
+  (((cell_h) - (title_h) - (strip_h)) / 2 < TITLE_BOX_Y \
+   ? TITLE_BOX_Y : ((cell_h) - (title_h) - (strip_h)) / 2)
+#define ROW_SUBTITLE_TOP_Y(cell_h, title_h, strip_h) \
+  (ROW_TITLE_TOP_Y(cell_h, title_h, strip_h) + (title_h))
+#define HEADING_TITLE_Y(cell_h) (((cell_h) - HEADING_TITLE_H) / 2)
+#else
+#define ROW_TITLE_TOP_Y(cell_h, title_h, strip_h) (TITLE_BOX_Y)
+#define ROW_SUBTITLE_TOP_Y(cell_h, title_h, strip_h) ((cell_h) - (strip_h))
+#define HEADING_TITLE_Y(cell_h) (TITLE_BOX_Y)
+#endif
 
 static AppTimer *s_scroll_timer = NULL;
 static int s_scroll_offset_px = 0;
@@ -1149,7 +1239,7 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
     // Actionable empty state only (see menu_get_num_rows) - the header is
     // where "No tasks for today." itself lives once the menu takes over
     // from s_empty_layer, sized the same as a project group's own header.
-    return (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) ? 40 : 0;
+    return (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) ? GROUP_HEADER_HEIGHT : 0;
   }
   if (section_index == 0) {
     return 0;
@@ -1175,11 +1265,11 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
   }
   // The group name now lives in a selectable project ROW instead (see
   // menu_get_num_rows/menu_draw_row) - no separate header needed. Aplite
-  // keeps the plain 40px header below (draw_header's own aplite-reachable
+  // keeps the plain header below (draw_header's own aplite-reachable
   // branch still runs there).
   return 0;
 #else
-  return 40;
+  return GROUP_HEADER_HEIGHT;
 #endif
 }
 
@@ -1194,7 +1284,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
       graphics_context_set_fill_color(ctx, GColorWhite);
       graphics_fill_rect(ctx, bounds, 0, GCornerNone);
       graphics_context_set_text_color(ctx, GColorBlack);
-      graphics_draw_text(ctx, "No tasks for today.", fonts_get_system_font(FONT_KEY_GOTHIC_18),
+      graphics_draw_text(ctx, "No tasks for today.", fonts_get_system_font(EMPTY_MSG_FONT_KEY),
                           bounds, GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
     }
     return;
@@ -1204,15 +1294,16 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   }
 #ifndef PBL_PLATFORM_APLITE
   // The pinned "TRACKING" section's own header - a thin green strip,
-  // deliberately smaller/quieter than the bold 24pt project headers below
-  // so it reads as a distinct-but-subordinate section.
+  // deliberately smaller/quieter than the bold project headers/rows below
+  // so it reads as a distinct-but-subordinate section (TRACKING_FONT_KEY is
+  // one size step down from HEADING_FONT_KEY on every platform).
   if (has_pinned_row() && section_index == 1) {
     GRect hb = layer_get_bounds(cell_layer);
     graphics_context_set_fill_color(ctx, GColorGreen);
     graphics_fill_rect(ctx, hb, 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorBlack);
-    graphics_draw_text(ctx, "TRACKING", fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
-                        GRect(6, 0, hb.size.w - 12, hb.size.h),
+    graphics_draw_text(ctx, "TRACKING", fonts_get_system_font(TRACKING_FONT_KEY),
+                        GRect(TITLE_BOX_X, 0, hb.size.w - TITLE_BOX_X * 2, hb.size.h),
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     graphics_context_set_stroke_color(ctx, GColorBlack);
     graphics_draw_line(ctx, GPoint(0, hb.size.h - 1), GPoint(hb.size.w, hb.size.h - 1));
@@ -1239,17 +1330,10 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   graphics_draw_text(ctx, name, bold_font, text_rect,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  // Underline sized to the actual rendered text, directly beneath it.
-  GSize text_size = graphics_text_layout_get_content_size(
-      name, bold_font, text_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-  int16_t underline_y = 2 + text_size.h;
-  graphics_context_set_stroke_color(ctx, GColorBlack);
-  graphics_draw_line(ctx, GPoint(6, underline_y), GPoint(6 + text_size.w, underline_y));
-
-  // A second, full-width divider along the bottom of the header cell -
-  // separates this group from its tasks more clearly than the text-width
-  // underline alone, especially once several groups are on screen at once.
+  // Full-width divider along the bottom of the header cell - separates this
+  // group from its tasks, especially once several groups are on screen at once.
   int16_t divider_y = bounds.size.h - 2;
+  graphics_context_set_stroke_color(ctx, GColorBlack);
   graphics_draw_line(ctx, GPoint(0, divider_y), GPoint(bounds.size.w, divider_y));
 }
 
@@ -1572,7 +1656,8 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
   GSize one_line_size = graphics_text_layout_get_content_size(
       "Ag", title_font, GRect(0, 0, 200, 100), GTextOverflowModeFill, GTextAlignmentLeft);
   int16_t title_box_h = one_line_size.h > 0 ? one_line_size.h : (bounds.size.h - TITLE_BOX_Y);
-  GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, title_box_h);
+  GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, title_box_h, SUBTITLE_STRIP_H),
+                           bounds.size.w - TITLE_BOX_X * 2, title_box_h);
 
   if (needs_marquee) {
     int16_t period = natural_width + SCROLL_GAP_PX;
@@ -1588,7 +1673,8 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
 
-  GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 22, bounds.size.w - TITLE_BOX_X * 2, 22);
+  GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, title_box_h, SUBTITLE_STRIP_H),
+                              bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
 
   if (task->done) {
     graphics_draw_text(ctx, "Done", fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
@@ -1683,8 +1769,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       graphics_context_set_fill_color(ctx, GColorVividCerulean);
       graphics_fill_rect(ctx, bounds, 0, GCornerNone);
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-      GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, 30);
-      graphics_draw_text(ctx, "Habits", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
+      GRect title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                               bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+      graphics_draw_text(ctx, "Habits", fonts_get_system_font(HEADING_FONT_KEY), title_box,
                           GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
       GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
                                ROW_ICON_SIZE, ROW_ICON_SIZE);
@@ -1710,8 +1797,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       graphics_context_set_fill_color(ctx, GColorJaegerGreen);
       graphics_fill_rect(ctx, bounds, 0, GCornerNone);
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-      GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, 30);
-      graphics_draw_text(ctx, "Add Task", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
+      GRect title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                               bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+      graphics_draw_text(ctx, "Add Task", fonts_get_system_font(HEADING_FONT_KEY), title_box,
                           GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
       GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
                                ROW_ICON_SIZE, ROW_ICON_SIZE);
@@ -1756,20 +1844,24 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_context_set_fill_color(ctx, GColorRed);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-    GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, 30);
-    graphics_draw_text(ctx, "Resync", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
+    GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
+                             bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+    graphics_draw_text(ctx, "Resync", fonts_get_system_font(HEADING_FONT_KEY), title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     // Full row width (not narrowed like title_box above) - a status message
     // here ("Failed: ...") is more important not to truncate than leaving
     // room to dodge the icon, which sits up in the title row's vertical
     // band, not down here.
-    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
-    graphics_draw_text(ctx, subtitle, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+    GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
+                                bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
+    graphics_draw_text(ctx, subtitle, fonts_get_system_font(CHROME_FONT_KEY), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     // Matches the Habits row's own icon (see below) so the two pinned rows
     // read as a consistent pair - "the sp logo" (this app's checkmark
     // mark, already used elsewhere as IMAGE_MENU_ICON/IMAGE_LOGO_LARGE).
-    GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, TITLE_BOX_Y + 2, ROW_ICON_SIZE, ROW_ICON_SIZE);
+    GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10,
+                             ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H) + 2,
+                             ROW_ICON_SIZE, ROW_ICON_SIZE);
     graphics_context_set_compositing_mode(ctx, GCompOpSet);
     graphics_draw_bitmap_in_rect(ctx, is_selected ? s_check_white_bitmap : s_check_bitmap, icon_rect);
     return;
@@ -1793,14 +1885,16 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_context_set_fill_color(ctx, bg);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, fg);
-    GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
-    graphics_draw_text(ctx, "Finish Day", fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD), title_box,
+    GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
+                             bounds.size.w - TITLE_BOX_X * 2, HEADING_TITLE_H);
+    graphics_draw_text(ctx, "Finish Day", fonts_get_system_font(HEADING_FONT_KEY), title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
     // Version text moves down to a subtitle instead of being the row's sole
     // content - this is the same footer slot the version display has always
     // lived in (v0.6.5), just no longer alone here.
-    GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 18, bounds.size.w - TITLE_BOX_X * 2, 18);
-    graphics_draw_text(ctx, "v" APP_VERSION, fonts_get_system_font(FONT_KEY_GOTHIC_14), subtitle_box,
+    GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
+                                bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
+    graphics_draw_text(ctx, "v" APP_VERSION, fonts_get_system_font(CHROME_FONT_KEY), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 #else
     // Plain version-only footer, unchanged from before Finish Day existed -
@@ -1816,7 +1910,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   }
 #ifndef PBL_PLATFORM_APLITE
   // The project row (see menu_get_num_rows/resolve_project_row_at) - same
-  // green/underline/divider look the old plain header used, but now a real
+  // green/divider look the old plain header used, but now a real
   // selectable row: double-click Select shows this project's notes (see
   // menu_select_click), same "same style, now inverts on select" treatment
   // the Finish Day row above got when IT became interactive. Text (not the
@@ -1828,8 +1922,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
                         menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
     GRect bounds = layer_get_bounds(cell_layer);
-    GFont bold_font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
-    GRect text_rect = GRect(6, 2, bounds.size.w - 12, bounds.size.h - 4);
+    GFont bold_font = fonts_get_system_font(HEADING_FONT_KEY);
+    int16_t text_top = HEADING_TITLE_Y(bounds.size.h);
+    GRect text_rect = GRect(TITLE_BOX_X, text_top, bounds.size.w - TITLE_BOX_X * 2, bounds.size.h - 4);
     GColor fg = is_selected ? GColorWhite : GColorBlack;
 
     graphics_context_set_fill_color(ctx, GColorGreen);
@@ -1838,13 +1933,10 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_draw_text(ctx, project_row->name, bold_font, text_rect,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-    GSize text_size = graphics_text_layout_get_content_size(
-        project_row->name, bold_font, text_rect, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-    int16_t underline_y = 2 + text_size.h;
-    graphics_context_set_stroke_color(ctx, fg);
-    graphics_draw_line(ctx, GPoint(6, underline_y), GPoint(6 + text_size.w, underline_y));
-
+    // Full-width divider along the bottom edge separates this project from
+    // its tasks; the green fill + bold text already read as a header.
     int16_t divider_y = bounds.size.h - 2;
+    graphics_context_set_stroke_color(ctx, fg);
     graphics_draw_line(ctx, GPoint(0, divider_y), GPoint(bounds.size.w, divider_y));
     return;
   }
@@ -2520,7 +2612,7 @@ static void stop_syncing_animation(void) {
   // Restores s_empty_layer to the plain font every other empty-state
   // message (not-paired/error/no-tasks) actually uses, and hides the
   // percent/hint subtitle - both are only ever populated while syncing.
-  text_layer_set_font(s_empty_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_font(s_empty_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
   layer_set_hidden(text_layer_get_layer(s_sync_progress_layer), true);
 #endif
 }
@@ -2539,10 +2631,10 @@ static void stop_syncing_animation(void) {
 // way the longer fallback sentence would at the same size.
 static void update_sync_progress_text(void) {
   if (s_status_msg[0] != '\0') {
-    text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+    text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
     text_layer_set_text(s_sync_progress_layer, s_status_msg);
   } else {
-    text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(CHROME_FONT_KEY));
     text_layer_set_text(s_sync_progress_layer, "This may take a few minutes");
   }
 }
@@ -2721,7 +2813,7 @@ static void hide_error_overlay(void) {
 
 static int16_t measure_notes_text_height(int16_t width, const char *text) {
   GSize size = graphics_text_layout_get_content_size(
-      text, fonts_get_system_font(FONT_KEY_GOTHIC_18), GRect(0, 0, width, 20000),
+      text, fonts_get_system_font(NOTES_BODY_FONT_KEY), GRect(0, 0, width, 20000),
       GTextOverflowModeWordWrap, GTextAlignmentLeft);
   int16_t margin = size.h / 10;
   if (margin < NOTES_TEXT_HEIGHT_MARGIN_FLOOR) {
@@ -2749,10 +2841,10 @@ static const char *notes_tags_display_line(void) {
 // either piece is.
 static void measure_notes_tags_parts(int16_t content_w, int16_t *out_label_h, int16_t *out_names_h) {
   GSize label_size = graphics_text_layout_get_content_size(
-      NOTES_TAGS_LABEL, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD),
+      NOTES_TAGS_LABEL, fonts_get_system_font(NOTES_LABEL_FONT_KEY),
       GRect(0, 0, content_w, 2000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
   GSize names_size = graphics_text_layout_get_content_size(
-      notes_tags_display_line(), fonts_get_system_font(FONT_KEY_GOTHIC_18),
+      notes_tags_display_line(), fonts_get_system_font(NOTES_BODY_FONT_KEY),
       GRect(0, 0, content_w, 2000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
   *out_label_h = label_size.h;
   *out_names_h = names_size.h;
@@ -3764,9 +3856,24 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_text_color(ctx, fg);
 
+  // Non-emery: the fixed 30px top-aligned title box this always used, byte for
+  // byte (aplite has no RAM headroom for the extra measurement). Emery: a
+  // measured, vertically-centred block matching draw_task_row so a habit row and
+  // a task row line up in the taller cell.
+#ifdef PBL_PLATFORM_EMERY
+  GFont habit_title_font = fonts_get_system_font(TITLE_FONT_KEY);
+  GSize habit_line = graphics_text_layout_get_content_size(
+      "Ag", habit_title_font, GRect(0, 0, 200, 100), GTextOverflowModeFill, GTextAlignmentLeft);
+  int16_t habit_title_h = habit_line.h > 0 ? habit_line.h : HEADING_TITLE_H;
+  GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
+                           bounds.size.w - TITLE_BOX_X * 2, habit_title_h);
+  graphics_draw_text(ctx, habit->title, habit_title_font, title_box,
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+#else
   GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
   graphics_draw_text(ctx, habit->title, fonts_get_system_font(TITLE_FONT_KEY), title_box,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+#endif
 
   // "value/goal" always visible, with " - Done" appended once today's count
   // reaches goal - same dash-separated "two settled facts" convention the
@@ -3840,7 +3947,13 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   } else {
     snprintf(subtitle, sizeof(subtitle), "%d/%d", habit->value, habit->goal);
   }
-  GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - 22, bounds.size.w - TITLE_BOX_X * 2, 22);
+#ifdef PBL_PLATFORM_EMERY
+  GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
+                              bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
+#else
+  GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - SUBTITLE_STRIP_H,
+                              bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
+#endif
   graphics_draw_text(ctx, subtitle, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 }
@@ -3985,7 +4098,7 @@ static void habits_window_load(Window *window) {
 
   s_habits_empty_layer = text_layer_create(content_bounds);
   text_layer_set_text_alignment(s_habits_empty_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_habits_empty_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_font(s_habits_empty_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
   text_layer_set_text(s_habits_empty_layer, "No habits synced.");
   layer_add_child(window_layer, text_layer_get_layer(s_habits_empty_layer));
 
@@ -4209,11 +4322,11 @@ static void notes_tags_layer_draw(Layer *layer, GContext *ctx) {
   measure_notes_tags_parts(content_w, &label_h, &names_h);
 
   GRect label_rect = GRect(NOTES_TAGS_PADDING_X, NOTES_TAGS_PADDING_Y, content_w, label_h);
-  graphics_draw_text(ctx, NOTES_TAGS_LABEL, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), label_rect,
+  graphics_draw_text(ctx, NOTES_TAGS_LABEL, fonts_get_system_font(NOTES_LABEL_FONT_KEY), label_rect,
                       GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 
   GRect names_rect = GRect(NOTES_TAGS_PADDING_X, NOTES_TAGS_PADDING_Y + label_h, content_w, names_h);
-  graphics_draw_text(ctx, notes_tags_display_line(), fonts_get_system_font(FONT_KEY_GOTHIC_18), names_rect,
+  graphics_draw_text(ctx, notes_tags_display_line(), fonts_get_system_font(NOTES_BODY_FONT_KEY), names_rect,
                       GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
 }
 
@@ -4263,7 +4376,7 @@ static void notes_window_load(Window *window) {
   // below, same as every later re-render.
   s_notes_layer = text_layer_create(GRect(0, 0, content_bounds.size.w, content_bounds.size.h));
   text_layer_set_text_alignment(s_notes_layer, GTextAlignmentLeft);
-  text_layer_set_font(s_notes_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_font(s_notes_layer, fonts_get_system_font(NOTES_BODY_FONT_KEY));
   text_layer_set_background_color(s_notes_layer, GColorWhite);
   text_layer_set_text_color(s_notes_layer, GColorBlack);
   text_layer_set_overflow_mode(s_notes_layer, GTextOverflowModeWordWrap);
@@ -4353,7 +4466,7 @@ static void window_load(Window *window) {
                                    content_bounds.size.w, content_bounds.size.h - LOGO_STRIP_HEIGHT);
   s_empty_layer = text_layer_create(empty_text_bounds);
   text_layer_set_text_alignment(s_empty_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_empty_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_font(s_empty_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
   layer_add_child(window_layer, text_layer_get_layer(s_empty_layer));
 
 #ifndef PBL_PLATFORM_APLITE
@@ -4362,13 +4475,17 @@ static void window_load(Window *window) {
   // whatever room each platform's screen actually has, same as
   // empty_text_bounds itself. Hidden by default; only shown while the
   // initial sync's title is up above it in the larger font.
+  #ifdef PBL_PLATFORM_EMERY
+  #define SYNC_PROGRESS_HEIGHT 42
+  #else
   #define SYNC_PROGRESS_HEIGHT 36
+  #endif
   GRect sync_progress_bounds = GRect(empty_text_bounds.origin.x,
                                       empty_text_bounds.origin.y + empty_text_bounds.size.h - SYNC_PROGRESS_HEIGHT,
                                       empty_text_bounds.size.w, SYNC_PROGRESS_HEIGHT);
   s_sync_progress_layer = text_layer_create(sync_progress_bounds);
   text_layer_set_text_alignment(s_sync_progress_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(CHROME_FONT_KEY));
   layer_set_hidden(text_layer_get_layer(s_sync_progress_layer), true);
   layer_add_child(window_layer, text_layer_get_layer(s_sync_progress_layer));
 #endif
@@ -4408,7 +4525,7 @@ static void window_load(Window *window) {
   // miss. Hidden by default; only show_error_overlay() reveals it.
   s_error_layer = text_layer_create(content_bounds);
   text_layer_set_text_alignment(s_error_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_error_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_font(s_error_layer, fonts_get_system_font(TITLE_FONT_KEY));
   text_layer_set_background_color(s_error_layer, GColorRed);
   // White, not black - better contrast against red, and on aplite (no true
   // red available - see PebbleOS's own 1-bit color reduction) this also
@@ -4424,14 +4541,14 @@ static void window_load(Window *window) {
   // Over-estimate banner (see maybe_notify_overtime) - a red strip across
   // the top of the list, on top of everything except the full-screen error
   // overlay above (which maybe_notify_overtime won't fire behind anyway).
-  // Same GColorRed + white-bold-18 styling as s_error_layer, just a
+  // Same GColorRed + white-bold styling as s_error_layer, just a
   // top-anchored strip rather than the full content area. Hidden until a
   // tracked task first crosses its estimate.
   GRect overtime_bounds = GRect(content_bounds.origin.x, content_bounds.origin.y,
                                  content_bounds.size.w, OVERTIME_BANNER_HEIGHT);
   s_overtime_banner_layer = text_layer_create(overtime_bounds);
   text_layer_set_text_alignment(s_overtime_banner_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_overtime_banner_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+  text_layer_set_font(s_overtime_banner_layer, fonts_get_system_font(TITLE_FONT_KEY));
   text_layer_set_background_color(s_overtime_banner_layer, GColorRed);
   text_layer_set_text_color(s_overtime_banner_layer, GColorWhite);
   text_layer_set_overflow_mode(s_overtime_banner_layer, GTextOverflowModeTrailingEllipsis);
