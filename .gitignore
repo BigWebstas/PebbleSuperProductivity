@@ -1,5 +1,6 @@
 build/
 node_modules/
+.idea/
 *.pbw
 .DS_Store
 .lock-waf_*_build
