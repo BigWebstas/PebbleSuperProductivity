@@ -1220,7 +1220,10 @@ function handleAddTask(title) {
     subTaskIds: [],
     timeSpentOnDay: {},
     timeSpent: 0,
-    timeEstimate: 0,
+    // Default time estimate from this app's pairing page (minutes -> ms); 0
+    // when the setting is "None", matching a desktop-added task with no
+    // estimate typed.
+    timeEstimate: (config.defaultTaskEstimateMin || 0) * 60000,
     isDone: false,
     title: String(title).trim(),
     tagIds: [],
@@ -1817,6 +1820,9 @@ Pebble.addEventListener('showConfiguration', function () {
       // GlobalConfig.tasks.defaultProjectId. Empty string means "fall back
       // to Inbox", not "unset vs configured" - see handleAddTask.
       defaultProjectId: config.defaultProjectId || '',
+      // Minutes of time estimate to stamp on a watch-dictated task; 0 means
+      // leave it unset - see handleAddTask.
+      defaultTaskEstimateMin: config.defaultTaskEstimateMin || 0,
       projects: projects,
       enableHabits: config.enableHabits !== false,
       enableAddTask: config.enableAddTask !== false,
@@ -1888,6 +1894,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     // wants persisted has to be listed here explicitly, or it silently
     // vanishes on the next settings-only save (e.g. toggling todayOnly).
     defaultProjectId: result.defaultProjectId || '',
+    defaultTaskEstimateMin: parseInt(result.defaultTaskEstimateMin, 10) || 0,
     enableHabits: !!result.enableHabits,
     enableAddTask: !!result.enableAddTask,
     autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,

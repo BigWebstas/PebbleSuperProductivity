@@ -25,6 +25,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var hasPassword = !!options.hasPassword;
   var hasToken = !!options.hasToken;
   var defaultProjectId = options.defaultProjectId || '';
+  var defaultTaskEstimateMin = options.defaultTaskEstimateMin || 0;
   var projects = options.projects || [];
   var enableHabits = options.enableHabits !== false;
   var enableAddTask = options.enableAddTask !== false;
@@ -55,6 +56,19 @@ function buildPairingPageUrl(baseUrl, email, options) {
     [60, 'Every hour'],
   ].map(function (opt) {
     var selected = opt[0] === autoSyncIntervalMin ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
+  var taskEstimateOptions = [
+    [0, 'None'],
+    [5, '5 minutes'],
+    [10, '10 minutes'],
+    [15, '15 minutes'],
+    [30, '30 minutes'],
+    [45, '45 minutes'],
+    [60, '1 hour'],
+    [120, '2 hours'],
+  ].map(function (opt) {
+    var selected = opt[0] === defaultTaskEstimateMin ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var backlightOptions = [
@@ -236,6 +250,16 @@ projectOptions + '\n' +
 '    microphone) is filed into this project.\n' +
 '  </p>\n' +
 '\n' +
+'  <label for="defaultTaskEstimateMin">Default time estimate for "Add Task"</label>\n' +
+'  <select id="defaultTaskEstimateMin">\n' +
+taskEstimateOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">\n' +
+'    A task you dictate on the watch starts with this much time estimated\n' +
+'    against it, the same as typing an estimate when you add it on the\n' +
+'    desktop. "None" leaves the estimate unset.\n' +
+'  </p>\n' +
+'\n' +
 '  <h2>Features</h2>\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableHabits" type="checkbox"' + (enableHabits ? ' checked' : '') + '>\n' +
@@ -366,6 +390,7 @@ autoSyncIntervalOptions + '\n' +
 '      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked,\n' +
 '      autoSyncIntervalMin: parseInt(document.getElementById(\'autoSyncIntervalMin\').value, 10) || 0,\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
+'      defaultTaskEstimateMin: parseInt(document.getElementById(\'defaultTaskEstimateMin\').value, 10) || 0,\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
