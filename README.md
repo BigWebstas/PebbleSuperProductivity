@@ -7,8 +7,14 @@ track habits — synced through Super Productivity's own **SuperSync** server.
 
 | | | |
 |---|---|---|
-| ![Pinned action rows](screenshots/task-list-top.png) | ![Grouped task list](screenshots/task-list-garden.png) | ![Time tracking](screenshots/task-list-work.png) |
-| ![Habits](screenshots/habits.png) | ![Scrolling](screenshots/task-list-scroll.gif) | ![Marking done](screenshots/task-complete.gif) |
+| ![Pinned action rows](screenshots/pebble-time-2/task-list-top.png) | ![Grouped task list](screenshots/pebble-time-2/task-list-garden.png) | ![Time tracking](screenshots/pebble-time-2/task-list-work.png) |
+| ![Habits](screenshots/pebble-time-2/habits.png) | ![Scrolling](screenshots/pebble-time-2/task-list-scroll.gif) | ![Marking done](screenshots/pebble-time-2/task-complete.gif) |
+
+Shown at Pebble Time 2 size. The same shots sized for other platforms:
+[`pebble-time-2`](screenshots/pebble-time-2) (200×228),
+[`pebble-round`](screenshots/pebble-round) (180×180, chalk),
+[`pebble-time`](screenshots/pebble-time) and
+[`pebble-2`](screenshots/pebble-2) (144×168).
 
 ## Controls
 
