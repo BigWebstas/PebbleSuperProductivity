@@ -1197,6 +1197,18 @@ function handleTrackStart(taskId, elapsedMs) {
   if (presenceClient) {
     presenceClient.broadcastTracking(presenceBroadcasting.taskId, presenceBroadcasting.sinceTs);
   }
+  // Re-push the task list so the now-tracked task is force-included in it
+  // (watchTaskList). Without this a task tracked from the Projects browser
+  // that isn't on today's list never reaches the watch's s_tasks, so its
+  // pinned "TRACKING" section stays empty while the watch still believes it
+  // is tracking - which pushes a remote presence session onto the old
+  // dark-blue LIVE row instead of the pinned section. The watch can't do this
+  // itself: start_tracking already sends MSG_TRACK_TIME_START, and a second
+  // back-to-back send (a sync request) collides on its single outbox slot.
+  var config = loadConfig();
+  if (config && config.jwt) {
+    sendTaskListToWatch(watchTaskList(loadState(), config));
+  }
 }
 
 // Phase 2: the watch stopped tracking - end the "Tracking on Pebble" broadcast.

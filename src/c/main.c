@@ -3038,6 +3038,26 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       recompute_groups();
       save_tasks();
 #ifndef PBL_PLATFORM_APLITE
+      // A local tracking session whose task is gone from the synced list - even
+      // though the phone force-includes any real tracked task (watchTaskList /
+      // handleTrackStart). The task was deleted elsewhere, or an old build left
+      // a session that never got a matching task. Clear the dead session: while
+      // s_tracking_task_id is set the watch counts as "tracking locally", which
+      // keeps a remote presence session off the pinned "TRACKING" section and
+      // on the old dark-blue LIVE row (see remote_in_pinned_section). 0-delta
+      // stop - no time to report, just end the "Tracking on Pebble" broadcast.
+      if (s_tracking_task_id[0] != '\0' && find_task_by_id(s_tracking_task_id) == NULL) {
+        send_track_time_stop(s_tracking_task_id, 0);
+        s_tracking_task_id[0] = '\0';
+        s_tracking_start_epoch = 0;
+        save_tracking();
+        s_overtime_notified = false;
+        hide_overtime_banner();
+        stop_tracking_tick();
+        if (s_presence_state == 1) {
+          start_tracking_tick(); // now drives the remote row's live elapsed
+        }
+      }
       // If the pinned task is gone from the list and nothing's being tracked,
       // drop the stale pin so it can't spuriously re-appear.
       if (s_pinned_task_id[0] != '\0' && s_tracking_task_id[0] == '\0' &&
@@ -4179,9 +4199,11 @@ static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell
     // estimate; the browsed struct works too (start_tracking only reads ->id).
     Task *real = find_task_by_id(bt->id);
     start_tracking(real ? real : bt);
-    // Pull the freshly-tracked task onto the today page: the phone learns the
-    // id from send_track_time_start and force-includes it in the next list.
-    request_sync();
+    // start_tracking's MSG_TRACK_TIME_START tells the phone the id; the phone
+    // then re-pushes the task list with this task force-included (see
+    // handleTrackStart in index.js) so the today page's pinned "TRACKING"
+    // section picks it up. A sync request from here would just collide with
+    // that MSG_TRACK_TIME_START on the single outbox slot and be dropped.
   }
   menu_layer_reload_data(s_browse_menu);
   vibes_short_pulse();
