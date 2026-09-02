@@ -33,6 +33,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var overtimeNotify = !!options.overtimeNotify;
   var overtimeRepeat = !!options.overtimeRepeat;
   var pinTrackedTask = !!options.pinTrackedTask;
+  var liveTracking = !!options.liveTracking;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
@@ -225,6 +226,18 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    seconds. Not available on original Pebble/Pebble Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="liveTracking" type="checkbox"' + (liveTracking ? ' checked' : '') + '>\n' +
+'    <label for="liveTracking">Show live tracking from other devices</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    While the watchapp is open, shows a "LIVE" row for whatever you\'re\n' +
+'    tracking on your desktop or phone, and lets you stop that timer from\n' +
+'    the watch. Updates only while the app is open - it is a glance, not a\n' +
+'    notification. SuperSync only. Not available on original Pebble/Pebble\n' +
+'    Steel (aplite).\n' +
+'  </p>\n' +
+'\n' +
 '  <label for="backlightMode">Backlight</label>\n' +
 '  <select id="backlightMode">\n' +
 backlightOptions + '\n' +
@@ -397,6 +410,7 @@ autoSyncIntervalOptions + '\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +
 '      pinTrackedTask: document.getElementById(\'pinTrackedTask\').checked,\n' +
+'      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +
 '  });\n' +

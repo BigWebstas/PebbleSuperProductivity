@@ -8,6 +8,7 @@ var supersync = require('./lib/supersync-client.js');
 var store = require('./lib/task-store.js');
 var pairingPage = require('./lib/pairing-page.js');
 var sha256lib = require('./lib/sha256.js');
+var presence = require('./lib/presence-client.js');
 
 // Keep in sync with the enums at the top of src/c/main.c.
 var MSG_TASK_SYNC_START = 1;
@@ -40,6 +41,13 @@ var MSG_PROJECT_NOTE_CHUNK = 23; // phone -> watch: PROJECT_ID + NOTE_CHUNK_TEXT
 var MSG_PROJECT_NOTE_SYNC_END = 24; // phone -> watch: PROJECT_ID
 var MSG_TASK_PLAN_TOMORROW = 25; // watch -> phone: TASK_ID (set the task's dueDay to tomorrow)
 var MSG_TASK_UNSCHEDULE = 26; // watch -> phone: TASK_ID (clear the task's scheduling)
+// Live tracking presence (SuperSync WebSocket, see lib/presence-client.js).
+// PRESENCE_STATE: 0 none, 1 tracking, 2 paused, 3 was-tracking (producer went
+// silent), 4 stopped (brief linger, mirrors the desktop chip). When != 0 the
+// message also carries PRESENCE_TASK_TITLE / PRESENCE_DEVICE / PRESENCE_ELAPSED_S
+// / PRESENCE_CAN_STOP. Both aplite-ignored (the watch has no case for them).
+var MSG_PRESENCE_UPDATE = 27; // phone -> watch: PRESENCE_* (0 = hide the LIVE UI)
+var MSG_PRESENCE_STOP = 28;   // watch -> phone: stop the session currently shown
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -1782,6 +1790,133 @@ function handleFinishDay() {
     });
 }
 
+// ---------------- live tracking presence ----------------
+
+// SuperSync live-tracking presence (super-productivity desktop v18.21.1).
+// Opt-in via config.liveTracking, SuperSync only. The watch shows a "LIVE"
+// row plus a detail window for whatever ANOTHER device is tracking, and can
+// stop it. Alive only while the watchapp is open - PebbleKit JS does not run
+// in the background, so this is a glance, not a notification. Transport and
+// the E2EE envelope codec live in lib/presence-client.js.
+var presenceClient = null;
+var presenceClientToken = null;
+var presenceLastSessionId = null;
+var presenceLastReceivedAt = 0;
+var presenceStaleTimer = null;
+
+// How often to re-check whether a shown "tracking" session has gone silent
+// (producer closed its app without a final "stopped").
+var PRESENCE_STALE_CHECK_MS = 20 * 1000;
+
+function stopPresenceStaleTimer() {
+  if (presenceStaleTimer) {
+    clearInterval(presenceStaleTimer);
+    presenceStaleTimer = null;
+  }
+}
+
+function sendPresenceClear() {
+  presenceLastSessionId = null;
+  stopPresenceStaleTimer();
+  sendWithRetry({ MSG_TYPE: MSG_PRESENCE_UPDATE, PRESENCE_STATE: 0 }, function () {}, function (e) {
+    console.log('[pkjs] giving up on PRESENCE_UPDATE(clear): ' + JSON.stringify(e));
+  });
+}
+
+// Pushes one decoded presence view to the watch. `stale` forces the
+// "was tracking" state regardless of what the producer last reported.
+function pushPresenceToWatch(view, stale) {
+  var state;
+  var title;
+  var device = '';
+  var canStop = 0;
+  var elapsedS = 0;
+
+  if (view.opaque) {
+    // Couldn't decode the payload (no matching Argon2 key cached yet, or a
+    // fail-closed plaintext envelope) - still surface it, just unnamed. Empty
+    // title lets the watch fall back to its generic "Live tracking" label.
+    state = 1;
+    title = '';
+  } else {
+    device = view.deviceLabel || '';
+    elapsedS = Math.max(0, Math.round((Date.now() - view.sinceTs) / 1000));
+    var t = loadState().task[view.taskId];
+    title = (t && t.title) ? String(t.title) : 'a recently started task';
+    if (stale) {
+      state = 3;
+    } else if (view.state === 'tracking') {
+      state = 1;
+      canStop = view.producerConnected ? 1 : 0;
+    } else if (view.reason === 'idle') {
+      state = 2;
+    } else {
+      // A plain "stopped" - mirror the desktop chip: keep it visible as
+      // "Stopped on X" for the linger window, then presence-client's own
+      // linger timer fires onCleared and we hide it. A re-start inside the
+      // window replaces it in place.
+      state = 4;
+    }
+  }
+
+  sendWithRetry({
+    MSG_TYPE: MSG_PRESENCE_UPDATE,
+    PRESENCE_STATE: state,
+    PRESENCE_TASK_TITLE: String(title).slice(0, 63),
+    PRESENCE_DEVICE: String(device).slice(0, 23),
+    PRESENCE_ELAPSED_S: Math.min(elapsedS, 2000000000),
+    PRESENCE_CAN_STOP: canStop,
+  }, function () {}, function (e) {
+    console.log('[pkjs] giving up on PRESENCE_UPDATE: ' + JSON.stringify(e));
+  });
+}
+
+function onPresenceState(view) {
+  presenceLastReceivedAt = Date.now();
+  presenceLastSessionId = view.opaque ? null : view.sessionId;
+  pushPresenceToWatch(view, false);
+
+  stopPresenceStaleTimer();
+  if (!view.opaque && view.state === 'tracking') {
+    presenceStaleTimer = setInterval(function () {
+      if (Date.now() - presenceLastReceivedAt > presence.STALE_AFTER_MS) {
+        pushPresenceToWatch(view, true);
+        stopPresenceStaleTimer();
+      }
+    }, PRESENCE_STALE_CHECK_MS);
+  }
+}
+
+// (Re)applies config.liveTracking: opens the presence WebSocket when the
+// feature is on and the account is paired, tears it down (and hides the watch
+// UI) otherwise or when the token changed. Called from 'ready' and after every
+// settings save, same as scheduleAutoSync().
+function applyPresence(config) {
+  var wantsPresence = !!(config && config.liveTracking && config.jwt);
+  var token = config && config.jwt;
+  if (presenceClient && (!wantsPresence || presenceClientToken !== token)) {
+    presenceClient.disconnect();
+    presenceClient = null;
+  }
+  if (!wantsPresence) {
+    sendPresenceClear();
+    return;
+  }
+  if (!presenceClient) {
+    presenceClientToken = token;
+    presenceClient = new presence.PresenceClient({
+      baseUrl: config.baseUrl || supersync.DEFAULT_BASE_URL,
+      token: token,
+      clientId: getOrCreateClientId(),
+      getCrypto: getCrypto,
+      log: function (m) { console.log('[presence] ' + m); },
+    });
+    presenceClient.onState(onPresenceState);
+    presenceClient.onCleared(sendPresenceClear);
+  }
+  presenceClient.connect();
+}
+
 // ---------------- Pebble event wiring ----------------
 
 Pebble.addEventListener('ready', function () {
@@ -1799,6 +1934,7 @@ Pebble.addEventListener('ready', function () {
     doSync();
   }
   scheduleAutoSync(config);
+  applyPresence(config);
 });
 
 Pebble.addEventListener('appmessage', function (e) {
@@ -1827,6 +1963,11 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_UNSCHEDULE:
       handleTaskReschedule(payload.TASK_ID, false);
+      break;
+    case MSG_PRESENCE_STOP:
+      if (presenceClient && presenceLastSessionId) {
+        presenceClient.requestStop(presenceLastSessionId);
+      }
       break;
     case MSG_FINISH_DAY:
       handleFinishDay();
@@ -1890,6 +2031,7 @@ Pebble.addEventListener('showConfiguration', function () {
       overtimeNotify: !!config.overtimeNotify,
       overtimeRepeat: !!config.overtimeRepeat,
       pinTrackedTask: !!config.pinTrackedTask,
+      liveTracking: !!config.liveTracking,
     }
   );
   Pebble.openURL(url);
@@ -1962,6 +2104,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     overtimeNotify: !!result.overtimeNotify,
     overtimeRepeat: !!result.overtimeRepeat,
     pinTrackedTask: !!result.pinTrackedTask,
+    liveTracking: !!result.liveTracking,
   };
   saveConfig(newConfig);
   scheduleAutoSync(newConfig);
@@ -1994,6 +2137,9 @@ Pebble.addEventListener('webviewclosed', function (e) {
     // forced full resync fast.
     clearKdfCache();
   }
+
+  // After the crypto caches settle above - a token change rebuilds the client.
+  applyPresence(newConfig);
 
   doSync();
 });
