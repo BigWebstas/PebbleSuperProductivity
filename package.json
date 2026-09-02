@@ -65,6 +65,16 @@
           "type": "png",
           "name": "IMAGE_MICROPHONE_WHITE",
           "file": "images/icon-mic-white.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_PROJECT_WHITE",
+          "file": "images/icon-project-white.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_PROJECT",
+          "file": "images/icon-project.png"
         }
       ]
     },
@@ -100,7 +110,14 @@
       "NOTE_TOTAL_LEN",
       "NOTE_CHUNK_TEXT",
       "TASK_PROJECT_ID",
+      "TASK_PROJECT_COLOR",
       "PROJECT_ID",
+      "PROJECT_INDEX",
+      "PROJECT_TITLE",
+      "PROJECT_COLOR",
+      "PROJECT_TOTAL",
+      "PROJECT_TASK_BACKLOG",
+      "PROJECTS_ENABLED",
       "TASK_TAGS",
       "TOUCH_NAV_ENABLED",
       "OVERTIME_NOTIFY_ENABLED",

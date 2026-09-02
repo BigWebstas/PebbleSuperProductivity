@@ -51,6 +51,19 @@ var MSG_PRESENCE_STOP = 28;   // watch -> phone: stop the session currently show
 // Phase 2 - the watch broadcasts its OWN time-tracking as presence ("Pebble").
 var MSG_TRACK_TIME_START = 29;    // watch -> phone: TASK_ID + TRACKED_MS (elapsed so far, 0 on a fresh start)
 var MSG_PRESENCE_STOP_LOCAL = 30; // phone -> watch: a remote device stopped the watch's timer, stop it here
+// Projects browser (config.enableProjects, non-aplite on the watch). The
+// watch asks for the project list, then for one project's tasks; both
+// replies are START / ITEM* / END sequences, same retrying send pattern as
+// the task/habit lists. Project-task ITEMs reuse the TASK_* keys plus
+// PROJECT_TASK_BACKLOG (0 = regular list, 1 = that project's backlog).
+var MSG_PROJECT_LIST_REQUEST = 31;  // watch -> phone: (no keys)
+var MSG_PROJECT_LIST_START = 32;    // phone -> watch: PROJECT_TOTAL
+var MSG_PROJECT_LIST_ITEM = 33;     // phone -> watch: PROJECT_INDEX, PROJECT_ID, PROJECT_TITLE, PROJECT_COLOR
+var MSG_PROJECT_LIST_END = 34;      // phone -> watch: (no keys)
+var MSG_PROJECT_TASKS_REQUEST = 35; // watch -> phone: PROJECT_ID
+var MSG_PROJECT_TASKS_START = 36;   // phone -> watch: PROJECT_ID, TASK_TOTAL
+var MSG_PROJECT_TASKS_ITEM = 37;    // phone -> watch: PROJECT_ID, TASK_INDEX, TASK_*, PROJECT_TASK_BACKLOG
+var MSG_PROJECT_TASKS_END = 38;     // phone -> watch: PROJECT_ID
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -332,6 +345,10 @@ function sendStatus(code, message) {
     // webviewclosed triggers right after every settings save).
     HABITS_ENABLED: config.enableHabits !== false ? 1 : 0,
     ADD_TASK_ENABLED: config.enableAddTask !== false ? 1 : 0,
+    // Projects browser row (default on, like Habits). Drives main.c's
+    // s_projects_enabled / SECTION0_ROW_PROJECTS. Always included, same
+    // next-sync-cycle self-correction reasoning as the two flags above.
+    PROJECTS_ENABLED: config.enableProjects !== false ? 1 : 0,
     // 0 = system default, -1 = always on, N>0 = relight-and-hold for N
     // seconds after any button press - see main.c's own s_backlight_mode
     // comment. Always included (not conditionally), same reasoning as the
@@ -425,23 +442,34 @@ function sendTaskListToWatch(tasks) {
   });
 }
 
-function sendTaskAt(tasks, index) {
-  if (index >= tasks.length) {
-    sendWithRetry({ MSG_TYPE: MSG_TASK_SYNC_END }, function () {}, function (e) {
-      console.log('[pkjs] giving up on TASK_SYNC_END after retries: ' + JSON.stringify(e));
-      sendStatus(STATUS_ERROR, 'task sync interrupted, will retry');
-    });
-    return;
-  }
-  var t = tasks[index];
-  var dict = {
-    MSG_TYPE: MSG_TASK_ITEM,
-    TASK_INDEX: index,
-    TASK_ID: String(t.id),
-    TASK_TITLE: String(t.title).slice(0, 63),
-    TASK_DONE: t.isDone ? 1 : 0,
-    TASK_PROJECT: String(t.project || '').slice(0, 31),
-  };
+// The task list the watch renders, built from this app's config. Every
+// call site that pushes the list to the watch goes through here so the
+// currently-tracked task (presenceBroadcasting.taskId - what the watch last
+// told us via handleTrackStart) is force-included even when todayOnly or
+// the backlog would drop it: a task tracked from the Projects browser still
+// has to show in the watch's pinned "TRACKING" section, which reads exactly
+// this list (main.c's pinned_task_index).
+function watchTaskList(state, config) {
+  var trackedId = (presenceBroadcasting && presenceBroadcasting.taskId) || null;
+  return store.getActiveTasks(
+    state,
+    MAX_TASKS,
+    !!config.groupByProject,
+    !!config.todayOnly,
+    !!config.hideDoneTasks,
+    trackedId
+  );
+}
+
+// Fills the shared TASK_* fields (id, title, done, project name/id, tags,
+// due time, spent/estimate) onto `dict` from a task-store row. Used by both
+// the today-list send (sendTaskAt) and the Projects browser's per-project
+// task send (sendProjectTaskAt) so the two stay identical field-for-field.
+function fillTaskFields(dict, t) {
+  dict.TASK_ID = String(t.id);
+  dict.TASK_TITLE = String(t.title).slice(0, 63);
+  dict.TASK_DONE = t.isDone ? 1 : 0;
+  dict.TASK_PROJECT = String(t.project || '').slice(0, 31);
   if (t.projectId) {
     // Lets the watch's project row (when grouping is on - see
     // getActiveTasks' own groupProjectIds) ask for THIS project's notes
@@ -451,6 +479,11 @@ function sendTaskAt(tasks, index) {
     // pushTaskAndSubtasks), same "absent means nothing to show" convention
     // as TASK_DUE_MIN/TASK_TIME_SPENT_MS below.
     dict.TASK_PROJECT_ID = String(t.projectId).slice(0, 31);
+  }
+  if (t.projectColor) {
+    // Packed GColor8 byte (task-store's projectColorRgb) - the grouped today
+    // view draws it as a swatch on the project row, same as the browser list.
+    dict.TASK_PROJECT_COLOR = t.projectColor;
   }
   if (t.tags) {
     // Comma-joined tag names (see task-store.js's tagTitlesFor) for the
@@ -478,6 +511,19 @@ function sendTaskAt(tasks, index) {
   if (t.timeEstimate) {
     dict.TASK_TIME_ESTIMATE_MS = Math.min(t.timeEstimate, 2000000000);
   }
+}
+
+function sendTaskAt(tasks, index) {
+  if (index >= tasks.length) {
+    sendWithRetry({ MSG_TYPE: MSG_TASK_SYNC_END }, function () {}, function (e) {
+      console.log('[pkjs] giving up on TASK_SYNC_END after retries: ' + JSON.stringify(e));
+      sendStatus(STATUS_ERROR, 'task sync interrupted, will retry');
+    });
+    return;
+  }
+  var t = tasks[index];
+  var dict = { MSG_TYPE: MSG_TASK_ITEM, TASK_INDEX: index };
+  fillTaskFields(dict, t);
   // No TASK_NOTES here - the watch fetches a task's full notes on demand
   // (MSG_NOTE_REQUEST, see sendFullNotesForTask below) only for whichever
   // one task's overlay is currently open, rather than every row in every
@@ -532,6 +578,108 @@ function sendHabitAt(habits, index) {
   });
 }
 
+// ---------------- projects browser ----------------
+
+// Answers MSG_PROJECT_LIST_REQUEST: sends the project list as
+// START(PROJECT_TOTAL) / ITEM* / END, same retrying, abort-on-give-up shape
+// as the task/habit list sends. Read-only - no server call, just the
+// replayed op-log state the phone already holds. A give-up leaves the watch
+// showing whatever it had; the watch can re-request on the next open.
+function handleProjectListRequest() {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (config.enableProjects === false) {
+    return;
+  }
+  var projects = store.getProjectList(loadState());
+  sendWithRetry({ MSG_TYPE: MSG_PROJECT_LIST_START, PROJECT_TOTAL: projects.length }, function () {
+    sendProjectListAt(projects, 0);
+  }, function (e) {
+    console.log('[pkjs] giving up on PROJECT_LIST_START after retries: ' + JSON.stringify(e));
+  });
+}
+
+function sendProjectListAt(projects, index) {
+  if (index >= projects.length) {
+    sendWithRetry({ MSG_TYPE: MSG_PROJECT_LIST_END }, function () {}, function (e) {
+      console.log('[pkjs] giving up on PROJECT_LIST_END after retries: ' + JSON.stringify(e));
+    });
+    return;
+  }
+  var p = projects[index];
+  var dict = {
+    MSG_TYPE: MSG_PROJECT_LIST_ITEM,
+    PROJECT_INDEX: index,
+    PROJECT_ID: String(p.id).slice(0, 31),
+    PROJECT_TITLE: String(p.title).slice(0, 63),
+  };
+  if (p.color) {
+    // Packed Pebble GColor8 byte (see projectColorRgb); the watch assigns it
+    // straight to the swatch fill. Omitted when 0 = no theme colour.
+    dict.PROJECT_COLOR = p.color;
+  }
+  sendWithRetry(dict, function () {
+    sendProjectListAt(projects, index + 1);
+  }, function (e) {
+    console.log('[pkjs] giving up on PROJECT_LIST_ITEM ' + index + ', aborting: ' + JSON.stringify(e));
+  });
+}
+
+// Answers MSG_PROJECT_TASKS_REQUEST for one project: its regular list then
+// its backlog, concatenated, as START(PROJECT_ID, TASK_TOTAL) / ITEM* /
+// END(PROJECT_ID). Each ITEM carries PROJECT_TASK_BACKLOG so the watch can
+// draw the backlog as its own divided section. PROJECT_ID rides every
+// message so a reply the watch has already navigated away from is easy to
+// ignore. Each list is capped at MAX_TASKS (matching the watch's buffer).
+function handleProjectTasksRequest(projectId) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (config.enableProjects === false) {
+    return;
+  }
+  if (projectId === undefined || projectId === null) {
+    return;
+  }
+  var pid = String(projectId);
+  var split = store.getProjectTasks(loadState(), pid, MAX_TASKS, !!config.hideDoneTasks);
+  var rows = split.regular.map(function (t) { return { t: t, backlog: 0 }; })
+    .concat(split.backlog.map(function (t) { return { t: t, backlog: 1 }; }));
+  var idField = pid.slice(0, 31);
+  sendWithRetry({ MSG_TYPE: MSG_PROJECT_TASKS_START, PROJECT_ID: idField, TASK_TOTAL: rows.length }, function () {
+    sendProjectTaskAt(idField, rows, 0);
+  }, function (e) {
+    console.log('[pkjs] giving up on PROJECT_TASKS_START after retries: ' + JSON.stringify(e));
+  });
+}
+
+function sendProjectTaskAt(idField, rows, index) {
+  if (index >= rows.length) {
+    sendWithRetry({ MSG_TYPE: MSG_PROJECT_TASKS_END, PROJECT_ID: idField }, function () {}, function (e) {
+      console.log('[pkjs] giving up on PROJECT_TASKS_END after retries: ' + JSON.stringify(e));
+    });
+    return;
+  }
+  var row = rows[index];
+  var dict = {
+    MSG_TYPE: MSG_PROJECT_TASKS_ITEM,
+    PROJECT_ID: idField,
+    TASK_INDEX: index,
+    PROJECT_TASK_BACKLOG: row.backlog,
+  };
+  fillTaskFields(dict, row.t);
+  sendWithRetry(dict, function () {
+    sendProjectTaskAt(idField, rows, index + 1);
+  }, function (e) {
+    console.log('[pkjs] giving up on PROJECT_TASKS_ITEM ' + index + ', aborting: ' + JSON.stringify(e));
+  });
+}
+
 // ---------------- sync engine ----------------
 
 var syncInFlight = false;
@@ -564,7 +712,7 @@ function scheduleAutoSync(config) {
 // out of sync with each other on what "push the current state" means.
 function pushCachedStateToWatch(config) {
   var state = loadState();
-  var tasks = store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks);
+  var tasks = watchTaskList(state, config);
   sendTaskListToWatch(tasks);
   if (config.enableHabits !== false) {
     var habits = store.getActiveHabits(state, MAX_HABITS);
@@ -839,7 +987,7 @@ function scheduleHideDoneSweep(config) {
     if (!config2 || !config2.hideDoneTasks) {
       return; // Setting was turned off while this sweep was pending.
     }
-    var tasks = store.getActiveTasks(loadState(), MAX_TASKS, !!config2.groupByProject, !!config2.todayOnly, true);
+    var tasks = watchTaskList(loadState(), Object.assign({}, config2, { hideDoneTasks: true }));
     sendTaskListToWatch(tasks);
   }, store.HIDE_DONE_GRACE_MS + 100);
 }
@@ -972,7 +1120,7 @@ function handleTaskToggle(taskId, done) {
     // since the watch has no idea a second, different row just changed).
     // Pushed while still well within the grace window, so hideDoneTasks
     // doesn't exclude it from this particular push either.
-    sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
+    sendTaskListToWatch(watchTaskList(state, config));
   }
 
   var uploads = [uploadSingleOp(op, config, clientId)];
@@ -1032,7 +1180,7 @@ function handleTaskReschedule(taskId, toTomorrow) {
 
   // The task usually drops out of a Today-only view now - push the fresh list
   // right away rather than waiting for the follow-up sync (same as archive).
-  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
+  sendTaskListToWatch(watchTaskList(state, config));
 
   var failureMsg = null;
   uploadSingleOp(op, config, clientId)
@@ -1058,6 +1206,18 @@ function handleTrackStart(taskId, elapsedMs) {
   presenceBroadcasting = { taskId: String(taskId), sinceTs: Date.now() - (elapsedMs || 0) };
   if (presenceClient) {
     presenceClient.broadcastTracking(presenceBroadcasting.taskId, presenceBroadcasting.sinceTs);
+  }
+  // Re-push the task list so the now-tracked task is force-included in it
+  // (watchTaskList). Without this a task tracked from the Projects browser
+  // that isn't on today's list never reaches the watch's s_tasks, so its
+  // pinned "TRACKING" section stays empty while the watch still believes it
+  // is tracking - which pushes a remote presence session onto the old
+  // dark-blue LIVE row instead of the pinned section. The watch can't do this
+  // itself: start_tracking already sends MSG_TRACK_TIME_START, and a second
+  // back-to-back send (a sync request) collides on its single outbox slot.
+  var config = loadConfig();
+  if (config && config.jwt) {
+    sendTaskListToWatch(watchTaskList(loadState(), config));
   }
 }
 
@@ -1367,7 +1527,7 @@ function handleAddTask(title) {
   // never seen on its own - push the updated list right away rather than
   // waiting for uploadSingleOp/runAutoSyncAfterOp's follow-up sync to
   // eventually get around to it.
-  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
+  sendTaskListToWatch(watchTaskList(state, config));
 
   var crypto = getCrypto();
   var clientId = getOrCreateClientId();
@@ -1773,7 +1933,7 @@ function handleFinishDay() {
   // Unlike toggle/habit-adjust, archived tasks vanish from the list rather
   // than just changing in place - push the updated list right away rather
   // than waiting for uploadSingleOp/runAutoSyncAfterOp's follow-up sync.
-  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
+  sendTaskListToWatch(watchTaskList(state, config));
 
   var crypto = getCrypto();
   // entityChanges required for the same isMultiEntityPayload() unwrap
@@ -2045,6 +2205,12 @@ Pebble.addEventListener('appmessage', function (e) {
     case MSG_PROJECT_NOTE_REQUEST:
       handleProjectNoteRequest(payload.PROJECT_ID);
       break;
+    case MSG_PROJECT_LIST_REQUEST:
+      handleProjectListRequest();
+      break;
+    case MSG_PROJECT_TASKS_REQUEST:
+      handleProjectTasksRequest(payload.PROJECT_ID);
+      break;
     default:
       break;
   }
@@ -2087,6 +2253,7 @@ Pebble.addEventListener('showConfiguration', function () {
       projects: projects,
       enableHabits: config.enableHabits !== false,
       enableAddTask: config.enableAddTask !== false,
+      enableProjects: config.enableProjects !== false,
       backlightMode: config.backlightMode || 0,
       touchNav: !!config.touchNav,
       overtimeNotify: !!config.overtimeNotify,
@@ -2158,6 +2325,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     defaultTaskEstimateMin: parseInt(result.defaultTaskEstimateMin, 10) || 0,
     enableHabits: !!result.enableHabits,
     enableAddTask: !!result.enableAddTask,
+    enableProjects: !!result.enableProjects,
     autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,

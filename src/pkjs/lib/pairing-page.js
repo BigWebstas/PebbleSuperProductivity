@@ -29,6 +29,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var projects = options.projects || [];
   var enableHabits = options.enableHabits !== false;
   var enableAddTask = options.enableAddTask !== false;
+  var enableProjects = options.enableProjects !== false;
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
   var overtimeRepeat = !!options.overtimeRepeat;
@@ -278,6 +279,15 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableProjects" type="checkbox"' + (enableProjects ? ' checked' : '') + '>\n' +
+'    <label for="enableProjects">Enable Projects</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Shows a Projects row on the watch. Open it to browse every project and\n' +
+'    the tasks (and backlog) inside each one, not just today\'s list.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableAddTask" type="checkbox"' + (enableAddTask ? ' checked' : '') + '>\n' +
 '    <label for="enableAddTask">Enable Add Task (voice)</label>\n' +
 '  </div>\n' +
@@ -400,6 +410,7 @@ autoSyncIntervalOptions + '\n' +
 '      defaultTaskEstimateMin: parseInt(document.getElementById(\'defaultTaskEstimateMin\').value, 10) || 0,\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
+'      enableProjects: document.getElementById(\'enableProjects\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +

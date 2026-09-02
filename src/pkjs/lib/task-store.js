@@ -873,6 +873,101 @@ function titleCompare(a, b) {
   return at < bt ? -1 : at > bt ? 1 : 0;
 }
 
+// Sort order within one visual group: not-done before done, then by title.
+// Module-level (not nested in getActiveTasks) so getProjectTasks can reuse
+// the exact same ordering for a project browser's regular / backlog lists.
+function withinGroupSort(a, b) {
+  if (!!a.isDone !== !!b.isDone) {
+    return a.isDone ? 1 : -1;
+  }
+  return titleCompare(a.title, b.title);
+}
+
+// Sentinel project id for the synthetic "No Project" entry getProjectList
+// emits when project-less active tasks exist - getProjectTasks maps it back
+// to "tasks with no projectId". A real project id is a plain nanoid(), so
+// this can't collide.
+var NO_PROJECT_ID = '__NO_PROJECT__';
+
+// Every non-archived project, plus a synthetic "No Project" entry when
+// there are project-less active main tasks to reach through it. Sorted by
+// title. Shape: [{ id, title, color }] where color is 0xRRGGBB parsed from the
+// project's theme colour (0 if none). Feeds the watch's Projects browser (a
+// pinned row -> project list -> that project's tasks), which - unlike the
+// today list - is not date-filtered.
+function projectColorRgb(p) {
+  // super-productivity Project.theme.primary is a "#rrggbb" string
+  // (WorkContextThemeCfg); older data used a flat themeColor. We quantise it
+  // to Pebble's packed GColor8 byte here (2 bits per channel + opaque alpha)
+  // so the watch just assigns it - no colour maths in the draw path, which
+  // matters for emery's tight code budget. 0 = no colour -> no swatch.
+  var hex = (p.theme && p.theme.primary) || p.themeColor || '';
+  var m = /^#?([0-9a-fA-F]{6})$/.exec(String(hex).trim());
+  if (!m) {
+    return 0;
+  }
+  var n = parseInt(m[1], 16);
+  var r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  return 0xc0 | ((r >> 6) << 4) | ((g >> 6) << 2) | (b >> 6); // GColor8.argb, always non-zero (alpha bits set)
+}
+
+function getProjectList(state) {
+  var projects = state.project || {};
+  var allTasks = state.task || {};
+  var out = Object.keys(projects)
+    .map(function (id) { return projects[id]; })
+    .filter(function (p) { return p && p.id && p.title && !p.isArchived; })
+    .map(function (p) { return { id: p.id, title: p.title, color: projectColorRgb(p) }; });
+  out.sort(function (a, b) { return titleCompare(a.title, b.title); });
+  var hasNoProject = Object.keys(allTasks).some(function (id) {
+    var t = allTasks[id];
+    return t && t.title && isMainTask(t) && !t.projectId && !t.isDone;
+  });
+  if (hasNoProject) {
+    out.push({ id: NO_PROJECT_ID, title: 'No Project', color: 0 });
+  }
+  return out;
+}
+
+// One project's whole active task list, split into its regular list and its
+// backlog - { regular: [rows], backlog: [rows] }, each row the same shape
+// getActiveTasks produces (id, title, isDone, project, projectId, tags,
+// dueWithTime, timeSpent, timeEstimate) with subtasks nested under their
+// parent the same way. projectId === NO_PROJECT_ID (or falsy) selects tasks
+// with no project. No date filter - a project browser shows everything, not
+// just today. Done tasks still obey hideDone's grace period. Each list is
+// capped at `limit` rows.
+function getProjectTasks(state, projectId, limit, hideDone) {
+  var allTasks = state.task || {};
+  var wantNoProject = !projectId || projectId === NO_PROJECT_ID;
+  var projName = wantNoProject
+    ? 'No Project'
+    : ((state.project && state.project[projectId] && state.project[projectId].title) || 'No Project');
+  var pid = wantNoProject ? '' : projectId;
+  var mains = Object.keys(allTasks)
+    .map(function (id) { return allTasks[id]; })
+    .filter(function (t) { return t && t.title && isMainTask(t); })
+    .filter(function (t) { return !isHiddenDone(t, hideDone); })
+    .filter(function (t) {
+      return wantNoProject ? !t.projectId : t.projectId === projectId;
+    });
+  var regularMains = mains
+    .filter(function (t) { return !t.__inBacklog; })
+    .sort(withinGroupSort);
+  var backlogMains = mains
+    .filter(function (t) { return t.__inBacklog; })
+    .sort(withinGroupSort);
+  var regular = [];
+  var backlog = [];
+  regularMains.forEach(function (t) {
+    pushTaskAndSubtasks(regular, state, allTasks, t, projName, pid, 0, hideDone);
+  });
+  backlogMains.forEach(function (t) {
+    pushTaskAndSubtasks(backlog, state, allTasks, t, projName, pid, 0, hideDone);
+  });
+  return { regular: regular.slice(0, limit), backlog: backlog.slice(0, limit) };
+}
+
 // Returns up to `limit` rows: main tasks that are not sitting in a
 // project's backlog (see the top-of-file comment - no date filtering),
 // each immediately followed by its own subtasks (indented), regardless of
@@ -944,7 +1039,15 @@ function isHiddenDone(t, hideDone) {
 // deadlineDay/deadlineWithTime or explicit tag assignment - not a full
 // port, just enough to match what the desktop's Today page actually shows
 // for the common case.
-function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
+// alwaysIncludeId, when given, names one task that must appear in the result
+// even if todayOnly / the backlog filter would drop it - the watch's
+// currently-tracked task, which may have been started from the Projects
+// browser and so be neither planned for today nor in the regular list. The
+// watch needs it here to render its pinned "TRACKING" row (main.c's
+// pinned_task_index scans exactly this list). A tracked SUBTASK pulls in its
+// parent instead, so it still nests (same reason todayOnly pulls in a parent
+// for a today-due subtask).
+function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alwaysIncludeId) {
   var allTasks = state.task || {};
   var today = todayStr();
   var mainTasks = Object.keys(allTasks)
@@ -998,11 +1101,15 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
       });
     });
 
-  function withinGroupSort(a, b) {
-    if (!!a.isDone !== !!b.isDone) {
-      return a.isDone ? 1 : -1;
+  if (alwaysIncludeId && !mainTasks.some(function (t) { return t.id === alwaysIncludeId; })) {
+    var forced = allTasks[alwaysIncludeId];
+    if (forced && forced.parentId) {
+      forced = allTasks[forced.parentId];
     }
-    return titleCompare(a.title, b.title);
+    if (forced && forced.title && isMainTask(forced) && !isHiddenDone(forced, hideDone) &&
+        !mainTasks.some(function (t) { return t.id === forced.id; })) {
+      mainTasks.push(forced);
+    }
   }
 
   var rows = [];
@@ -1017,24 +1124,26 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
     // means the merged group's notes button points at whichever of them was
     // seen first, same negligible edge case.
     var groupProjectIds = {};
+    var groupColors = {};
     mainTasks.forEach(function (t) {
       var name = projectTitleFor(state, t);
       if (!byProject[name]) {
         byProject[name] = [];
         groupProjectIds[name] = t.projectId || '';
+        groupColors[name] = t.projectId ? projectColorRgb((state.project && state.project[t.projectId]) || {}) : 0;
       }
       byProject[name].push(t);
     });
     Object.keys(byProject).sort(titleCompare).forEach(function (name) {
       byProject[name].sort(withinGroupSort);
       byProject[name].forEach(function (t) {
-        pushTaskAndSubtasks(rows, state, allTasks, t, name, groupProjectIds[name], hideDone);
+        pushTaskAndSubtasks(rows, state, allTasks, t, name, groupProjectIds[name], groupColors[name], hideDone);
       });
     });
   } else {
     mainTasks.sort(withinGroupSort);
     mainTasks.forEach(function (t) {
-      pushTaskAndSubtasks(rows, state, allTasks, t, '', '', hideDone);
+      pushTaskAndSubtasks(rows, state, allTasks, t, '', '', 0, hideDone);
     });
   }
 
@@ -1055,7 +1164,7 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
 // (~) for exactly that reason, before this was re-tested more thoroughly.
 var SUBTASK_PREFIX = '    » ';
 
-function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId, hideDone) {
+function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId, groupColor, hideDone) {
   // t is already guaranteed a real title here - getActiveTasks filters
   // ghost (title-less) records out of mainTasks before this is ever
   // called (hideDone's own done-main-task filtering happens there too, for
@@ -1078,11 +1187,11 @@ function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId
   // already fully available locally once TAG entities have replayed, so
   // there's no fetch round-trip worth avoiding the way there is for a
   // task's full notes text.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
     }
   });
 }
@@ -1144,6 +1253,9 @@ module.exports = {
   applyOperations: applyOperations,
   getActiveTasks: getActiveTasks,
   getActiveHabits: getActiveHabits,
+  getProjectList: getProjectList,
+  getProjectTasks: getProjectTasks,
+  NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,
   dateToDateStr: dateToDateStr,
   HIDE_DONE_GRACE_MS: HIDE_DONE_GRACE_MS,

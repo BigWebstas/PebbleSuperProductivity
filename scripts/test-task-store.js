@@ -1400,6 +1400,204 @@ check('getActiveTasks skips a tag id with no matching TAG entity', () => {
   assert.strictEqual(tasks.find((t) => t.id === 't1').tags, 'urgent');
 });
 
+// ---- getProjectList / getProjectTasks (the Projects browser) ----
+
+check('getProjectList returns non-archived projects sorted by title, with theme colour', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work', theme: { primary: '#2196F3' } } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p2', title: 'Groceries', themeColor: '4caf50' } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p3', title: 'Old', isArchived: true } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p4', title: 'Zeta' } }),
+    ],
+    state
+  );
+  // color is the packed Pebble GColor8 byte (0xC0 | rr gg bb, 2 bits each)
+  assert.deepStrictEqual(store.getProjectList(state), [
+    { id: 'p2', title: 'Groceries', color: 0xd9 }, // #4caf50
+    { id: 'p1', title: 'Work', color: 0xcb },      // #2196f3
+    { id: 'p4', title: 'Zeta', color: 0 },          // no theme -> 0, no swatch
+  ]);
+});
+
+check('getProjectList appends a synthetic "No Project" entry only when project-less active tasks exist', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      addTask({ id: 'a', title: 'In a project', projectId: 'p1' }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(store.getProjectList(state).map((p) => p.id), ['p1']);
+
+  store.applyOperations([addTask({ id: 'b', title: 'Loose task' })], state);
+  const withNoProject = store.getProjectList(state);
+  assert.deepStrictEqual(withNoProject.map((p) => p.id), ['p1', store.NO_PROJECT_ID]);
+  assert.strictEqual(withNoProject[withNoProject.length - 1].title, 'No Project');
+});
+
+check('getProjectList ignores a done-only project-less task for the "No Project" entry', () => {
+  const state = store.emptyState();
+  store.applyOperations([addTask({ id: 'a', title: 'Done loose task', isDone: true })], state);
+  assert.deepStrictEqual(store.getProjectList(state), []);
+});
+
+check('getProjectTasks splits a project into its regular list and its backlog', () => {
+  const state = store.emptyState();
+  const importEntry = {
+    serverSeq: 1,
+    op: {
+      opType: 'SYNC_IMPORT',
+      entityType: 'ALL',
+      payload: {
+        task: {
+          ids: ['a', 'b', 'c'],
+          entities: {
+            a: { id: 'a', title: 'Active one', isDone: false, projectId: 'p1' },
+            b: { id: 'b', title: 'Backlog one', isDone: false, projectId: 'p1' },
+            c: { id: 'c', title: 'Active two', isDone: false, projectId: 'p1' },
+          },
+        },
+        project: {
+          ids: ['p1'],
+          entities: { p1: { id: 'p1', title: 'Work', taskIds: ['a', 'c'], backlogTaskIds: ['b'] } },
+        },
+      },
+    },
+    receivedAt: 1,
+  };
+  store.applyOperations([importEntry], state);
+  const split = store.getProjectTasks(state, 'p1', 30, false);
+  assert.deepStrictEqual(split.regular.map((t) => t.id), ['a', 'c']);
+  assert.deepStrictEqual(split.backlog.map((t) => t.id), ['b']);
+  assert(split.regular.every((t) => t.project === 'Work'));
+  assert(split.regular.every((t) => t.projectId === 'p1'));
+});
+
+check('getProjectTasks is not date-filtered - it lists undated tasks the today view hides', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      addTask({ id: 'a', title: 'Someday task', isDone: false, projectId: 'p1' }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(active(state, 30, false, true).map((t) => t.id), []); // todayOnly hides an undated task
+  assert.deepStrictEqual(store.getProjectTasks(state, 'p1', 30, false).regular.map((t) => t.id), ['a']);
+});
+
+check('getProjectTasks(NO_PROJECT_ID) selects tasks with no projectId and nests their subtasks', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      addTask({ id: 'loose', title: 'Loose parent', isDone: false, subTaskIds: ['s1'] }),
+      addTask({ id: 's1', title: 'Loose sub', isDone: false, parentId: 'loose' }),
+      addTask({ id: 'owned', title: 'Owned', isDone: false, projectId: 'p1' }),
+    ],
+    state
+  );
+  const split = store.getProjectTasks(state, store.NO_PROJECT_ID, 30, false);
+  assert.strictEqual(split.regular.length, 2);
+  assert.strictEqual(split.regular[0].id, 'loose');
+  assert(/Loose sub$/.test(split.regular[1].title)); // nested with the subtask prefix
+  assert.strictEqual(split.regular[0].project, 'No Project');
+  assert.strictEqual(split.regular[0].projectId, undefined);
+});
+
+check('getProjectTasks orders each list not-done-first then by title, and respects hideDone', () => {
+  const state = store.emptyState();
+  const longAgo = Date.now() - store.HIDE_DONE_GRACE_MS - 1000;
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      addTask({ id: 'z', title: 'Zebra', isDone: false, projectId: 'p1' }),
+      addTask({ id: 'a', title: 'Apple', isDone: false, projectId: 'p1' }),
+      addTask({ id: 'd', title: 'Done long ago', isDone: true, doneOn: longAgo, projectId: 'p1' }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(
+    store.getProjectTasks(state, 'p1', 30, false).regular.map((t) => t.id),
+    ['a', 'z', 'd']
+  );
+  assert.deepStrictEqual(
+    store.getProjectTasks(state, 'p1', 30, true).regular.map((t) => t.id),
+    ['a', 'z']
+  );
+});
+
+check('getActiveTasks(alwaysIncludeId) force-includes a tracked task the today filter would drop', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      addTask({ id: 'today1', title: 'Due today', isDone: false, projectId: 'p1', dueWithTime: Date.now() }),
+      addTask({ id: 'someday', title: 'No date', isDone: false, projectId: 'p1' }),
+    ],
+    state
+  );
+  // todayOnly hides 'someday'...
+  assert.deepStrictEqual(
+    store.getActiveTasks(state, 30, false, true, false).map((t) => t.id),
+    ['today1']
+  );
+  // ...unless it's the force-included (tracked) task.
+  assert.deepStrictEqual(
+    store.getActiveTasks(state, 30, false, true, false, 'someday').map((t) => t.id).sort(),
+    ['someday', 'today1']
+  );
+});
+
+check('getActiveTasks(alwaysIncludeId) force-includes a backlog task, and pulls in a tracked subtask\'s parent', () => {
+  const state = store.emptyState();
+  const importEntry = {
+    serverSeq: 1,
+    op: {
+      opType: 'SYNC_IMPORT',
+      entityType: 'ALL',
+      payload: {
+        task: {
+          ids: ['b', 'p', 's'],
+          entities: {
+            b: { id: 'b', title: 'Backlogged', isDone: false, projectId: 'p1' },
+            p: { id: 'p', title: 'Parent', isDone: false, projectId: 'p1', subTaskIds: ['s'] },
+            s: { id: 's', title: 'Sub', isDone: false, parentId: 'p' },
+          },
+        },
+        project: {
+          ids: ['p1'],
+          entities: { p1: { id: 'p1', title: 'Work', taskIds: ['p'], backlogTaskIds: ['b'] } },
+        },
+      },
+    },
+    receivedAt: 1,
+  };
+  store.applyOperations([importEntry], state);
+  // Not todayOnly: backlog 'b' is excluded by default...
+  assert.deepStrictEqual(store.getActiveTasks(state, 30, false, false, false).map((t) => t.id), ['p', 's']);
+  // ...force-included when tracked.
+  assert.deepStrictEqual(
+    store.getActiveTasks(state, 30, false, false, false, 'b').map((t) => t.id).sort(),
+    ['b', 'p', 's']
+  );
+  // Tracking the subtask 's' keeps the list unchanged (parent 'p' already in).
+  assert.deepStrictEqual(store.getActiveTasks(state, 30, false, false, false, 's').map((t) => t.id), ['p', 's']);
+});
+
+check('getProjectTasks caps each list at the given limit', () => {
+  const state = store.emptyState();
+  const ops = [entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } })];
+  for (let i = 0; i < 40; i++) {
+    ops.push(addTask({ id: 't' + i, title: 'Task ' + String.fromCharCode(65 + (i % 26)) + i, isDone: false, projectId: 'p1' }));
+  }
+  store.applyOperations(ops, state);
+  assert.strictEqual(store.getProjectTasks(state, 'p1', 10, false).regular.length, 10);
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);
