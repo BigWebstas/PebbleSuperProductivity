@@ -122,10 +122,12 @@ enum {
   STATUS_ERROR = 3,
 };
 
-// emery (Pebble Time 2) has far more free RAM (~106KB vs ~41KB on
-// basalt/chalk/diorite, aplite under 1KB) so it alone gets a higher cap.
+// emery (Pebble Time 2) has far more free heap than basalt/chalk/diorite, but
+// its PebbleProcessInfo virtual size (.text+.data+.bss <= 64KB) is the real
+// ceiling, and the Task double-buffer is a big chunk of .bss - so emery's cap
+// is only modestly higher, kept where the Projects browser's extras still fit.
 #ifdef PBL_PLATFORM_EMERY
-#define MAX_TASKS 50
+#define MAX_TASKS 40
 #else
 #define MAX_TASKS 30
 #endif
@@ -147,10 +149,9 @@ enum {
 // fixed per-task field (phone truncates TASK_TAGS to 63 chars in sendTaskAt).
 #define MAX_TASK_TAGS_LEN 64
 
-// The grouped today view's project-row colour swatch. Off on aplite (no
-// grouping UI) and on emery, whose virtual-size budget is exhausted - emery
-// keeps the swatch on the Projects browser list, just not the today view.
-#if !defined(PBL_PLATFORM_APLITE) && !defined(PBL_PLATFORM_EMERY)
+// The grouped today view's project-row colour swatch. aplite has no grouping
+// UI, so it's the only platform without it.
+#ifndef PBL_PLATFORM_APLITE
 #define TODAY_PROJECT_SWATCH 1
 #else
 #define TODAY_PROJECT_SWATCH 0
@@ -515,11 +516,10 @@ static bool s_projects_enabled = true;
 #define PROJECTS_BROWSER 1
 #endif
 
-// The project-list persist cache (save/load_browse_projects) is dropped on
-// emery, whose PebbleProcessInfo virtual size (.text+.data+.bss <= 64KB) sits
-// within a hair of the ceiling. emery keeps everything else - it just
-// re-fetches the list each open (heap is plentiful, the reply is local).
-#if PROJECTS_BROWSER && !defined(PBL_PLATFORM_EMERY)
+// The project-list persist cache (save/load_browse_projects). Every platform
+// that has the browser gets it - emery included, now that its Task cap (40)
+// leaves room under the virtual-size ceiling.
+#if PROJECTS_BROWSER
 #define PROJECTS_CACHE 1
 #else
 #define PROJECTS_CACHE 0
