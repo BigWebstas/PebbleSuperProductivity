@@ -4,14 +4,22 @@ Bringing Super Productivity's **live tracking presence** (desktop v18.21.1,
 [PR #9771](https://github.com/super-productivity/super-productivity/pull/9771))
 to the Pebble watchapp.
 
-> **Status: Phase 1 built** (branch `live-tracking-presence`), not yet tested
-> against a live account. Deviation from §7 below: the "LIVE" entry is a **row
-> in section 0** (above Resync), not a new menu section — far less perturbation
-> of the menu's section-index arithmetic. The detail window + remote Stop are
-> as specced. Files touched: `src/pkjs/lib/presence-client.js` (new),
-> `scripts/test-presence.js` (new), `src/pkjs/lib/supersync-client.js`
-> (`canDecryptWithoutDerive`), `src/pkjs/index.js`, `src/pkjs/lib/pairing-page.js`,
-> `src/c/main.c`, `package.json`. All 5 platforms build; `npm test` green.
+> **Status: Phases 1 and 2 built and hardware-verified** (branch
+> `live-tracking-presence`, PR #27).
+>
+> - **Phase 1 (viewer + remote stop):** the "LIVE" entry is a **row in
+>   section 0** (above Resync), not a new menu section — far less perturbation
+>   of the menu's section-index arithmetic. Detail window + remote Stop as
+>   specced. State 4 lingers "Stopped on X" ~10s to match the desktop chip.
+> - **Phase 2 (§9, no longer deferred):** the watch broadcasts its own
+>   time-tracking as "Tracking on Pebble" via `MSG_TRACK_TIME_START` /
+>   `broadcastTracking`, 60s heartbeat, `MSG_PRESENCE_STOP_LOCAL` for a
+>   remote stop, later-start-wins takeover. On a `needs-derive` miss (a
+>   producer whose op-session salt the watch hasn't cached — common for a
+>   phone that only tracks time) the watch derives the key **once, off the
+>   socket message path**, rather than showing it opaquely forever.
+>
+> All 5 platforms build, `aplite` RAM unchanged; `npm test` green.
 
 ## 1. What the desktop feature is
 
