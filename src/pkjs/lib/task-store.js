@@ -873,6 +873,84 @@ function titleCompare(a, b) {
   return at < bt ? -1 : at > bt ? 1 : 0;
 }
 
+// Sort order within one visual group: not-done before done, then by title.
+// Module-level (not nested in getActiveTasks) so getProjectTasks can reuse
+// the exact same ordering for a project browser's regular / backlog lists.
+function withinGroupSort(a, b) {
+  if (!!a.isDone !== !!b.isDone) {
+    return a.isDone ? 1 : -1;
+  }
+  return titleCompare(a.title, b.title);
+}
+
+// Sentinel project id for the synthetic "No Project" entry getProjectList
+// emits when project-less active tasks exist - getProjectTasks maps it back
+// to "tasks with no projectId". A real project id is a plain nanoid(), so
+// this can't collide.
+var NO_PROJECT_ID = '__NO_PROJECT__';
+
+// Every non-archived project, plus a synthetic "No Project" entry when
+// there are project-less active main tasks to reach through it. Sorted by
+// title. Shape: [{ id, title }]. Feeds the watch's Projects browser (a
+// pinned row -> project list -> that project's tasks), which - unlike the
+// today list - is not date-filtered.
+function getProjectList(state) {
+  var projects = state.project || {};
+  var allTasks = state.task || {};
+  var out = Object.keys(projects)
+    .map(function (id) { return projects[id]; })
+    .filter(function (p) { return p && p.id && p.title && !p.isArchived; })
+    .map(function (p) { return { id: p.id, title: p.title }; });
+  out.sort(function (a, b) { return titleCompare(a.title, b.title); });
+  var hasNoProject = Object.keys(allTasks).some(function (id) {
+    var t = allTasks[id];
+    return t && t.title && isMainTask(t) && !t.projectId && !t.isDone;
+  });
+  if (hasNoProject) {
+    out.push({ id: NO_PROJECT_ID, title: 'No Project' });
+  }
+  return out;
+}
+
+// One project's whole active task list, split into its regular list and its
+// backlog - { regular: [rows], backlog: [rows] }, each row the same shape
+// getActiveTasks produces (id, title, isDone, project, projectId, tags,
+// dueWithTime, timeSpent, timeEstimate) with subtasks nested under their
+// parent the same way. projectId === NO_PROJECT_ID (or falsy) selects tasks
+// with no project. No date filter - a project browser shows everything, not
+// just today. Done tasks still obey hideDone's grace period. Each list is
+// capped at `limit` rows.
+function getProjectTasks(state, projectId, limit, hideDone) {
+  var allTasks = state.task || {};
+  var wantNoProject = !projectId || projectId === NO_PROJECT_ID;
+  var projName = wantNoProject
+    ? 'No Project'
+    : ((state.project && state.project[projectId] && state.project[projectId].title) || 'No Project');
+  var pid = wantNoProject ? '' : projectId;
+  var mains = Object.keys(allTasks)
+    .map(function (id) { return allTasks[id]; })
+    .filter(function (t) { return t && t.title && isMainTask(t); })
+    .filter(function (t) { return !isHiddenDone(t, hideDone); })
+    .filter(function (t) {
+      return wantNoProject ? !t.projectId : t.projectId === projectId;
+    });
+  var regularMains = mains
+    .filter(function (t) { return !t.__inBacklog; })
+    .sort(withinGroupSort);
+  var backlogMains = mains
+    .filter(function (t) { return t.__inBacklog; })
+    .sort(withinGroupSort);
+  var regular = [];
+  var backlog = [];
+  regularMains.forEach(function (t) {
+    pushTaskAndSubtasks(regular, state, allTasks, t, projName, pid, hideDone);
+  });
+  backlogMains.forEach(function (t) {
+    pushTaskAndSubtasks(backlog, state, allTasks, t, projName, pid, hideDone);
+  });
+  return { regular: regular.slice(0, limit), backlog: backlog.slice(0, limit) };
+}
+
 // Returns up to `limit` rows: main tasks that are not sitting in a
 // project's backlog (see the top-of-file comment - no date filtering),
 // each immediately followed by its own subtasks (indented), regardless of
@@ -944,7 +1022,15 @@ function isHiddenDone(t, hideDone) {
 // deadlineDay/deadlineWithTime or explicit tag assignment - not a full
 // port, just enough to match what the desktop's Today page actually shows
 // for the common case.
-function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
+// alwaysIncludeId, when given, names one task that must appear in the result
+// even if todayOnly / the backlog filter would drop it - the watch's
+// currently-tracked task, which may have been started from the Projects
+// browser and so be neither planned for today nor in the regular list. The
+// watch needs it here to render its pinned "TRACKING" row (main.c's
+// pinned_task_index scans exactly this list). A tracked SUBTASK pulls in its
+// parent instead, so it still nests (same reason todayOnly pulls in a parent
+// for a today-due subtask).
+function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alwaysIncludeId) {
   var allTasks = state.task || {};
   var today = todayStr();
   var mainTasks = Object.keys(allTasks)
@@ -998,11 +1084,15 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone) {
       });
     });
 
-  function withinGroupSort(a, b) {
-    if (!!a.isDone !== !!b.isDone) {
-      return a.isDone ? 1 : -1;
+  if (alwaysIncludeId && !mainTasks.some(function (t) { return t.id === alwaysIncludeId; })) {
+    var forced = allTasks[alwaysIncludeId];
+    if (forced && forced.parentId) {
+      forced = allTasks[forced.parentId];
     }
-    return titleCompare(a.title, b.title);
+    if (forced && forced.title && isMainTask(forced) && !isHiddenDone(forced, hideDone) &&
+        !mainTasks.some(function (t) { return t.id === forced.id; })) {
+      mainTasks.push(forced);
+    }
   }
 
   var rows = [];
@@ -1144,6 +1234,9 @@ module.exports = {
   applyOperations: applyOperations,
   getActiveTasks: getActiveTasks,
   getActiveHabits: getActiveHabits,
+  getProjectList: getProjectList,
+  getProjectTasks: getProjectTasks,
+  NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,
   dateToDateStr: dateToDateStr,
   HIDE_DONE_GRACE_MS: HIDE_DONE_GRACE_MS,

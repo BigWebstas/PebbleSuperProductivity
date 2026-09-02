@@ -39,6 +39,11 @@
 #define KEY_NOTE_CHUNK_TEXT MESSAGE_KEY_NOTE_CHUNK_TEXT
 #define KEY_TASK_PROJECT_ID MESSAGE_KEY_TASK_PROJECT_ID
 #define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
+#define KEY_PROJECT_INDEX MESSAGE_KEY_PROJECT_INDEX
+#define KEY_PROJECT_TITLE MESSAGE_KEY_PROJECT_TITLE
+#define KEY_PROJECT_TOTAL MESSAGE_KEY_PROJECT_TOTAL
+#define KEY_PROJECT_TASK_BACKLOG MESSAGE_KEY_PROJECT_TASK_BACKLOG
+#define KEY_PROJECTS_ENABLED MESSAGE_KEY_PROJECTS_ENABLED
 #define KEY_TASK_TAGS MESSAGE_KEY_TASK_TAGS
 #define KEY_TOUCH_NAV_ENABLED MESSAGE_KEY_TOUCH_NAV_ENABLED
 #define KEY_OVERTIME_NOTIFY_ENABLED MESSAGE_KEY_OVERTIME_NOTIFY_ENABLED
@@ -91,6 +96,20 @@ enum {
   // Phase 2 - the watch broadcasts its own time-tracking as presence ("Pebble").
   MSG_TRACK_TIME_START = 29,        // watch -> phone: TASK_ID + TRACKED_MS (elapsed so far, 0 on a fresh start)
   MSG_PRESENCE_STOP_LOCAL = 30,     // phone -> watch: a remote device stopped this watch's timer - stop it here
+  // Projects browser (config.enableProjects, non-aplite). The watch asks for
+  // the project list, then for one project's tasks; each reply is a
+  // START / ITEM* / END sequence like the task/habit list sends. A tasks ITEM
+  // reuses the TASK_* keys plus PROJECT_TASK_BACKLOG (0 = the project's
+  // regular list, 1 = its backlog). Every tasks message carries PROJECT_ID so
+  // a reply for a project the watch has navigated away from is ignored.
+  MSG_PROJECT_LIST_REQUEST = 31,    // watch -> phone: (no keys)
+  MSG_PROJECT_LIST_START = 32,      // phone -> watch: PROJECT_TOTAL
+  MSG_PROJECT_LIST_ITEM = 33,       // phone -> watch: PROJECT_INDEX + PROJECT_ID + PROJECT_TITLE
+  MSG_PROJECT_LIST_END = 34,        // phone -> watch: (no keys)
+  MSG_PROJECT_TASKS_REQUEST = 35,   // watch -> phone: PROJECT_ID
+  MSG_PROJECT_TASKS_START = 36,     // phone -> watch: PROJECT_ID + TASK_TOTAL
+  MSG_PROJECT_TASKS_ITEM = 37,      // phone -> watch: PROJECT_ID + TASK_INDEX + TASK_* + PROJECT_TASK_BACKLOG
+  MSG_PROJECT_TASKS_END = 38,       // phone -> watch: PROJECT_ID
 };
 
 // STATUS_CODE values sent from the phone.
@@ -468,6 +487,56 @@ static char s_status_msg[MAX_STATUS_MSG_LEN] = "";
 // on aplite anyway (PBL_IF_MICROPHONE_ELSE keeps the row absent).
 static bool s_habits_enabled = true;
 static bool s_add_task_enabled = true;
+// "Projects" browser row (config.enableProjects, default on). Inert on aplite -
+// PROJECTS_ROW_ACTIVE() is a compile-time false there, so the whole browser and
+// its buffers below are excluded.
+static bool s_projects_enabled = true;
+
+#ifndef PBL_PLATFORM_APLITE
+// ---- Projects browser ----
+// A pinned section-0 row -> a list of every project -> that project's tasks
+// (its regular list, then its backlog under a divider). Select toggles a task
+// done, long-Select starts/stops tracking it - both round-trip through the
+// same sends the today list uses, so a task tracked here also lands in the
+// today page's pinned "TRACKING" section (index.js force-includes the tracked
+// task in every list send). Data is fetched on demand (MSG_PROJECT_*), never
+// cached across app opens.
+//
+// The two row buffers are malloc'd while their window is open and freed on
+// unload, like the notes text - not static: emery's PebbleProcessInfo virtual
+// size (.text+.data+.bss) is already within ~4KB of its 64KB ceiling, with no
+// room for a static Task[] here, while its heap has ample space.
+#define MAX_BROWSE_PROJECTS 60
+#define MAX_BROWSE_TASKS MAX_TASKS
+typedef struct {
+  char id[MAX_PROJECT_ID_LEN];
+  char title[MAX_TITLE_LEN];
+} BrowseProject;
+static BrowseProject *s_browse_projects = NULL;
+static int s_browse_project_count = 0;      // committed (drawn) count
+static int s_browse_project_incoming = 0;   // announced by the current LIST_START
+static bool s_browse_projects_loading = false;
+// One project's tasks. Full Task structs (not a slim variant) so draw_task_row
+// and the tracking/toggle helpers take them as-is. Regular-list rows fill
+// indices [0, s_browse_backlog_start); backlog rows fill the rest.
+static Task *s_browse_tasks = NULL;
+static int s_browse_task_count = 0;
+static int s_browse_task_incoming = 0;
+static int s_browse_backlog_start = 0;
+static bool s_browse_tasks_loading = false;
+// Which project's tasks the tasks window is showing / awaiting a reply for -
+// a TASKS_* message for any other id is stale and ignored.
+static char s_browse_project_id[MAX_PROJECT_ID_LEN] = "";
+static Window *s_projects_window = NULL;
+static MenuLayer *s_projects_menu_layer = NULL;
+static StatusBarLayer *s_projects_status_bar = NULL;
+static TextLayer *s_projects_empty_layer = NULL;
+static Window *s_project_tasks_window = NULL;
+static MenuLayer *s_project_tasks_menu_layer = NULL;
+static StatusBarLayer *s_project_tasks_status_bar = NULL;
+static TextLayer *s_project_tasks_empty_layer = NULL;
+#endif
+
 #ifndef PBL_PLATFORM_APLITE
 // "Notify when a task runs over its estimate" (config.overtimeNotify). Opt-in,
 // false until the first sync. aplite-excluded with the banner it drives.
@@ -754,6 +823,14 @@ static void push_habits_window(void);
 static void update_habits_empty_layer(void);
 static Task *find_task_by_id(const char *id);
 #ifndef PBL_PLATFORM_APLITE
+static void push_projects_window(void);
+static void push_project_tasks_window(void);
+static void update_projects_empty_layer(void);
+static void update_project_tasks_empty_layer(void);
+static void request_project_list(void);
+static void request_project_tasks(const char *project_id);
+#endif
+#ifndef PBL_PLATFORM_APLITE
 static void hide_overtime_banner(void);
 static void maybe_notify_overtime(void);
 static bool has_pinned_row(void);
@@ -811,6 +888,7 @@ static void apply_touch_nav(void);
 typedef enum {
   SECTION0_ROW_RESYNC,
   SECTION0_ROW_HABITS,
+  SECTION0_ROW_PROJECTS, // projects browser, between Habits and Add Task (non-aplite)
   SECTION0_ROW_ADD_TASK,
   SECTION0_ROW_LIVE, // live tracking presence, row 0 when active (non-aplite)
 } Section0RowKind;
@@ -824,6 +902,14 @@ typedef enum {
 #define ACTIONABLE_EMPTY_ACTIVE() false
 #else
 #define ACTIONABLE_EMPTY_ACTIVE() (s_status_code == STATUS_OK)
+#endif
+
+// Whether the "Projects" row sits in section 0. Compile-time false on aplite
+// (the whole browser is excluded there).
+#ifdef PBL_PLATFORM_APLITE
+#define PROJECTS_ROW_ACTIVE() false
+#else
+#define PROJECTS_ROW_ACTIVE() (s_projects_enabled)
 #endif
 
 // Whether the "LIVE" presence row sits at the top of section 0. Compile-time
@@ -842,6 +928,9 @@ static int section0_row_count(void) {
     count++;
   }
   if (s_habits_enabled) {
+    count++;
+  }
+  if (PROJECTS_ROW_ACTIVE()) {
     count++;
   }
   if (PBL_IF_MICROPHONE_ELSE(s_add_task_enabled, false)) {
@@ -867,6 +956,12 @@ static Section0RowKind section0_row_kind(int row) {
   if (s_habits_enabled) {
     if (row == next) {
       return SECTION0_ROW_HABITS;
+    }
+    next++;
+  }
+  if (PROJECTS_ROW_ACTIVE()) {
+    if (row == next) {
+      return SECTION0_ROW_PROJECTS;
     }
     next++;
   }
@@ -1528,6 +1623,20 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
 
 #ifndef PBL_PLATFORM_APLITE
+    if (kind == SECTION0_ROW_PROJECTS) {
+      // Navigates to the projects browser. Purple - its own colour among the
+      // section-0 nav rows (Habits cerulean, Add Task green). No icon (would
+      // need a new asset); the full-width label carries it.
+      graphics_context_set_fill_color(ctx, GColorPurple);
+      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
+      GRect title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                               bounds.size.w - TITLE_BOX_X * 2, HEADING_TITLE_H);
+      graphics_draw_text(ctx, "Projects", fonts_get_system_font(HEADING_FONT_KEY), title_box,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      return;
+    }
+
     if (kind == SECTION0_ROW_ADD_TASK) {
       // Mic platforms with the feature enabled only. Starts dictation via
       // menu_select_click.
@@ -1791,6 +1900,10 @@ static void send_pending_retry(void) {
     case MSG_PROJECT_NOTE_REQUEST:
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
       break;
+    case MSG_PROJECT_TASKS_REQUEST:
+      dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
+      break;
+    case MSG_PROJECT_LIST_REQUEST:
     case MSG_FINISH_DAY:
     case MSG_REQUEST_SYNC:
     case MSG_PRESENCE_STOP:
@@ -2198,6 +2311,10 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     if (kind == SECTION0_ROW_HABITS) {
       push_habits_window();
 #ifndef PBL_PLATFORM_APLITE
+    } else if (kind == SECTION0_ROW_PROJECTS) {
+      s_browse_projects_loading = true;
+      push_projects_window();
+      request_project_list();
     } else if (kind == SECTION0_ROW_ADD_TASK) {
       start_add_task_dictation();
     } else if (kind == SECTION0_ROW_LIVE) {
@@ -2806,6 +2923,17 @@ static void request_sync(void) {
 static void send_presence_stop(void) {
   begin_send(MSG_PRESENCE_STOP, NULL, NULL, 0);
 }
+
+// Projects browser: ask the phone for the project list / one project's task
+// list. Both replies are chunked (START / ITEM* / END) - see the MSG_PROJECT_*
+// handlers in inbox_received_handler.
+static void request_project_list(void) {
+  begin_send(MSG_PROJECT_LIST_REQUEST, NULL, NULL, 0);
+}
+
+static void request_project_tasks(const char *project_id) {
+  begin_send(MSG_PROJECT_TASKS_REQUEST, project_id, NULL, 0);
+}
 #endif
 
 // The single place s_status_code is assigned (from MSG_SYNC_STATUS and from
@@ -2969,6 +3097,127 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       break;
     }
+#ifndef PBL_PLATFORM_APLITE
+    case MSG_PROJECT_LIST_START: {
+      if (!s_browse_projects) {
+        break;
+      }
+      Tuple *total_tuple = dict_find(iterator, KEY_PROJECT_TOTAL);
+      s_browse_project_incoming = total_tuple ? total_tuple->value->int32 : 0;
+      if (s_browse_project_incoming > MAX_BROWSE_PROJECTS) {
+        s_browse_project_incoming = MAX_BROWSE_PROJECTS;
+      }
+      break;
+    }
+    case MSG_PROJECT_LIST_ITEM: {
+      if (!s_browse_projects) {
+        break;
+      }
+      Tuple *idx_tuple = dict_find(iterator, KEY_PROJECT_INDEX);
+      Tuple *id_tuple = dict_find(iterator, KEY_PROJECT_ID);
+      Tuple *title_tuple = dict_find(iterator, KEY_PROJECT_TITLE);
+      if (!idx_tuple || !id_tuple || !title_tuple) {
+        break;
+      }
+      int idx = idx_tuple->value->int32;
+      if (idx < 0 || idx >= MAX_BROWSE_PROJECTS) {
+        break;
+      }
+      strncpy(s_browse_projects[idx].id, id_tuple->value->cstring, MAX_PROJECT_ID_LEN - 1);
+      s_browse_projects[idx].id[MAX_PROJECT_ID_LEN - 1] = '\0';
+      strncpy(s_browse_projects[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
+      s_browse_projects[idx].title[MAX_TITLE_LEN - 1] = '\0';
+      break;
+    }
+    case MSG_PROJECT_LIST_END: {
+      if (!s_browse_projects) {
+        break;
+      }
+      s_browse_project_count = s_browse_project_incoming;
+      s_browse_projects_loading = false;
+      if (s_projects_menu_layer) {
+        menu_layer_reload_data(s_projects_menu_layer);
+      }
+      if (s_projects_empty_layer) {
+        update_projects_empty_layer();
+      }
+      break;
+    }
+    case MSG_PROJECT_TASKS_START: {
+      Tuple *pid_tuple = dict_find(iterator, KEY_PROJECT_ID);
+      // A reply for a project the user has already navigated away from - drop it.
+      if (!s_browse_tasks || !pid_tuple ||
+          strncmp(pid_tuple->value->cstring, s_browse_project_id, MAX_PROJECT_ID_LEN) != 0) {
+        break;
+      }
+      Tuple *total_tuple = dict_find(iterator, KEY_TASK_TOTAL);
+      s_browse_task_incoming = total_tuple ? total_tuple->value->int32 : 0;
+      if (s_browse_task_incoming > MAX_BROWSE_TASKS) {
+        s_browse_task_incoming = MAX_BROWSE_TASKS;
+      }
+      // Regular list first, then backlog - the boundary is the lowest index
+      // carrying PROJECT_TASK_BACKLOG=1 (see the ITEM handler). Start it past
+      // the end so "no backlog" leaves every row in the regular section.
+      s_browse_backlog_start = s_browse_task_incoming;
+      break;
+    }
+    case MSG_PROJECT_TASKS_ITEM: {
+      Tuple *pid_tuple = dict_find(iterator, KEY_PROJECT_ID);
+      if (!s_browse_tasks || !pid_tuple ||
+          strncmp(pid_tuple->value->cstring, s_browse_project_id, MAX_PROJECT_ID_LEN) != 0) {
+        break;
+      }
+      Tuple *idx_tuple = dict_find(iterator, KEY_TASK_INDEX);
+      Tuple *id_tuple = dict_find(iterator, KEY_TASK_ID);
+      Tuple *title_tuple = dict_find(iterator, KEY_TASK_TITLE);
+      if (!idx_tuple || !id_tuple || !title_tuple) {
+        break;
+      }
+      int idx = idx_tuple->value->int32;
+      if (idx < 0 || idx >= MAX_BROWSE_TASKS) {
+        break;
+      }
+      Task *bt = &s_browse_tasks[idx];
+      memset(bt, 0, sizeof(Task));
+      strncpy(bt->id, id_tuple->value->cstring, MAX_ID_LEN - 1);
+      bt->id[MAX_ID_LEN - 1] = '\0';
+      strncpy(bt->title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
+      bt->title[MAX_TITLE_LEN - 1] = '\0';
+      bt->project[0] = '\0';
+      Tuple *done_tuple = dict_find(iterator, KEY_TASK_DONE);
+      bt->done = done_tuple && done_tuple->value->int32 != 0;
+      Tuple *due_tuple = dict_find(iterator, KEY_TASK_DUE_MIN);
+      bt->due_min = due_tuple ? due_tuple->value->int32 : -1;
+      Tuple *spent_tuple = dict_find(iterator, KEY_TASK_TIME_SPENT_MS);
+      bt->time_spent_ms = spent_tuple ? spent_tuple->value->int32 : 0;
+      Tuple *estimate_tuple = dict_find(iterator, KEY_TASK_TIME_ESTIMATE_MS);
+      bt->time_estimate_ms = estimate_tuple ? estimate_tuple->value->int32 : 0;
+      Tuple *backlog_tuple = dict_find(iterator, KEY_PROJECT_TASK_BACKLOG);
+      if (backlog_tuple && backlog_tuple->value->int32 != 0 && idx < s_browse_backlog_start) {
+        s_browse_backlog_start = idx;
+      }
+      break;
+    }
+    case MSG_PROJECT_TASKS_END: {
+      Tuple *pid_tuple = dict_find(iterator, KEY_PROJECT_ID);
+      if (!s_browse_tasks || !pid_tuple ||
+          strncmp(pid_tuple->value->cstring, s_browse_project_id, MAX_PROJECT_ID_LEN) != 0) {
+        break;
+      }
+      s_browse_task_count = s_browse_task_incoming;
+      if (s_browse_backlog_start > s_browse_task_count) {
+        s_browse_backlog_start = s_browse_task_count;
+      }
+      s_browse_tasks_loading = false;
+      if (s_project_tasks_menu_layer) {
+        menu_layer_reload_data(s_project_tasks_menu_layer);
+      }
+      if (s_project_tasks_empty_layer) {
+        update_project_tasks_empty_layer();
+      }
+      break;
+    }
+#endif
     case MSG_SYNC_STATUS: {
       Tuple *status_tuple = dict_find(iterator, KEY_STATUS_CODE);
       if (status_tuple) {
@@ -2991,6 +3240,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *add_task_enabled_tuple = dict_find(iterator, KEY_ADD_TASK_ENABLED);
       if (add_task_enabled_tuple) {
         s_add_task_enabled = add_task_enabled_tuple->value->int32 != 0;
+      }
+      Tuple *projects_enabled_tuple = dict_find(iterator, KEY_PROJECTS_ENABLED);
+      if (projects_enabled_tuple) {
+        s_projects_enabled = projects_enabled_tuple->value->int32 != 0;
       }
       // Only re-applied when the value actually changed - this field is sent on
       // every status push (including routine background syncs), and re-triggering
@@ -3698,6 +3951,297 @@ static void push_habits_window(void) {
   }
   window_stack_push(s_habits_window, true);
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// ================= Projects browser =================
+// Two windows: the project list, and one project's task list. Back pops each
+// (Pebble's default) so the stack is main -> projects -> tasks. Data lives in
+// s_browse_* and is refetched every time a window is opened.
+
+// ---- project list window ----
+
+static BrowseProject *resolve_browse_project_at(MenuIndex index) {
+  if (!s_browse_projects || index.section != 0 || (int)index.row >= s_browse_project_count) {
+    return NULL;
+  }
+  return &s_browse_projects[index.row];
+}
+
+static uint16_t projects_menu_get_num_sections(MenuLayer *menu_layer, void *context) {
+  return 1;
+}
+
+static uint16_t projects_menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+  return (uint16_t)s_browse_project_count;
+}
+
+static void projects_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
+  BrowseProject *p = resolve_browse_project_at(*cell_index);
+  if (!p) {
+    return;
+  }
+  // The framework draws the row highlight; a plain title cell is all this needs.
+  menu_cell_basic_draw(ctx, cell_layer, p->title, NULL, NULL);
+}
+
+static void projects_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  backlight_touch();
+  BrowseProject *p = resolve_browse_project_at(*cell_index);
+  if (!p) {
+    return;
+  }
+  strncpy(s_browse_project_id, p->id, MAX_PROJECT_ID_LEN - 1);
+  s_browse_project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+  s_browse_tasks_loading = true;
+  push_project_tasks_window();
+  request_project_tasks(s_browse_project_id);
+}
+
+static void update_projects_empty_layer(void) {
+  bool show_empty = s_browse_project_count == 0;
+  text_layer_set_text(s_projects_empty_layer,
+                      s_browse_projects_loading ? "Loading projects..." : "No projects.");
+  layer_set_hidden(text_layer_get_layer(s_projects_empty_layer), !show_empty);
+  layer_set_hidden(menu_layer_get_layer(s_projects_menu_layer), show_empty);
+}
+
+// Both browser windows share the same scaffolding: a status bar up top, a
+// MenuLayer and a centred "empty" TextLayer filling the rest. Only the menu
+// callbacks and the pointers they're stored in differ.
+static void browse_window_build(Window *window, MenuLayerCallbacks callbacks,
+                                 MenuLayer **menu_out, StatusBarLayer **sb_out, TextLayer **empty_out) {
+  Layer *window_layer = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(window_layer);
+  backlight_touch();
+
+  *sb_out = status_bar_layer_create();
+  layer_add_child(window_layer, status_bar_layer_get_layer(*sb_out));
+
+  GRect content = GRect(bounds.origin.x, bounds.origin.y + STATUS_BAR_LAYER_HEIGHT,
+                         bounds.size.w, bounds.size.h - STATUS_BAR_LAYER_HEIGHT);
+
+  *menu_out = menu_layer_create(content);
+  menu_layer_set_callbacks(*menu_out, NULL, callbacks);
+  menu_layer_set_click_config_onto_window(*menu_out, window);
+  layer_add_child(window_layer, menu_layer_get_layer(*menu_out));
+
+  *empty_out = text_layer_create(content);
+  text_layer_set_text_alignment(*empty_out, GTextAlignmentCenter);
+  text_layer_set_font(*empty_out, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
+  layer_add_child(window_layer, text_layer_get_layer(*empty_out));
+}
+
+static void browse_window_teardown(MenuLayer **menu, StatusBarLayer **sb, TextLayer **empty) {
+  menu_layer_destroy(*menu);
+  text_layer_destroy(*empty);
+  status_bar_layer_destroy(*sb);
+  *menu = NULL;
+  *empty = NULL;
+  *sb = NULL;
+}
+
+static void projects_window_load(Window *window) {
+  browse_window_build(window, (MenuLayerCallbacks) {
+    .get_num_sections = projects_menu_get_num_sections,
+    .get_num_rows = projects_menu_get_num_rows,
+    .draw_row = projects_menu_draw_row,
+    .select_click = projects_menu_select_click,
+  }, &s_projects_menu_layer, &s_projects_status_bar, &s_projects_empty_layer);
+  update_projects_empty_layer();
+}
+
+static void projects_window_unload(Window *window) {
+  browse_window_teardown(&s_projects_menu_layer, &s_projects_status_bar, &s_projects_empty_layer);
+  free(s_browse_projects);
+  s_browse_projects = NULL;
+  s_browse_project_count = 0;
+  s_browse_projects_loading = false;
+}
+
+static void push_projects_window(void) {
+  if (!s_browse_projects) {
+    s_browse_projects = malloc(sizeof(BrowseProject) * MAX_BROWSE_PROJECTS);
+  }
+  s_browse_project_count = 0;
+  s_browse_project_incoming = 0;
+  if (!s_projects_window) {
+    s_projects_window = window_create();
+    window_set_window_handlers(s_projects_window, (WindowHandlers) {
+      .load = projects_window_load,
+      .unload = projects_window_unload,
+    });
+  }
+  window_stack_push(s_projects_window, true);
+}
+
+// ---- one project's task list ----
+// Rows [0, s_browse_backlog_start) are the regular list; the rest are the
+// backlog, shown as a second section under a "Backlog" header (the divider).
+
+static int pt_regular_count(void) {
+  int r = s_browse_backlog_start;
+  if (r > s_browse_task_count) {
+    r = s_browse_task_count;
+  }
+  if (r < 0) {
+    r = 0;
+  }
+  return r;
+}
+
+static int pt_backlog_count(void) {
+  return s_browse_task_count - pt_regular_count();
+}
+
+// Whether section `section` is the backlog one. When there's no regular list,
+// the backlog takes section 0; otherwise it's section 1.
+static bool pt_section_is_backlog(int section) {
+  if (pt_regular_count() == 0) {
+    return pt_backlog_count() > 0;
+  }
+  return section == 1;
+}
+
+static Task *resolve_browse_task_at(MenuIndex index) {
+  if (!s_browse_tasks || s_browse_task_count == 0) {
+    return NULL;
+  }
+  int base = pt_section_is_backlog((int)index.section) ? pt_regular_count() : 0;
+  int i = base + (int)index.row;
+  if (i >= s_browse_task_count) {
+    return NULL;
+  }
+  return &s_browse_tasks[i];
+}
+
+static uint16_t project_tasks_menu_get_num_sections(MenuLayer *menu_layer, void *context) {
+  int n = (pt_regular_count() > 0 ? 1 : 0) + (pt_backlog_count() > 0 ? 1 : 0);
+  return (uint16_t)(n > 0 ? n : 1);
+}
+
+static uint16_t project_tasks_menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+  if (s_browse_task_count == 0) {
+    return 0;
+  }
+  return (uint16_t)(pt_section_is_backlog((int)section_index) ? pt_backlog_count() : pt_regular_count());
+}
+
+static int16_t project_tasks_menu_get_header_height(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+  return pt_section_is_backlog((int)section_index) ? MENU_CELL_BASIC_HEADER_HEIGHT : 0;
+}
+
+static void project_tasks_menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
+  if (pt_section_is_backlog((int)section_index)) {
+    menu_cell_basic_header_draw(ctx, cell_layer, "Backlog");
+  }
+}
+
+static void project_tasks_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
+  Task *bt = resolve_browse_task_at(*cell_index);
+  if (!bt) {
+    return;
+  }
+  MenuIndex sel = menu_layer_get_selected_index(s_project_tasks_menu_layer);
+  bool is_selected = sel.section == cell_index->section && sel.row == cell_index->row;
+  // draw_task_row reads the same fields the today list draws; a browsed task
+  // isn't in s_tasks but the struct is identical, so this reuses it wholesale
+  // (including the live-ticking "spent / estimate" when it's the tracked one).
+  draw_task_row(ctx, layer_get_bounds(cell_layer), bt, is_selected, false);
+}
+
+// Select toggles done; long-Select starts/stops tracking. Both round-trip
+// through the same sends the today list uses (send_task_toggle / start_tracking
+// -> send_track_time_start), so other clients and the today page's pinned
+// section pick the change up on the next sync.
+static void project_tasks_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  backlight_touch();
+  Task *bt = resolve_browse_task_at(*cell_index);
+  if (!bt) {
+    return;
+  }
+  bt->done = !bt->done;
+  // Keep the today list in step if this task is also on it, so the two agree
+  // before the confirming sync lands.
+  Task *in_today = find_task_by_id(bt->id);
+  if (in_today) {
+    in_today->done = bt->done;
+    save_tasks();
+    menu_layer_reload_data(s_menu_layer);
+  }
+  menu_layer_reload_data(s_project_tasks_menu_layer);
+  send_task_toggle(bt);
+}
+
+static void project_tasks_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  backlight_touch();
+  Task *bt = resolve_browse_task_at(*cell_index);
+  if (!bt) {
+    return;
+  }
+  bool already_tracking_this = s_tracking_task_id[0] != '\0' &&
+                                strncmp(s_tracking_task_id, bt->id, MAX_ID_LEN) == 0;
+  stop_tracking_and_report();
+  if (!already_tracking_this) {
+    // Prefer the real today-list Task so the over-estimate latch sees the right
+    // estimate; the browsed struct works too (start_tracking only reads ->id).
+    Task *real = find_task_by_id(bt->id);
+    start_tracking(real ? real : bt);
+    // Pull the freshly-tracked task onto the today page: the phone learns the
+    // id from send_track_time_start and force-includes it in the next list.
+    request_sync();
+  }
+  menu_layer_reload_data(s_project_tasks_menu_layer);
+  vibes_short_pulse();
+}
+
+static void update_project_tasks_empty_layer(void) {
+  bool show_empty = s_browse_task_count == 0;
+  text_layer_set_text(s_project_tasks_empty_layer,
+                      s_browse_tasks_loading ? "Loading..." : "No tasks in this project.");
+  layer_set_hidden(text_layer_get_layer(s_project_tasks_empty_layer), !show_empty);
+  layer_set_hidden(menu_layer_get_layer(s_project_tasks_menu_layer), show_empty);
+}
+
+static void project_tasks_window_load(Window *window) {
+  browse_window_build(window, (MenuLayerCallbacks) {
+    .get_num_sections = project_tasks_menu_get_num_sections,
+    .get_num_rows = project_tasks_menu_get_num_rows,
+    .get_header_height = project_tasks_menu_get_header_height,
+    .draw_header = project_tasks_menu_draw_header,
+    .draw_row = project_tasks_menu_draw_row,
+    .select_click = project_tasks_menu_select_click,
+    .select_long_click = project_tasks_menu_select_long_click,
+  }, &s_project_tasks_menu_layer, &s_project_tasks_status_bar, &s_project_tasks_empty_layer);
+  update_project_tasks_empty_layer();
+}
+
+static void project_tasks_window_unload(Window *window) {
+  browse_window_teardown(&s_project_tasks_menu_layer, &s_project_tasks_status_bar, &s_project_tasks_empty_layer);
+  free(s_browse_tasks);
+  s_browse_tasks = NULL;
+  s_browse_task_count = 0;
+  // Leaving the tasks view: stop matching any late reply to this project.
+  s_browse_project_id[0] = '\0';
+  s_browse_tasks_loading = false;
+}
+
+static void push_project_tasks_window(void) {
+  if (!s_browse_tasks) {
+    s_browse_tasks = malloc(sizeof(Task) * MAX_BROWSE_TASKS);
+  }
+  s_browse_task_count = 0;
+  s_browse_task_incoming = 0;
+  s_browse_backlog_start = 0;
+  if (!s_project_tasks_window) {
+    s_project_tasks_window = window_create();
+    window_set_window_handlers(s_project_tasks_window, (WindowHandlers) {
+      .load = project_tasks_window_load,
+      .unload = project_tasks_window_unload,
+    });
+  }
+  window_stack_push(s_project_tasks_window, true);
+}
+#endif // !PBL_PLATFORM_APLITE
 
 #ifndef PBL_PLATFORM_APLITE
 // Select dismisses the notes window; Back also does, for free, via Pebble's
@@ -4495,6 +5039,12 @@ static void deinit(void) {
   stop_live_tick();
   if (s_live_window) {
     window_destroy(s_live_window);
+  }
+  if (s_projects_window) {
+    window_destroy(s_projects_window);
+  }
+  if (s_project_tasks_window) {
+    window_destroy(s_project_tasks_window);
   }
 #endif
 }
