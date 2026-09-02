@@ -1402,19 +1402,22 @@ check('getActiveTasks skips a tag id with no matching TAG entity', () => {
 
 // ---- getProjectList / getProjectTasks (the Projects browser) ----
 
-check('getProjectList returns non-archived projects sorted by title', () => {
+check('getProjectList returns non-archived projects sorted by title, with theme colour', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
-      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
-      entry('PROJECT', '[Project] Add Project', { project: { id: 'p2', title: 'Groceries' } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work', theme: { primary: '#2196F3' } } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p2', title: 'Groceries', themeColor: '4caf50' } }),
       entry('PROJECT', '[Project] Add Project', { project: { id: 'p3', title: 'Old', isArchived: true } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p4', title: 'Zeta' } }),
     ],
     state
   );
+  // color is the packed Pebble GColor8 byte (0xC0 | rr gg bb, 2 bits each)
   assert.deepStrictEqual(store.getProjectList(state), [
-    { id: 'p2', title: 'Groceries' },
-    { id: 'p1', title: 'Work' },
+    { id: 'p2', title: 'Groceries', color: 0xd9 }, // #4caf50
+    { id: 'p1', title: 'Work', color: 0xcb },      // #2196f3
+    { id: 'p4', title: 'Zeta', color: 0 },          // no theme -> 0, no swatch
   ]);
 });
 

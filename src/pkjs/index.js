@@ -58,7 +58,7 @@ var MSG_PRESENCE_STOP_LOCAL = 30; // phone -> watch: a remote device stopped the
 // PROJECT_TASK_BACKLOG (0 = regular list, 1 = that project's backlog).
 var MSG_PROJECT_LIST_REQUEST = 31;  // watch -> phone: (no keys)
 var MSG_PROJECT_LIST_START = 32;    // phone -> watch: PROJECT_TOTAL
-var MSG_PROJECT_LIST_ITEM = 33;     // phone -> watch: PROJECT_INDEX, PROJECT_ID, PROJECT_TITLE
+var MSG_PROJECT_LIST_ITEM = 33;     // phone -> watch: PROJECT_INDEX, PROJECT_ID, PROJECT_TITLE, PROJECT_COLOR
 var MSG_PROJECT_LIST_END = 34;      // phone -> watch: (no keys)
 var MSG_PROJECT_TASKS_REQUEST = 35; // watch -> phone: PROJECT_ID
 var MSG_PROJECT_TASKS_START = 36;   // phone -> watch: PROJECT_ID, TASK_TOTAL
@@ -611,6 +611,11 @@ function sendProjectListAt(projects, index) {
     PROJECT_ID: String(p.id).slice(0, 31),
     PROJECT_TITLE: String(p.title).slice(0, 63),
   };
+  if (p.color) {
+    // Packed Pebble GColor8 byte (see projectColorRgb); the watch assigns it
+    // straight to the swatch fill. Omitted when 0 = no theme colour.
+    dict.PROJECT_COLOR = p.color;
+  }
   sendWithRetry(dict, function () {
     sendProjectListAt(projects, index + 1);
   }, function (e) {

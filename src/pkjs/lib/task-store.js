@@ -891,23 +891,40 @@ var NO_PROJECT_ID = '__NO_PROJECT__';
 
 // Every non-archived project, plus a synthetic "No Project" entry when
 // there are project-less active main tasks to reach through it. Sorted by
-// title. Shape: [{ id, title }]. Feeds the watch's Projects browser (a
+// title. Shape: [{ id, title, color }] where color is 0xRRGGBB parsed from the
+// project's theme colour (0 if none). Feeds the watch's Projects browser (a
 // pinned row -> project list -> that project's tasks), which - unlike the
 // today list - is not date-filtered.
+function projectColorRgb(p) {
+  // super-productivity Project.theme.primary is a "#rrggbb" string
+  // (WorkContextThemeCfg); older data used a flat themeColor. We quantise it
+  // to Pebble's packed GColor8 byte here (2 bits per channel + opaque alpha)
+  // so the watch just assigns it - no colour maths in the draw path, which
+  // matters for emery's tight code budget. 0 = no colour -> no swatch.
+  var hex = (p.theme && p.theme.primary) || p.themeColor || '';
+  var m = /^#?([0-9a-fA-F]{6})$/.exec(String(hex).trim());
+  if (!m) {
+    return 0;
+  }
+  var n = parseInt(m[1], 16);
+  var r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  return 0xc0 | ((r >> 6) << 4) | ((g >> 6) << 2) | (b >> 6); // GColor8.argb, always non-zero (alpha bits set)
+}
+
 function getProjectList(state) {
   var projects = state.project || {};
   var allTasks = state.task || {};
   var out = Object.keys(projects)
     .map(function (id) { return projects[id]; })
     .filter(function (p) { return p && p.id && p.title && !p.isArchived; })
-    .map(function (p) { return { id: p.id, title: p.title }; });
+    .map(function (p) { return { id: p.id, title: p.title, color: projectColorRgb(p) }; });
   out.sort(function (a, b) { return titleCompare(a.title, b.title); });
   var hasNoProject = Object.keys(allTasks).some(function (id) {
     var t = allTasks[id];
     return t && t.title && isMainTask(t) && !t.projectId && !t.isDone;
   });
   if (hasNoProject) {
-    out.push({ id: NO_PROJECT_ID, title: 'No Project' });
+    out.push({ id: NO_PROJECT_ID, title: 'No Project', color: 0 });
   }
   return out;
 }

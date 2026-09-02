@@ -41,6 +41,7 @@
 #define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
 #define KEY_PROJECT_INDEX MESSAGE_KEY_PROJECT_INDEX
 #define KEY_PROJECT_TITLE MESSAGE_KEY_PROJECT_TITLE
+#define KEY_PROJECT_COLOR MESSAGE_KEY_PROJECT_COLOR
 #define KEY_PROJECT_TOTAL MESSAGE_KEY_PROJECT_TOTAL
 #define KEY_PROJECT_TASK_BACKLOG MESSAGE_KEY_PROJECT_TASK_BACKLOG
 #define KEY_PROJECTS_ENABLED MESSAGE_KEY_PROJECTS_ENABLED
@@ -497,10 +498,10 @@ static bool s_projects_enabled = true;
 #define PROJECTS_BROWSER 1
 #endif
 
-// The project-list persist cache is dropped on emery, whose PebbleProcessInfo
-// virtual size (.text+.data+.bss <= 64KB) sits only a few hundred bytes under
-// the ceiling - no room for save/load_browse_projects. emery re-fetches the
-// list each open (heap is plentiful; the reply is local).
+// The project-list persist cache (save/load_browse_projects) is dropped on
+// emery, whose PebbleProcessInfo virtual size (.text+.data+.bss <= 64KB) sits
+// within a hair of the ceiling. emery keeps everything else - it just
+// re-fetches the list each open (heap is plentiful, the reply is local).
 #if PROJECTS_BROWSER && !defined(PBL_PLATFORM_EMERY)
 #define PROJECTS_CACHE 1
 #else
@@ -533,6 +534,7 @@ static const uint32_t PERSIST_KEY_BROWSE_PROJECTS = 140; // + 1 for the count
 typedef struct {
   char id[MAX_PROJECT_ID_LEN];
   char title[MAX_TITLE_LEN];
+  int color; // packed GColor8 byte for the theme-colour swatch, 0 = none
 } BrowseProject;
 static BrowseProject *s_browse_projects = NULL;
 static int s_browse_project_count = 0;      // committed (drawn) count
@@ -3052,7 +3054,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         s_tracking_start_epoch = 0;
         save_tracking();
         s_overtime_notified = false;
-        hide_overtime_banner();
         stop_tracking_tick();
         if (s_presence_state == 1) {
           start_tracking_tick(); // now drives the remote row's live elapsed
@@ -3159,6 +3160,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_browse_projects[idx].id[MAX_PROJECT_ID_LEN - 1] = '\0';
       strncpy(s_browse_projects[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
       s_browse_projects[idx].title[MAX_TITLE_LEN - 1] = '\0';
+      Tuple *color_tuple = dict_find(iterator, KEY_PROJECT_COLOR);
+      s_browse_projects[idx].color = color_tuple ? color_tuple->value->int32 : 0;
       break;
     }
     case MSG_PROJECT_LIST_END: {
@@ -4107,10 +4110,18 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     // flip on the bright green barely read).
     graphics_context_set_fill_color(ctx, is_selected ? GColorIslamicGreen : GColorGreen);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    // The project's theme colour as a swatch on the left - the phone already
+    // packed it into a GColor8 byte (see projectColorRgb). No swatch when 0.
+    int16_t text_x = TITLE_BOX_X;
+    if (p->color != 0) {
+      graphics_context_set_fill_color(ctx, (GColor8){ .argb = (uint8_t)p->color });
+      graphics_fill_rect(ctx, GRect(TITLE_BOX_X, (bounds.size.h - 16) / 2, 16, 16), 0, GCornerNone);
+      text_x = TITLE_BOX_X + 22;
+    }
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
     graphics_draw_text(ctx, p->title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
-                        GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
-                              bounds.size.w - TITLE_BOX_X * 2, HEADING_TITLE_H),
+                        GRect(text_x, HEADING_TITLE_Y(bounds.size.h),
+                              bounds.size.w - text_x - TITLE_BOX_X, HEADING_TITLE_H),
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     return;
   }
