@@ -366,10 +366,6 @@ static char s_pending_toggle_task_id[MAX_ID_LEN] = "";
 // since MenuLayerCallbacks has no multi-click hook and MenuLayer already owns
 // the window's click config.
 #define DOUBLE_CLICK_WINDOW_MS 300
-// Same double-click detection for the project row - simpler, since a project
-// row has no single-click action to commit if the second click never comes.
-static AppTimer *s_pending_project_click_timer = NULL;
-static char s_pending_project_click_id[MAX_PROJECT_ID_LEN] = "";
 
 // Long-press Up (unschedule) and long-press Down / swipe-left (move to tomorrow)
 // each open a 3s cancel window on the selected task, reusing the pending-toggle
@@ -501,10 +497,10 @@ static bool s_projects_enabled = true;
 #define PROJECTS_BROWSER 1
 #endif
 
-// The project-list persist cache is dropped on emery: its PebbleProcessInfo
+// The project-list persist cache is dropped on emery, whose PebbleProcessInfo
 // virtual size (.text+.data+.bss <= 64KB) sits only a few hundred bytes under
-// the ceiling, with no room for save/load_browse_projects. emery just re-
-// fetches the list each open (its heap is huge; the fetch is a local reply).
+// the ceiling - no room for save/load_browse_projects. emery re-fetches the
+// list each open (heap is plentiful; the reply is local).
 #if PROJECTS_BROWSER && !defined(PBL_PLATFORM_EMERY)
 #define PROJECTS_CACHE 1
 #else
@@ -554,7 +550,6 @@ static bool s_browse_tasks_loading = false;
 // id is stale and ignored.
 static char s_browse_project_id[MAX_PROJECT_ID_LEN] = "";
 static int s_browse_level = 0;              // 0 = project list, 1 = one project's tasks
-static int s_browse_list_selected_row = 0;  // stashed on descend, restored on Back
 static Window *s_browse_window = NULL;
 static MenuLayer *s_browse_menu = NULL;
 static StatusBarLayer *s_browse_status_bar = NULL;
@@ -847,7 +842,7 @@ static void push_habits_window(void);
 static void update_habits_empty_layer(void);
 static Task *find_task_by_id(const char *id);
 #if PROJECTS_BROWSER
-static void push_browse_window(void);
+static void push_browse_window(const char *jump_to_project);
 static void browse_update_empty(void);
 static void request_project_list(void);
 static void request_project_tasks(const char *project_id);
@@ -878,7 +873,6 @@ static void show_project_notes_overlay(TaskGroup *group);
 static void hide_notes_overlay(void);
 static void push_notes_window(void);
 static void pending_toggle_timer_callback(void *data);
-static void pending_project_click_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
 static void begin_pending_reschedule(RescheduleKind kind);
@@ -2341,7 +2335,7 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
       push_habits_window();
 #if PROJECTS_BROWSER
     } else if (kind == SECTION0_ROW_PROJECTS) {
-      push_browse_window();
+      push_browse_window(NULL);
 #endif
 #ifndef PBL_PLATFORM_APLITE
     } else if (kind == SECTION0_ROW_ADD_TASK) {
@@ -2361,27 +2355,14 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     push_live_window();
     return;
   }
-  // The project row - same double-click-to-show-notes gesture as a task row,
-  // but no single-click action to delay, so this just tracks a second click.
+  // The project row - Select opens that project's tasks in the browser,
+  // long-Select opens its notes (menu_select_long_click). Same split the
+  // browser's own project list uses.
   TaskGroup *project_row = resolve_project_row_at(*cell_index);
   if (project_row) {
-    if (s_pending_project_click_timer &&
-        strncmp(s_pending_project_click_id, project_row->project_id, MAX_PROJECT_ID_LEN) == 0) {
-      app_timer_cancel(s_pending_project_click_timer);
-      s_pending_project_click_timer = NULL;
-      s_pending_project_click_id[0] = '\0';
-      show_project_notes_overlay(project_row);
-      return;
-    }
-    if (s_pending_project_click_timer) {
-      app_timer_cancel(s_pending_project_click_timer);
-      s_pending_project_click_timer = NULL;
-      s_pending_project_click_id[0] = '\0';
-    }
-    strncpy(s_pending_project_click_id, project_row->project_id, MAX_PROJECT_ID_LEN - 1);
-    s_pending_project_click_id[MAX_PROJECT_ID_LEN - 1] = '\0';
-    s_pending_project_click_timer =
-        app_timer_register(DOUBLE_CLICK_WINDOW_MS, pending_project_click_timer_callback, NULL);
+#if PROJECTS_BROWSER
+    push_browse_window(project_row->project_id);
+#endif
     return;
   }
 #endif
@@ -2433,6 +2414,12 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
     // updated list back. Closes the app once the send confirms, not eagerly.
     s_close_after_finish_day_sent = true;
     send_finish_day();
+    return;
+  }
+  // The project row - long-Select opens its notes (Select opens its tasks).
+  TaskGroup *project_row = resolve_project_row_at(*cell_index);
+  if (project_row) {
+    show_project_notes_overlay(project_row);
     return;
   }
 #endif
@@ -2791,12 +2778,6 @@ static void pending_toggle_timer_callback(void *data) {
   send_task_toggle(task);
 }
 
-// Fires when a project row's double-click window passes - nothing to commit
-// (a project row has no single-click action), just the pending state to clear.
-static void pending_project_click_timer_callback(void *data) {
-  s_pending_project_click_timer = NULL;
-  s_pending_project_click_id[0] = '\0';
-}
 
 // Clears a pending move-to-tomorrow / unschedule (Select pressed within the
 // window, or the window's own task vanished) and redraws so the subtitle
@@ -4121,9 +4102,30 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   draw_task_row(ctx, bounds, bt, is_selected, false);
 }
 
-// Level 0: descend into the picked project. Level 1: toggle the task done -
-// same send the today list uses, and mirrored onto the today list if the task
-// is also on it.
+// Switch to level 1 for `project_id` and fetch its tasks. Shared by a
+// project-row Select in the browser, by push_browse_window's jump-straight-to
+// path, and by the today view's project row (via push_browse_window).
+static void browse_descend(const char *project_id) {
+  strncpy(s_browse_project_id, project_id, MAX_PROJECT_ID_LEN - 1);
+  s_browse_project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+  if (!s_browse_tasks) {
+    s_browse_tasks = malloc(sizeof(Task) * MAX_BROWSE_TASKS);
+  }
+  s_browse_task_count = 0;
+  s_browse_task_incoming = 0;
+  s_browse_backlog_start = 0;
+  s_browse_tasks_loading = true;
+  s_browse_level = 1;
+  if (s_browse_menu) {
+    menu_layer_set_selected_index(s_browse_menu, MenuIndex(0, 0), MenuRowAlignTop, false);
+    menu_layer_reload_data(s_browse_menu);
+    browse_update_empty();
+  }
+  request_project_tasks(s_browse_project_id);
+}
+
+// Level 0: Select opens the project's tasks. Level 1: Select toggles the task
+// done - same send the today list uses, mirrored onto the today list too.
 static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
   if (s_browse_level == 0) {
@@ -4131,21 +4133,7 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
     if (!p) {
       return;
     }
-    strncpy(s_browse_project_id, p->id, MAX_PROJECT_ID_LEN - 1);
-    s_browse_project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
-    if (!s_browse_tasks) {
-      s_browse_tasks = malloc(sizeof(Task) * MAX_BROWSE_TASKS);
-    }
-    s_browse_task_count = 0;
-    s_browse_task_incoming = 0;
-    s_browse_backlog_start = 0;
-    s_browse_tasks_loading = true;
-    s_browse_list_selected_row = (int)cell_index->row;
-    s_browse_level = 1;
-    menu_layer_set_selected_index(s_browse_menu, MenuIndex(0, 0), MenuRowAlignTop, false);
-    menu_layer_reload_data(s_browse_menu);
-    browse_update_empty();
-    request_project_tasks(s_browse_project_id);
+    browse_descend(p->id);
     return;
   }
   Task *bt = resolve_browse_task_at(*cell_index);
@@ -4163,11 +4151,18 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
   send_task_toggle(bt);
 }
 
-// Level 1 only: start / stop tracking the task, same as a long-Select on the
-// today list (start_tracking -> send_track_time_start).
+// Level 0: long-Select opens the selected project's notes (a project has no
+// tags, hence the cleared tags line). Level 1: long-Select starts / stops
+// tracking the task, same as a long-Select on the today list.
 static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
-  if (s_browse_level != 1) {
+  if (s_browse_level == 0) {
+    BrowseProject *p = resolve_browse_project_at(*cell_index);
+    if (!p) {
+      return;
+    }
+    s_notes_tags_line[0] = '\0';
+    show_notes_overlay_for(p->id, true);
     return;
   }
   Task *bt = resolve_browse_task_at(*cell_index);
@@ -4220,9 +4215,16 @@ static void browse_back_click_handler(ClickRecognizerRef recognizer, void *conte
     s_browse_project_id[0] = '\0';
     s_browse_tasks_loading = false;
     s_browse_level = 0;
+    // Entering the browser via a today-view project row jumps straight to
+    // level 1 and does NOT fetch the list up front (two back-to-back
+    // begin_send()s collide on the one outbox slot). Fetch it now, on the
+    // first Back, if it isn't already in hand.
+    if (s_browse_project_count == 0 && !s_browse_projects_loading) {
+      s_browse_projects_loading = true;
+      request_project_list();
+    }
     menu_layer_reload_data(s_browse_menu);
-    menu_layer_set_selected_index(s_browse_menu,
-                                   MenuIndex(0, s_browse_list_selected_row), MenuRowAlignCenter, false);
+    menu_layer_set_selected_index(s_browse_menu, MenuIndex(0, 0), MenuRowAlignTop, false);
     browse_update_empty();
     return;
   }
@@ -4291,9 +4293,11 @@ static void browse_window_unload(Window *window) {
   s_browse_level = 0;
 }
 
-static void push_browse_window(void) {
+// jump_to_project non-NULL opens straight at that project's tasks (level 1) -
+// the today view's project row uses this. Back from there lands on the project
+// list, fetched then (see browse_back_click_handler).
+static void push_browse_window(const char *jump_to_project) {
   s_browse_level = 0;
-  s_browse_list_selected_row = 0;
   if (!s_browse_projects) {
     s_browse_projects = malloc(sizeof(BrowseProject) * MAX_BROWSE_PROJECTS);
   }
@@ -4302,7 +4306,10 @@ static void push_browse_window(void) {
 #if PROJECTS_CACHE
   load_browse_projects();  // instant render from the cache; the fetch below refreshes it
 #endif
-  s_browse_projects_loading = (s_browse_project_count == 0);
+  bool jumping = jump_to_project && jump_to_project[0] != '\0';
+  // Only one begin_send() may be in flight (single outbox slot). A jump sends
+  // just the task fetch now; browse_back_click_handler fetches the list later.
+  s_browse_projects_loading = !jumping && (s_browse_project_count == 0);
   if (!s_browse_window) {
     s_browse_window = window_create();
     window_set_window_handlers(s_browse_window, (WindowHandlers) {
@@ -4311,7 +4318,11 @@ static void push_browse_window(void) {
     });
   }
   window_stack_push(s_browse_window, true);
-  request_project_list();
+  if (jumping) {
+    browse_descend(jump_to_project);
+  } else {
+    request_project_list();
+  }
 }
 #endif // PROJECTS_BROWSER
 
@@ -4976,10 +4987,6 @@ static void window_unload(Window *window) {
   if (s_pending_toggle_timer) {
     app_timer_cancel(s_pending_toggle_timer);
     s_pending_toggle_timer = NULL;
-  }
-  if (s_pending_project_click_timer) {
-    app_timer_cancel(s_pending_project_click_timer);
-    s_pending_project_click_timer = NULL;
   }
   if (s_pending_reschedule_timer) {
     app_timer_cancel(s_pending_reschedule_timer);
