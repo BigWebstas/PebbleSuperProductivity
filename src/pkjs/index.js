@@ -38,6 +38,8 @@ var MSG_PROJECT_NOTE_REQUEST = 21; // watch -> phone: PROJECT_ID
 var MSG_PROJECT_NOTE_SYNC_START = 22; // phone -> watch: PROJECT_ID + NOTE_TOTAL_LEN
 var MSG_PROJECT_NOTE_CHUNK = 23; // phone -> watch: PROJECT_ID + NOTE_CHUNK_TEXT
 var MSG_PROJECT_NOTE_SYNC_END = 24; // phone -> watch: PROJECT_ID
+var MSG_TASK_PLAN_TOMORROW = 25; // watch -> phone: TASK_ID (set the task's dueDay to tomorrow)
+var MSG_TASK_UNSCHEDULE = 26; // watch -> phone: TASK_ID (clear the task's scheduling)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -987,6 +989,57 @@ function handleTaskToggle(taskId, done) {
     });
 }
 
+// Watch long-press Up / Down (or swipe-left) after a 3s cancel window:
+// toTomorrow=true sets the task's dueDay to tomorrow, false clears its
+// scheduling entirely. Both go out as a single "[Task Shared] updateTask" op -
+// the watch has no planner-list UI, and dueDay is the field every "today"
+// membership check keys off (task-store.js). dueWithTime/remindAt are cleared
+// alongside either way, mirroring the real app's own scheduleTask/unschedule
+// reducers (dueDay and dueWithTime are mutually exclusive there).
+function handleTaskReschedule(taskId, toTomorrow) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task) {
+    // Deleted elsewhere between the list push and the gesture - nothing to do.
+    return;
+  }
+
+  var newDueDay = null;
+  if (toTomorrow) {
+    var d = new Date();
+    d.setDate(d.getDate() + 1);
+    newDueDay = store.dateToDateStr(d);
+  }
+  // null (not undefined) so the cleared fields survive JSON.stringify onto the
+  // wire and actually clear on other clients, not just locally.
+  var changes = { dueDay: newDueDay, dueWithTime: null, remindAt: null };
+  state.task[taskId] = Object.assign({}, task, changes);
+  saveState(state);
+
+  var clientId = getOrCreateClientId();
+  var op = buildTaskUpdateOp(taskId, changes, clientId);
+
+  // The task usually drops out of a Today-only view now - push the fresh list
+  // right away rather than waiting for the follow-up sync (same as archive).
+  sendTaskListToWatch(store.getActiveTasks(state, MAX_TASKS, !!config.groupByProject, !!config.todayOnly, !!config.hideDoneTasks));
+
+  var failureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload task reschedule: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, failureMsg);
+    });
+}
+
 function handleTrackTimeStop(taskId, trackedMs) {
   var config = loadConfig();
   if (!config || !config.jwt) {
@@ -1768,6 +1821,12 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_ADD:
       handleAddTask(payload.TASK_TITLE);
+      break;
+    case MSG_TASK_PLAN_TOMORROW:
+      handleTaskReschedule(payload.TASK_ID, true);
+      break;
+    case MSG_TASK_UNSCHEDULE:
+      handleTaskReschedule(payload.TASK_ID, false);
       break;
     case MSG_FINISH_DAY:
       handleFinishDay();

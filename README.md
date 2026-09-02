@@ -23,10 +23,27 @@ Shown at Pebble Time 2 size. The same shots sized for other platforms:
 - **Long-press Select** — start/stop time tracking; append a note on the notes
   screen; increment a habit
 - **Double-click Select** — show a task's or project's notes and tags
+- **Long-press Down** — move the highlighted task to tomorrow
+- **Long-press Up** — clear the highlighted task's scheduling
 - **Back** — previous screen
 
-Time-2 touch navigation (swipe to scroll, tap a row, swipe right to go back) is
-experimental and off by default — enable "Touch navigation" in settings.
+Long-press Up/Down opens a 3-second cancel window — the row shows "Moving to
+tomorrow..." or "Un-Scheduling...", and a Select press cancels before it
+commits. Not available on `aplite`.
+
+### Touch (Pebble Time 2)
+
+Experimental, off by default — enable **Touch navigation** in settings.
+
+- **Swipe up / down** — scroll
+- **Tap a row** — select it only (toggling done, opening notes, and bumping a
+  habit stay on the Select button)
+- **Long-press a row** — the same action as long-press Select
+- **Swipe left** — move the highlighted task to tomorrow
+- **Swipe right** — back
+
+On first-generation Time 2 hardware the touch driver misreads edge taps, so
+touch is opt-in until a firmware fix lands.
 
 ## Pairing
 
