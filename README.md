@@ -19,17 +19,34 @@ Shown at Pebble Time 2 size. The same shots sized for other platforms:
 ## Controls
 
 - **Up / Down** — scroll the list
-- **Select** — toggle a task done; on an action row, activate it
-- **Long-press Select** — start/stop time tracking; append a note on the notes
-  screen; increment a habit
-- **Double-click Select** — show a task's or project's notes and tags
+- **Select** — toggle a task done; on a project header, open that project (see
+  [Projects](#projects)); on an action row, activate it
+- **Long-press Select** — start/stop time tracking; open a project's notes;
+  append a note on the notes screen; increment a habit
+- **Double-click Select** — show a task's notes and tags
 - **Long-press Down** — move the highlighted task to tomorrow
-- **Long-press Up** — clear the highlighted task's scheduling
+- **Long-press Up** — clear the highlighted task's scheduling (today list)
 - **Back** — previous screen
 
 Long-press Up/Down opens a 3-second cancel window — the row shows "Moving to
-tomorrow..." or "Un-Scheduling...", and a Select press cancels before it
-commits. Not available on `aplite`.
+tomorrow..." / "Un-Scheduling..." (or "Scheduling for today..." in the Projects
+view), and a Select press cancels before it commits. Not available on `aplite`.
+
+### Projects
+
+The **Projects** action row opens a list of every project; pick one for its
+tasks — the live list, then its backlog under a divider. Not on `aplite`.
+
+- **Select** a project — open its tasks
+- **Long-press Select** a project — open its notes
+- **Select** a task — toggle it done
+- **Long-press Select** a task — start / stop tracking it
+- **Long-press Down** a task — move it to tomorrow
+- **Long-press Up** a task — move it to today
+
+Scheduling a task that's in the backlog also moves it into the regular list.
+Toggling done and tracking round-trip to the desktop, and a task tracked here
+shows in the today page's TRACKING section too.
 
 ### Touch (Pebble Time 2)
 
