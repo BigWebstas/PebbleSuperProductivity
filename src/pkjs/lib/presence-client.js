@@ -1,7 +1,12 @@
 // Live tracking presence over the SuperSync WebSocket (super-productivity
-// desktop v18.21.1, PR #9771). Phase 1: VIEWER + remote stop only - this
-// client renders what another device is tracking and can ask that device to
-// stop; it does not broadcast its own tracking state (that is Phase 2).
+// desktop v18.21.1, PR #9771).
+//   Phase 1 (viewer): renders what another device is tracking, can ask it to
+//     stop (requestStop / onState / onCleared).
+//   Phase 2 (producer): broadcasts THIS watch's own tracking as "Pebble" so
+//     the desktop shows it, honours a remote stop command
+//     (broadcastTracking / broadcastStopped / onStopCommand). A 60s heartbeat
+//     keeps it fresh; on socket drop the server flips producerConnected and
+//     other devices decay it to "was tracking" then hide it.
 //
 // Wire contract mirrored from the super-productivity repo (UNVERIFIED against
 // a live account, same caveat as supersync-client.js's REST routes):
@@ -34,6 +39,12 @@ var STOPPED_LINGER_MS = 10 * 1000;
 
 // Socket liveness: server pings ~30s, so silence past this means a dead pipe.
 var LIVENESS_TIMEOUT_MS = 45 * 1000;
+
+// Producer heartbeat - re-announce our tracking state before other devices'
+// 90s staleness window would decay it (tracking-presence.service.ts).
+var HEARTBEAT_MS = 60 * 1000;
+
+var DEVICE_LABEL = 'Pebble';
 
 var MIN_RECONNECT_MS = 1000;
 var MAX_RECONNECT_MS = 60 * 1000;
@@ -71,6 +82,7 @@ function PresenceClient(opts) {
   this._livenessMs = t.livenessMs || LIVENESS_TIMEOUT_MS;
   this._minReconnectMs = t.minReconnectMs || MIN_RECONNECT_MS;
   this._maxReconnectMs = t.maxReconnectMs || MAX_RECONNECT_MS;
+  this._heartbeatMs = t.heartbeatMs || HEARTBEAT_MS;
 
   this._ws = null;
   this._intentionalClose = false;
@@ -78,13 +90,19 @@ function PresenceClient(opts) {
   this._reconnectTimer = null;
   this._livenessTimer = null;
   this._lingerTimer = null;
+  this._heartbeatTimer = null;
 
-  // Dedupe / current-view state.
+  // Viewer: dedupe / current-view state.
   this._lastOrdinal = -1;
   this._current = null; // last emitted session view, or null
+  this._triedDeriveSalts = {}; // b64-salt-prefix -> true, deferred-derive dedupe
+
+  // Producer: this watch's own broadcast session, or null when not tracking.
+  this._producer = null; // { sessionId, taskId, sinceTs, seq }
 
   this._onStateCb = noop;
   this._onClearedCb = noop;
+  this._onStopCommandCb = noop;
 }
 
 // cb({ state, reason, taskId, sinceTs, deviceLabel, sessionId, seq,
@@ -118,6 +136,8 @@ PresenceClient.prototype.disconnect = function () {
   this._clearTimer('_reconnectTimer');
   this._clearTimer('_livenessTimer');
   this._clearTimer('_lingerTimer');
+  this._stopHeartbeat();
+  this._producer = null;
   if (this._ws) {
     try {
       this._ws.close(1000, 'client disconnect');
@@ -149,6 +169,87 @@ PresenceClient.prototype.requestStop = function (sessionId) {
   this._send({ type: 'presence_cmd', payload: JSON.stringify(envelope) });
 };
 
+// ---------------- producer (Phase 2) ----------------
+
+// cb() - a remote device asked us to stop the session we're broadcasting.
+// The caller should stop the watch's timer; the resulting broadcastStopped()
+// is the ack that clears the commanding device.
+PresenceClient.prototype.onStopCommand = function (cb) {
+  this._onStopCommandCb = cb || noop;
+};
+
+function genSessionId() {
+  return 'pres-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
+// Announce (or re-announce) that this watch is tracking `taskId`, started at
+// wall-clock ms `sinceTs`. A new task starts a new session. Safe to call
+// before the socket is open - the state is stored and sent on connect.
+PresenceClient.prototype.broadcastTracking = function (taskId, sinceTs) {
+  if (!this._producer || this._producer.taskId !== taskId) {
+    this._producer = { sessionId: genSessionId(), taskId: taskId, sinceTs: sinceTs, seq: 0 };
+  } else {
+    this._producer.sinceTs = sinceTs;
+  }
+  this._sendProducerState('tracking');
+  this._startHeartbeat();
+};
+
+// Announce that this watch stopped tracking. No-op if we weren't broadcasting.
+PresenceClient.prototype.broadcastStopped = function () {
+  if (!this._producer) {
+    return;
+  }
+  this._sendProducerState('stopped');
+  this._stopHeartbeat();
+  this._producer = null;
+};
+
+PresenceClient.prototype.isBroadcasting = function () {
+  return !!this._producer;
+};
+
+PresenceClient.prototype._sendProducerState = function (state) {
+  if (!this._producer) {
+    return;
+  }
+  this._producer.seq++;
+  var payload = {
+    v: 1,
+    sessionId: this._producer.sessionId,
+    seq: this._producer.seq,
+    state: state,
+    taskId: this._producer.taskId,
+    sinceTs: this._producer.sinceTs,
+    deviceLabel: DEVICE_LABEL,
+  };
+  var envelope = this._encodeEnvelope(payload);
+  if (!envelope) {
+    this._log('broadcast: could not encode state envelope');
+    return;
+  }
+  this._send({ type: 'presence_state', payload: JSON.stringify(envelope) });
+};
+
+PresenceClient.prototype._startHeartbeat = function () {
+  if (this._heartbeatTimer) {
+    return;
+  }
+  var self = this;
+  this._heartbeatTimer = setInterval(function () {
+    if (self._producer) {
+      self._sendProducerState('tracking');
+    }
+  }, this._heartbeatMs);
+};
+
+PresenceClient.prototype._stopHeartbeat = function () {
+  if (this._heartbeatTimer) {
+    clearInterval(this._heartbeatTimer);
+    this._heartbeatTimer = null;
+  }
+};
+
 // ---------------- socket ----------------
 
 PresenceClient.prototype._open = function () {
@@ -174,6 +275,12 @@ PresenceClient.prototype._open = function () {
     self._log('connected');
     self._reconnectAttempts = 0;
     self._armLiveness();
+    // Re-announce our tracking state after a (re)connect - a fresh socket
+    // means the server's single-slot cache lost it.
+    if (self._producer) {
+      self._sendProducerState('tracking');
+      self._startHeartbeat();
+    }
   };
 
   ws.onmessage = function (event) {
@@ -239,9 +346,29 @@ PresenceClient.prototype._handleFrame = function (msg) {
       }
       break;
     case 'presence_cmd':
-      break; // Phase 1 viewer: we send these, never act on them
+      if (typeof msg.payload === 'string') {
+        this._onPresenceCmd(msg.payload);
+      }
+      break;
     default:
       break;
+  }
+};
+
+// A relayed command from another device. Phase 2 acts only on a "stop" that
+// names the session we're currently broadcasting (CAS guard).
+PresenceClient.prototype._onPresenceCmd = function (payloadStr) {
+  if (!this._producer) {
+    return;
+  }
+  var decoded = this._decodeEnvelope(payloadStr);
+  if (!decoded || decoded.opaque) {
+    return;
+  }
+  var cmd = decoded.payload;
+  if (cmd && cmd.v === 1 && cmd.cmd === 'stop' && cmd.sessionId === this._producer.sessionId) {
+    this._log('remote stop for our session');
+    this._onStopCommandCb();
   }
 };
 
@@ -324,22 +451,28 @@ PresenceClient.prototype._decodeEnvelope = function (payloadStr) {
   var crypto = this._getCrypto();
   if (envelope.enc) {
     if (!crypto) {
+      this._log('presence payload encrypted but no sync key configured');
       return { opaque: 'no-key' };
     }
     if (!crypto.canDecryptWithoutDerive(envelope.data)) {
       // Deriving Argon2id here would stall the socket for tens of seconds.
+      // The producing device encrypts under its own op-session salt; the
+      // watch only has it cached once a sync has decrypted one of that
+      // device's ops. Shown opaquely until then.
+      this._log('presence payload under an uncached key salt - shown opaquely');
       return { opaque: 'needs-derive' };
     }
     try {
       return { payload: crypto.decrypt(envelope.data) };
     } catch (e) {
-      this._log('decrypt failed: ' + (e && e.message));
+      this._log('presence decrypt failed: ' + (e && e.message));
       return null;
     }
   }
   if (crypto) {
     // Encryption configured but the envelope is plaintext - hostile-server
     // guard, fail closed (tracking-presence.service.ts does the same).
+    this._log('presence payload is plaintext while a key is configured - refusing');
     return { opaque: 'plaintext' };
   }
   try {
@@ -384,10 +517,60 @@ PresenceClient.prototype._onPresenceState = function (payloadStr, ordinal, produ
       ordinal: ordinal,
       receivedAt: this._current.receivedAt,
     });
+    // The producing device (often another phone) encrypts under a session
+    // salt this watch hasn't derived yet - a normal sync only caches it once
+    // it decrypts one of that device's ops, which may not happen while the
+    // device is merely tracking time. Derive it once, off the socket's
+    // message path (a brief JS pause), so the task name shows on the next
+    // heartbeat if not sooner.
+    if (decoded.opaque === 'needs-derive') {
+      this._deferredDerive(payloadStr, ordinal, producerConnected);
+    }
     return;
   }
 
-  var p = decoded.payload;
+  this._applyDecodedPayload(decoded.payload, ordinal, producerConnected);
+};
+
+// One-shot background Argon2id derive for a producer whose salt we lack.
+// Deduped per salt per session so a repeating heartbeat can't loop it.
+PresenceClient.prototype._deferredDerive = function (payloadStr, ordinal, producerConnected) {
+  var crypto = this._getCrypto();
+  if (!crypto) {
+    return;
+  }
+  var data;
+  try {
+    data = JSON.parse(payloadStr).data;
+  } catch (e) {
+    return;
+  }
+  if (typeof data !== 'string' || data.length < 24) {
+    return;
+  }
+  var saltKey = data.slice(0, 24); // base64 of the 16-byte salt prefix
+  if (this._triedDeriveSalts[saltKey]) {
+    return;
+  }
+  this._triedDeriveSalts[saltKey] = true;
+  this._log('deriving this producer key once - the app may pause briefly');
+  var self = this;
+  setTimeout(function () {
+    var p;
+    try {
+      p = crypto.decrypt(data);
+    } catch (e) {
+      self._log('deferred presence decrypt failed: ' + (e && e.message));
+      return;
+    }
+    // Apply only if nothing newer has superseded this frame meanwhile.
+    if (ordinal >= self._lastOrdinal) {
+      self._applyDecodedPayload(p, ordinal, producerConnected);
+    }
+  }, 0);
+};
+
+PresenceClient.prototype._applyDecodedPayload = function (p, ordinal, producerConnected) {
   if (!p || p.v !== 1 ||
       typeof p.sessionId !== 'string' ||
       (p.state !== 'tracking' && p.state !== 'stopped') ||
@@ -439,5 +622,7 @@ module.exports = {
   PresenceClient: PresenceClient,
   STALE_AFTER_MS: STALE_AFTER_MS,
   STOPPED_LINGER_MS: STOPPED_LINGER_MS,
+  HEARTBEAT_MS: HEARTBEAT_MS,
+  DEVICE_LABEL: DEVICE_LABEL,
   sanitizeDeviceLabel: sanitizeDeviceLabel,
 };

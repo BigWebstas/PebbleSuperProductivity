@@ -48,6 +48,9 @@ var MSG_TASK_UNSCHEDULE = 26; // watch -> phone: TASK_ID (clear the task's sched
 // / PRESENCE_CAN_STOP. Both aplite-ignored (the watch has no case for them).
 var MSG_PRESENCE_UPDATE = 27; // phone -> watch: PRESENCE_* (0 = hide the LIVE UI)
 var MSG_PRESENCE_STOP = 28;   // watch -> phone: stop the session currently shown
+// Phase 2 - the watch broadcasts its OWN time-tracking as presence ("Pebble").
+var MSG_TRACK_TIME_START = 29;    // watch -> phone: TASK_ID + TRACKED_MS (elapsed so far, 0 on a fresh start)
+var MSG_PRESENCE_STOP_LOCAL = 30; // phone -> watch: a remote device stopped the watch's timer, stop it here
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -1048,6 +1051,31 @@ function handleTaskReschedule(taskId, toTomorrow) {
     });
 }
 
+// Phase 2: the watch started tracking `taskId` (elapsedMs > 0 for a session
+// resumed on relaunch). Broadcast it as this watch's own presence so other
+// devices see "Tracking on Pebble". A no-op on the op-log - time still only
+// syncs on stop (handleTrackTimeStop). Stored even when the socket isn't up
+// yet; applyPresence flushes it on connect.
+function handleTrackStart(taskId, elapsedMs) {
+  if (!taskId) {
+    return;
+  }
+  presenceBroadcasting = { taskId: String(taskId), sinceTs: Date.now() - (elapsedMs || 0) };
+  if (presenceClient) {
+    presenceClient.broadcastTracking(presenceBroadcasting.taskId, presenceBroadcasting.sinceTs);
+  }
+}
+
+// Phase 2: the watch stopped tracking - end the "Tracking on Pebble" broadcast.
+// Separate from the op upload in handleTrackTimeStop so it still fires for a
+// sub-second session that carries no time delta.
+function handleTrackStopBroadcast() {
+  if (presenceClient) {
+    presenceClient.broadcastStopped();
+  }
+  presenceBroadcasting = null;
+}
+
 function handleTrackTimeStop(taskId, trackedMs) {
   var config = loadConfig();
   if (!config || !config.jwt) {
@@ -1803,6 +1831,10 @@ var presenceClientToken = null;
 var presenceLastSessionId = null;
 var presenceLastReceivedAt = 0;
 var presenceStaleTimer = null;
+// Phase 2: what this watch is currently broadcasting as its own tracking, or
+// null. Kept here (not just in presence-client) so a MSG_TRACK_TIME_START that
+// lands before the socket is open still gets announced once it connects.
+var presenceBroadcasting = null; // { taskId, sinceTs }
 
 // How often to re-check whether a shown "tracking" session has gone silent
 // (producer closed its app without a final "stopped").
@@ -1874,6 +1906,25 @@ function pushPresenceToWatch(view, stale) {
 function onPresenceState(view) {
   presenceLastReceivedAt = Date.now();
   presenceLastSessionId = view.opaque ? null : view.sessionId;
+
+  // While THIS watch is broadcasting its own tracking, a remote device also
+  // claiming "tracking" is a takeover contest (only one active session
+  // account-wide). Later start wins - mirrors _resolveTakeover on the desktop.
+  if (presenceBroadcasting && !view.opaque && view.state === 'tracking') {
+    if (view.sinceTs > presenceBroadcasting.sinceTs) {
+      // Remote is newer - stop the watch's timer and let the remote show.
+      sendWithRetry({ MSG_TYPE: MSG_PRESENCE_STOP_LOCAL }, function () {}, function () {});
+    } else {
+      // We are newer - re-announce so the other device stops itself, and
+      // don't show its (losing) state on our own watch.
+      if (presenceClient) {
+        presenceClient.broadcastTracking(presenceBroadcasting.taskId, presenceBroadcasting.sinceTs);
+      }
+      stopPresenceStaleTimer();
+      return;
+    }
+  }
+
   pushPresenceToWatch(view, false);
 
   stopPresenceStaleTimer();
@@ -1899,6 +1950,7 @@ function applyPresence(config) {
     presenceClient = null;
   }
   if (!wantsPresence) {
+    presenceBroadcasting = null;
     sendPresenceClear();
     return;
   }
@@ -1913,8 +1965,18 @@ function applyPresence(config) {
     });
     presenceClient.onState(onPresenceState);
     presenceClient.onCleared(sendPresenceClear);
+    // A remote device stopped the timer this watch is broadcasting - relay
+    // the stop to the watch; its own MSG_TRACK_TIME_STOP then acks it.
+    presenceClient.onStopCommand(function () {
+      sendWithRetry({ MSG_TYPE: MSG_PRESENCE_STOP_LOCAL }, function () {}, function () {});
+    });
   }
   presenceClient.connect();
+  // Resume broadcasting a session already in progress (the watch told us
+  // before the socket was up, or the client was just rebuilt).
+  if (presenceBroadcasting) {
+    presenceClient.broadcastTracking(presenceBroadcasting.taskId, presenceBroadcasting.sinceTs);
+  }
 }
 
 // ---------------- Pebble event wiring ----------------
@@ -1946,8 +2008,12 @@ Pebble.addEventListener('appmessage', function (e) {
     case MSG_TASK_TOGGLE:
       handleTaskToggle(payload.TASK_ID, payload.TASK_DONE === 1);
       break;
+    case MSG_TRACK_TIME_START:
+      handleTrackStart(payload.TASK_ID, payload.TRACKED_MS);
+      break;
     case MSG_TRACK_TIME_STOP:
       handleTrackTimeStop(payload.TASK_ID, payload.TRACKED_MS);
+      handleTrackStopBroadcast();
       break;
     case MSG_HABIT_ADJUST:
       handleHabitAdjust(payload.HABIT_ID, payload.HABIT_DELTA);

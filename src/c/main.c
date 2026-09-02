@@ -89,6 +89,9 @@ enum {
   // the remote stop.
   MSG_PRESENCE_UPDATE = 27,         // phone -> watch: PRESENCE_* (STATE 0 hides the LIVE UI)
   MSG_PRESENCE_STOP = 28,           // watch -> phone: stop the session shown in the LIVE UI
+  // Phase 2 - the watch broadcasts its own time-tracking as presence ("Pebble").
+  MSG_TRACK_TIME_START = 29,        // watch -> phone: TASK_ID + TRACKED_MS (elapsed so far, 0 on a fresh start)
+  MSG_PRESENCE_STOP_LOCAL = 30,     // phone -> watch: a remote device stopped this watch's timer - stop it here
 };
 
 // STATUS_CODE values sent from the phone.
@@ -1703,6 +1706,7 @@ static void send_pending_retry(void) {
       dict_write_int32(iter, KEY_TASK_DONE, s_retry_int);
       break;
     case MSG_TRACK_TIME_STOP:
+    case MSG_TRACK_TIME_START:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_int32(iter, KEY_TRACKED_MS, s_retry_int);
       break;
@@ -1801,6 +1805,16 @@ static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
   begin_send(MSG_TRACK_TIME_STOP, task_id, NULL, tracked_ms);
 #endif
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// Phase 2 live-tracking presence: tells the phone this watch just started (or
+// resumed, elapsed_ms > 0) tracking a task, so it can broadcast "Tracking on
+// Pebble" to the account's other devices. aplite-excluded with the rest of
+// the presence feature.
+static void send_track_time_start(const char *task_id, int32_t elapsed_ms) {
+  begin_send(MSG_TRACK_TIME_START, task_id, NULL, elapsed_ms);
+}
+#endif
 
 #ifndef PBL_PLATFORM_APLITE
 // Move the task to tomorrow (tomorrow=true) or clear its scheduling. The phone
@@ -2028,6 +2042,8 @@ static void start_tracking(Task *task) {
     // Highlight the freshly-pinned row (section 1, row 0).
     menu_layer_set_selected_index(s_menu_layer, MenuIndex(1, 0), MenuRowAlignCenter, false);
   }
+  // Let the phone broadcast this as "Tracking on Pebble" to other devices.
+  send_track_time_start(task->id, 0);
 #endif
 }
 
@@ -2038,6 +2054,19 @@ static void stop_tracking_and_report(void) {
     return;
   }
   time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
+#ifndef PBL_PLATFORM_APLITE
+  // Always sent (even a 0ms session) so the phone can end the "Tracking on
+  // Pebble" presence broadcast; the phone ignores a 0 delta for the op upload.
+  int32_t elapsed_ms = elapsed_s > 0 ? (int32_t)elapsed_s * 1000 : 0;
+  send_track_time_stop(s_tracking_task_id, elapsed_ms);
+  if (elapsed_ms > 0) {
+    Task *tracked_task = find_task_by_id(s_tracking_task_id);
+    if (tracked_task) {
+      tracked_task->time_spent_ms += elapsed_ms;
+      save_tasks();
+    }
+  }
+#else
   if (elapsed_s > 0) {
     int32_t elapsed_ms = (int32_t)elapsed_s * 1000;
     send_track_time_stop(s_tracking_task_id, elapsed_ms);
@@ -2049,6 +2078,7 @@ static void stop_tracking_and_report(void) {
       save_tasks();
     }
   }
+#endif
   s_tracking_task_id[0] = '\0';
   s_tracking_start_epoch = 0;
   save_tracking();
@@ -3028,6 +3058,17 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         refresh_scroll_state(true);
       }
       live_window_refresh(); // updates or pops the detail window if it's open
+      break;
+    }
+    case MSG_PRESENCE_STOP_LOCAL: {
+      // A remote device stopped the timer this watch is running. Stop it the
+      // same as a long-press would - stop_tracking_and_report() sends the
+      // MSG_TRACK_TIME_STOP the phone turns into the presence "stopped" ack.
+      if (s_tracking_task_id[0] != '\0') {
+        stop_tracking_and_report();
+        menu_layer_reload_data(s_menu_layer);
+        refresh_scroll_state(true);
+      }
       break;
     }
     case MSG_NOTE_SYNC_START: {
@@ -4240,6 +4281,11 @@ static void window_load(Window *window) {
   // elapsed total comes from the persisted start timestamp).
   if (s_tracking_task_id[0] != '\0') {
     start_tracking_tick();
+#ifndef PBL_PLATFORM_APLITE
+    // Re-announce the resumed session so the phone can broadcast it again.
+    time_t resumed_s = time(NULL) - s_tracking_start_epoch;
+    send_track_time_start(s_tracking_task_id, resumed_s > 0 ? (int32_t)resumed_s * 1000 : 0);
+#endif
   }
 }
 

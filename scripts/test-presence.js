@@ -65,7 +65,7 @@ function newClient(over) {
       clientId: 'pebble-test',
       getCrypto: () => null,
       log: () => {},
-      tuning: { lingerMs: 10, livenessMs: 10000, minReconnectMs: 5 },
+      tuning: { lingerMs: 10, livenessMs: 10000, minReconnectMs: 5, heartbeatMs: 10000 },
     },
     over || {}
   );
@@ -263,9 +263,10 @@ check('E2EE: decodes a ciphertext whose salt is cached; refuses plaintext', () =
 });
 
 check('E2EE: an uncached salt is shown opaquely, never derived inline', () => {
+  let inlineCalls = 0;
   const viewer = {
     canDecryptWithoutDerive: () => false,
-    decrypt: () => { throw new Error('must not derive/decrypt inline'); },
+    decrypt: () => { inlineCalls++; throw new Error('stop'); },
     encrypt: () => 'x',
   };
   const c = newClient({ getCrypto: () => viewer });
@@ -273,10 +274,137 @@ check('E2EE: an uncached salt is shown opaquely, never derived inline', () => {
   c.onState((s) => { got = s; });
   lastSocket._emit({
     type: 'presence_state',
-    payload: JSON.stringify({ enc: true, data: 'AAAA' }),
+    payload: JSON.stringify({ enc: true, data: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAA' }),
     ordinal: 1,
   });
+  // Opaque emitted synchronously; no inline decrypt on the message path.
   assert.ok(got && got.opaque && got.reason === 'needs-derive');
+  assert.strictEqual(inlineCalls, 0);
+});
+
+check('E2EE: an uncached salt is derived once in the background, then shown', async () => {
+  let deriveCalls = 0;
+  const real = {
+    v: 1, sessionId: 'a1', seq: 3, state: 'tracking',
+    taskId: 'task-77', sinceTs: 1700000000000, deviceLabel: 'Android',
+  };
+  const viewer = {
+    canDecryptWithoutDerive: () => false,
+    decrypt: () => { deriveCalls++; return real; },
+    encrypt: () => 'x',
+  };
+  const c = newClient({ getCrypto: () => viewer });
+  const seen = [];
+  c.onState((s) => { seen.push(s); });
+  const frame = { type: 'presence_state', payload: JSON.stringify({ enc: true, data: 'S'.repeat(40) }), ordinal: 1 };
+  lastSocket._emit(frame);
+  assert.ok(seen[0].opaque, 'first emit opaque');
+  await delay(5);
+  assert.strictEqual(deriveCalls, 1, 'derived exactly once');
+  assert.strictEqual(seen[seen.length - 1].opaque, false);
+  assert.strictEqual(seen[seen.length - 1].taskId, 'task-77');
+  assert.strictEqual(seen[seen.length - 1].deviceLabel, 'Android');
+  // A repeat frame (same salt) must not schedule a second derive. (With the
+  // real crypto the salt is cached after the first derive and decodes inline;
+  // only this always-false mock keeps reporting needs-derive.)
+  lastSocket._emit({ type: 'presence_state', payload: frame.payload, ordinal: 2 });
+  await delay(5);
+  assert.strictEqual(deriveCalls, 1, 'no second derive for the same salt');
+});
+
+// ---- producer (Phase 2) ------------------------------------------------
+
+function lastStateSent() {
+  const states = lastSocket._sentOfType('presence_state');
+  if (!states.length) return null;
+  const env = JSON.parse(states[states.length - 1].payload);
+  return JSON.parse(env.data);
+}
+
+check('broadcastTracking sends a tracking state labelled Pebble', () => {
+  const c = newClient();
+  c.broadcastTracking('task-9', 1700000000000);
+  const p = lastStateSent();
+  assert.strictEqual(p.state, 'tracking');
+  assert.strictEqual(p.taskId, 'task-9');
+  assert.strictEqual(p.deviceLabel, 'Pebble');
+  assert.strictEqual(p.sinceTs, 1700000000000);
+  assert.strictEqual(p.v, 1);
+  assert.ok(typeof p.sessionId === 'string' && p.sessionId.length > 0);
+  assert.ok(c.isBroadcasting());
+});
+
+check('same task keeps the session and bumps seq; a new task starts a new one', () => {
+  const c = newClient();
+  c.broadcastTracking('task-9', 1000);
+  const first = lastStateSent();
+  c.broadcastTracking('task-9', 1000);
+  const second = lastStateSent();
+  assert.strictEqual(second.sessionId, first.sessionId);
+  assert.ok(second.seq > first.seq);
+  c.broadcastTracking('task-X', 2000);
+  const third = lastStateSent();
+  assert.notStrictEqual(third.sessionId, first.sessionId);
+});
+
+check('broadcastStopped sends stopped then clears the producer', () => {
+  const c = newClient();
+  c.broadcastTracking('task-9', 1000);
+  c.broadcastStopped();
+  assert.strictEqual(lastStateSent().state, 'stopped');
+  assert.strictEqual(c.isBroadcasting(), false);
+  c.broadcastStopped(); // no-op, no throw
+});
+
+check('the heartbeat re-announces the tracking state', async () => {
+  const c = newClient({ tuning: { heartbeatMs: 15, lingerMs: 10, livenessMs: 10000, minReconnectMs: 5 } });
+  c.broadcastTracking('task-9', 1000);
+  const before = lastSocket._sentOfType('presence_state').length;
+  await delay(40);
+  assert.ok(lastSocket._sentOfType('presence_state').length > before, 'heartbeat sent more states');
+  c.broadcastStopped();
+});
+
+check('a reconnect re-announces the tracking state', async () => {
+  const c = newClient();
+  c.broadcastTracking('task-9', 1000);
+  const old = lastSocket;
+  old.onclose({ code: 1006 });
+  await delay(20); // let the backoff reconnect fire
+  assert.notStrictEqual(lastSocket, old, 'a new socket was created');
+  lastSocket._open();
+  assert.strictEqual(lastStateSent().state, 'tracking');
+});
+
+check('a presence_cmd stop for our session fires onStopCommand', () => {
+  const c = newClient();
+  let stopped = 0;
+  c.onStopCommand(() => { stopped++; });
+  c.broadcastTracking('task-9', 1000);
+  const sess = lastStateSent().sessionId;
+  const env = JSON.stringify({ enc: false, data: JSON.stringify({ v: 1, cmd: 'stop', sessionId: sess }) });
+  lastSocket._emit({ type: 'presence_cmd', payload: env });
+  assert.strictEqual(stopped, 1);
+  // A stale sessionId is ignored.
+  const stale = JSON.stringify({ enc: false, data: JSON.stringify({ v: 1, cmd: 'stop', sessionId: 'nope' }) });
+  lastSocket._emit({ type: 'presence_cmd', payload: stale });
+  assert.strictEqual(stopped, 1);
+});
+
+check('presence_cmd is ignored when we are not broadcasting', () => {
+  const c = newClient();
+  let stopped = 0;
+  c.onStopCommand(() => { stopped++; });
+  const env = JSON.stringify({ enc: false, data: JSON.stringify({ v: 1, cmd: 'stop', sessionId: 'x' }) });
+  lastSocket._emit({ type: 'presence_cmd', payload: env });
+  assert.strictEqual(stopped, 0);
+});
+
+check('disconnect stops broadcasting', () => {
+  const c = newClient();
+  c.broadcastTracking('task-9', 1000);
+  c.disconnect();
+  assert.strictEqual(c.isBroadcasting(), false);
 });
 
 // ---- runner ------------------------------------------------------------
@@ -296,7 +424,9 @@ check('E2EE: an uncached salt is shown opaquely, never derived inline', () => {
   if (failures > 0) {
     console.log(`${failures} check(s) FAILED`);
     process.exit(1);
-  } else {
-    console.log('All checks passed.');
   }
+  console.log('All checks passed.');
+  // Tests deliberately leave sockets / heartbeats running (no per-test
+  // teardown); exit rather than let those timers keep the process alive.
+  process.exit(0);
 })();
