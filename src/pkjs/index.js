@@ -364,11 +364,6 @@ function sendStatus(code, message) {
     // stays over, instead of just once per session. Inert on the watch when
     // overtimeNotify itself is off. Always included, same reasoning as above.
     OVERTIME_REPEAT_ENABLED: config.overtimeRepeat ? 1 : 0,
-    // "Pin the task you're tracking to the top" on/off, mirrored to the
-    // watch's s_pin_tracked_task_enabled. Off by default (opt-in). Drives
-    // the pinned "TRACKING" section in main.c (aplite ignores it - see that
-    // flag's comment). Always included, same reasoning as above.
-    PIN_TRACKED_TASK_ENABLED: config.pinTrackedTask ? 1 : 0,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -2096,7 +2091,6 @@ Pebble.addEventListener('showConfiguration', function () {
       touchNav: !!config.touchNav,
       overtimeNotify: !!config.overtimeNotify,
       overtimeRepeat: !!config.overtimeRepeat,
-      pinTrackedTask: !!config.pinTrackedTask,
       liveTracking: !!config.liveTracking,
     }
   );
@@ -2169,7 +2163,6 @@ Pebble.addEventListener('webviewclosed', function (e) {
     touchNav: !!result.touchNav,
     overtimeNotify: !!result.overtimeNotify,
     overtimeRepeat: !!result.overtimeRepeat,
-    pinTrackedTask: !!result.pinTrackedTask,
     liveTracking: !!result.liveTracking,
   };
   saveConfig(newConfig);

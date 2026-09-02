@@ -43,7 +43,6 @@
 #define KEY_TOUCH_NAV_ENABLED MESSAGE_KEY_TOUCH_NAV_ENABLED
 #define KEY_OVERTIME_NOTIFY_ENABLED MESSAGE_KEY_OVERTIME_NOTIFY_ENABLED
 #define KEY_OVERTIME_REPEAT_ENABLED MESSAGE_KEY_OVERTIME_REPEAT_ENABLED
-#define KEY_PIN_TRACKED_TASK_ENABLED MESSAGE_KEY_PIN_TRACKED_TASK_ENABLED
 #define KEY_PRESENCE_STATE MESSAGE_KEY_PRESENCE_STATE
 #define KEY_PRESENCE_TASK_TITLE MESSAGE_KEY_PRESENCE_TASK_TITLE
 #define KEY_PRESENCE_DEVICE MESSAGE_KEY_PRESENCE_DEVICE
@@ -419,11 +418,12 @@ static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
 #endif
 #define OVERTIME_REPEAT_INTERVAL_S (5 * 60)
 
-// Pinned "TRACKING" section - when s_pin_tracked_task_enabled, this task is
-// shown in its own section below the Resync/Habits/Add Task rows and hidden
-// from its project group. Separate from s_tracking_task_id: it lingers through
-// a 10s grace period after tracking stops (s_unpin_timer) so the row slides
-// back smoothly. Not persisted - only an active session re-pins on relaunch.
+// Pinned "TRACKING" section - the tracked task (local, or a remote device's
+// via remote_in_pinned_section) shows in its own section below the
+// Resync/Habits/Add Task rows and is hidden from its project group. Always on
+// (non-aplite). Separate from s_tracking_task_id: it lingers through a 10s
+// grace period after tracking stops (s_unpin_timer) so the row slides back
+// smoothly. Not persisted - only an active session re-pins on relaunch.
 static char s_pinned_task_id[MAX_ID_LEN] = "";
 static AppTimer *s_unpin_timer = NULL;
 #define UNPIN_GRACE_MS 10000
@@ -475,10 +475,6 @@ static bool s_overtime_notify_enabled = false;
 // "Repeat every 5 minutes" (config.overtimeRepeat), a modifier on the above:
 // re-fire the banner every OVERTIME_REPEAT_INTERVAL_S while the task stays over.
 static bool s_overtime_repeat_enabled = false;
-// "Pin the task you're tracking to the top" (config.pinTrackedTask). Opt-in,
-// aplite-excluded with the pinned-section layout code.
-static bool s_pin_tracked_task_enabled = false;
-
 // Live tracking presence (config.liveTracking, MSG_PRESENCE_*). Opt-in,
 // aplite-excluded. Shows what ANOTHER device is tracking as a "LIVE" row in
 // section 0 plus a detail window; Select in that window asks the phone to stop
@@ -498,6 +494,15 @@ static TextLayer *s_live_elapsed_layer = NULL;
 static TextLayer *s_live_hint_layer = NULL;
 static StatusBarLayer *s_live_status_bar = NULL;
 static AppTimer *s_live_tick_timer = NULL;
+
+// A remote presence session shows in the pinned "TRACKING" section (the same
+// slot local tracking uses) whenever nothing is tracked locally - keeps
+// "something is being tracked" looking the same everywhere. The dark-blue
+// section-0 LIVE row only remains for the rare overlap: a remote paused/stopped
+// state arriving while this watch is itself tracking (see LIVE_ROW_ACTIVE).
+static bool remote_in_pinned_section(void) {
+  return s_presence_state != 0 && s_tracking_task_id[0] == '\0';
+}
 #endif
 #if defined(PBL_TOUCH)
 // "Touch navigation" (config.touchNav), off by default (see the touch block's
@@ -826,7 +831,9 @@ typedef enum {
 #ifdef PBL_PLATFORM_APLITE
 #define LIVE_ROW_ACTIVE() false
 #else
-#define LIVE_ROW_ACTIVE() (s_presence_state != 0)
+// The dark-blue section-0 row - only when a remote session isn't riding the
+// pinned "TRACKING" section instead (see remote_in_pinned_section).
+#define LIVE_ROW_ACTIVE() (s_presence_state != 0 && !remote_in_pinned_section())
 #endif
 
 static int section0_row_count(void) {
@@ -887,10 +894,11 @@ static int pinned_task_index(void) {
   return -1;
 }
 
-// Whether the pinned "TRACKING" section is currently shown: the phone
-// setting is on AND there's a real task to put in it.
+// Whether the pinned "TRACKING" section is currently shown: the phone setting
+// is on AND there's a real locally-tracked task to put in it, OR a remote
+// presence session is riding this section (remote_in_pinned_section).
 static bool has_pinned_row(void) {
-  return s_pin_tracked_task_enabled && pinned_task_index() >= 0;
+  return pinned_task_index() >= 0 || remote_in_pinned_section();
 }
 
 // Section index of project group 0 - 1 normally, 2 when the pinned section sits
@@ -1644,6 +1652,48 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     return;
   }
 #endif
+#ifndef PBL_PLATFORM_APLITE
+  // A remote presence session in the pinned "TRACKING" section - drawn as a
+  // task row would be (white cell under the green strip), but from s_presence_*
+  // since the watch may not hold that task at all.
+  if (remote_in_pinned_section() && cell_index->section == 1) {
+    GRect bounds = layer_get_bounds(cell_layer);
+    bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == 1 &&
+                        menu_layer_get_selected_index(s_menu_layer).row == 0;
+    GColor bg = is_selected ? GColorBlack : GColorWhite;
+    GColor fg = is_selected ? GColorWhite : GColorBlack;
+    graphics_context_set_fill_color(ctx, bg);
+    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    graphics_context_set_text_color(ctx, fg);
+    GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
+                             bounds.size.w - TITLE_BOX_X * 2, HEADING_TITLE_H);
+    graphics_draw_text(ctx, s_presence_task[0] != '\0' ? s_presence_task : "Live tracking",
+                        fonts_get_system_font(TITLE_FONT_KEY), title_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    char sub[52];
+    if (s_presence_state == 1) {
+      int total_s = (int)(time(NULL) - s_presence_elapsed_base);
+      if (total_s < 0) {
+        total_s = 0;
+      }
+      int h = total_s / 3600;
+      int m = (total_s % 3600) / 60;
+      if (h > 0) {
+        snprintf(sub, sizeof(sub), "%s  %d:%02d", presence_state_phrase(), h, m);
+      } else {
+        snprintf(sub, sizeof(sub), "%s  %dm", presence_state_phrase(), m);
+      }
+    } else {
+      snprintf(sub, sizeof(sub), "%s", presence_state_phrase());
+    }
+    GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
+                                bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
+    graphics_draw_text(ctx, sub, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    return;
+  }
+#endif
+
   Task *task = resolve_task_at(*cell_index);
   if (!task) {
     return;
@@ -2090,11 +2140,9 @@ static void stop_tracking_and_report(void) {
   hide_overtime_banner();
   // Keep the just-stopped task pinned for a short grace period so it slides
   // back into its group smoothly. A new start_tracking() cancels this.
-  if (s_pin_tracked_task_enabled && s_pinned_task_id[0] != '\0') {
+  if (s_pinned_task_id[0] != '\0') {
     cancel_unpin_timer();
     s_unpin_timer = app_timer_register(UNPIN_GRACE_MS, unpin_timer_callback, NULL);
-  } else {
-    s_pinned_task_id[0] = '\0';
   }
 #endif
   stop_tracking_tick();
@@ -2161,6 +2209,12 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
+  // A remote presence session riding the pinned "TRACKING" section - open its
+  // detail screen, same as tapping the dark-blue LIVE row would.
+  if (remote_in_pinned_section() && cell_index->section == 1) {
+    push_live_window();
+    return;
+  }
   // The project row - same double-click-to-show-notes gesture as a task row,
   // but no single-click action to delay, so this just tracks a second click.
   TaskGroup *project_row = resolve_project_row_at(*cell_index);
@@ -2988,20 +3042,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
           s_overtime_last_notify_epoch = time(NULL);
         }
       }
-      // Toggling off mid-session clears pinned/grace state; toggling on re-pins
-      // the currently-tracked task. The reload_data below redraws either way.
-      Tuple *pin_tracked_tuple = dict_find(iterator, KEY_PIN_TRACKED_TASK_ENABLED);
-      if (pin_tracked_tuple) {
-        bool was = s_pin_tracked_task_enabled;
-        s_pin_tracked_task_enabled = pin_tracked_tuple->value->int32 != 0;
-        if (was && !s_pin_tracked_task_enabled) {
-          cancel_unpin_timer();
-          s_pinned_task_id[0] = '\0';
-        } else if (!was && s_pin_tracked_task_enabled && s_tracking_task_id[0] != '\0') {
-          strncpy(s_pinned_task_id, s_tracking_task_id, MAX_ID_LEN - 1);
-          s_pinned_task_id[MAX_ID_LEN - 1] = '\0';
-        }
-      }
 #endif
       // reload_data refreshes the Resync row's status subtitle;
       // update_empty_layer() handles the empty screen. Both no-op while the
@@ -3032,7 +3072,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     case MSG_PRESENCE_UPDATE: {
       Tuple *state_tuple = dict_find(iterator, KEY_PRESENCE_STATE);
       int new_state = state_tuple ? state_tuple->value->int32 : 0;
-      bool was_active = s_presence_state != 0;
       s_presence_state = new_state;
       if (new_state == 0) {
         s_presence_task[0] = '\0';
@@ -3054,10 +3093,18 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         // still-live update - so any fresh state drops the "Stopping..." latch.
         s_presence_stopping = false;
       }
-      menu_layer_reload_data(s_menu_layer);
-      if (was_active != (s_presence_state != 0)) {
-        // The section-0 row count changed - the selection may have shifted.
-        refresh_scroll_state(true);
+      // reload + scroll refresh covers both the dark-blue section-0 row count
+      // changing and the pinned "TRACKING" section appearing/disappearing.
+      refresh_pinned_section();
+      // The pinned-section remote row needs a per-second redraw for its live
+      // elapsed. tracking_tick_callback just marks the menu dirty; it's a
+      // no-op for the over-estimate banner when nothing is tracked locally.
+      if (s_tracking_task_id[0] == '\0') {
+        if (remote_in_pinned_section() && s_presence_state == 1) {
+          start_tracking_tick();
+        } else {
+          stop_tracking_tick();
+        }
       }
       live_window_refresh(); // updates or pops the detail window if it's open
       break;
