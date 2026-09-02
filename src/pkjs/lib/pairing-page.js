@@ -87,24 +87,31 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '<head>\n' +
 '<meta charset="utf-8">\n' +
 '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
+'<meta name="color-scheme" content="light dark">\n' +
 '<title>Pair with SuperSync</title>\n' +
 '<style>\n' +
-'  body { font-family: -apple-system, Roboto, sans-serif; margin: 0; padding: 16px; background: #fff; color: #111; }\n' +
+'  :root { --bg: #fff; --fg: #111; --hint: #666; --field-bg: #fff; --field-border: #ccc;\n' +
+'          --btn-2-bg: #eee; --btn-2-fg: #111; --danger: #c00; --danger-bg: #fff; --ok: #0a0; }\n' +
+'  @media (prefers-color-scheme: dark) {\n' +
+'    :root { --bg: #1c1c1e; --fg: #e6e6e9; --hint: #9a9aa0; --field-bg: #2c2c2e; --field-border: #48484a;\n' +
+'            --btn-2-bg: #2c2c2e; --btn-2-fg: #e6e6e9; --danger: #ff6b6b; --danger-bg: #1c1c1e; --ok: #4ade80; }\n' +
+'  }\n' +
+'  body { font-family: -apple-system, Roboto, sans-serif; margin: 0; padding: 16px; background: var(--bg); color: var(--fg); }\n' +
 '  h1 { font-size: 18px; }\n' +
 '  h2 { font-size: 15px; margin-top: 24px; }\n' +
 '  label { display: block; margin-top: 14px; font-size: 13px; font-weight: 600; }\n' +
-'  input, select { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid #ccc; border-radius: 6px; }\n' +
+'  input, select { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid var(--field-border); border-radius: 6px; background: var(--field-bg); color: var(--fg); }\n' +
 '  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }\n' +
 '  .checkbox-row input { width: auto; margin: 0; }\n' +
 '  .checkbox-row label { display: inline; margin: 0; font-weight: normal; }\n' +
 '  .checkbox-row.sub { margin-left: 26px; margin-top: 8px; }\n' +
 '  p.hint.sub { margin-left: 26px; }\n' +
 '  button { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; }\n' +
-'  button.secondary { background: #eee; color: #111; margin-top: 8px; }\n' +
-'  button.danger { background: #fff; color: #c00; border: 1px solid #c00; }\n' +
-'  p.hint { font-size: 12px; color: #666; }\n' +
-'  p.error { font-size: 13px; color: #c00; }\n' +
-'  p.success { font-size: 13px; color: #0a0; }\n' +
+'  button.secondary { background: var(--btn-2-bg); color: var(--btn-2-fg); margin-top: 8px; }\n' +
+'  button.danger { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); }\n' +
+'  p.hint { font-size: 12px; color: var(--hint); }\n' +
+'  p.error { font-size: 13px; color: var(--danger); }\n' +
+'  p.success { font-size: 13px; color: var(--ok); }\n' +
 '</style>\n' +
 '</head>\n' +
 '<body>\n' +
