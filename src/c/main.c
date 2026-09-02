@@ -1473,8 +1473,10 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
 #ifndef PBL_PLATFORM_APLITE
     if (kind == SECTION0_ROW_LIVE) {
-      // Green like the "TRACKING" pinned header - this is another device's timer.
-      graphics_context_set_fill_color(ctx, GColorGreen);
+      // Dark blue - a distinct "this is another device" strip (the pinned
+      // local-tracking header is green, Habits cerulean). Constant background,
+      // text inverts on selection - same treatment as the Resync row.
+      graphics_context_set_fill_color(ctx, GColorDukeBlue);
       graphics_fill_rect(ctx, bounds, 0, GCornerNone);
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
       // Title one size bigger (GOTHIC_24_BOLD) while a timer is actively
