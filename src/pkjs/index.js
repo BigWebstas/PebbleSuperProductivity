@@ -2088,6 +2088,7 @@ function pushPresenceToWatch(view, stale) {
   var device = '';
   var canStop = 0;
   var elapsedS = 0;
+  var t = null;
 
   if (view.opaque) {
     // Couldn't decode the payload (no matching Argon2 key cached yet, or a
@@ -2098,7 +2099,7 @@ function pushPresenceToWatch(view, stale) {
   } else {
     device = view.deviceLabel || '';
     elapsedS = Math.max(0, Math.round((Date.now() - view.sinceTs) / 1000));
-    var t = loadState().task[view.taskId];
+    t = loadState().task[view.taskId];
     title = (t && t.title) ? String(t.title) : 'a recently started task';
     if (stale) {
       state = 3;
@@ -2116,14 +2117,22 @@ function pushPresenceToWatch(view, stale) {
     }
   }
 
-  sendWithRetry({
+  var dict = {
     MSG_TYPE: MSG_PRESENCE_UPDATE,
     PRESENCE_STATE: state,
     PRESENCE_TASK_TITLE: String(title).slice(0, 63),
     PRESENCE_DEVICE: String(device).slice(0, 23),
     PRESENCE_ELAPSED_S: Math.min(elapsedS, 2000000000),
     PRESENCE_CAN_STOP: canStop,
-  }, function () {}, function (e) {
+  };
+  // The tracked task's synced time / estimate, so the detail window can show
+  // "spent / estimate" like a task row - only when we resolved the task and it
+  // has an estimate.
+  if (t && t.timeEstimate) {
+    dict.PRESENCE_SPENT_MS = Math.min(t.timeSpent || 0, 2000000000);
+    dict.PRESENCE_ESTIMATE_MS = Math.min(t.timeEstimate, 2000000000);
+  }
+  sendWithRetry(dict, function () {}, function (e) {
     console.log('[pkjs] giving up on PRESENCE_UPDATE: ' + JSON.stringify(e));
   });
 }
