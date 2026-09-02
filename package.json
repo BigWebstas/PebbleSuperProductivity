@@ -65,6 +65,11 @@
           "type": "png",
           "name": "IMAGE_MICROPHONE_WHITE",
           "file": "images/icon-mic-white.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_PROJECT_WHITE",
+          "file": "images/icon-project-white.png"
         }
       ]
     },

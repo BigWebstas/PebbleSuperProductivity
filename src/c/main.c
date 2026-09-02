@@ -264,6 +264,11 @@ static GBitmap *s_check_bitmap;
 static GBitmap *s_check_white_bitmap;
 static GBitmap *s_heart_bitmap;
 static GBitmap *s_heart_white_bitmap;
+#ifndef PBL_PLATFORM_APLITE
+// White folder glyph drawn (GCompOpSet) over the project-colour chip on every
+// project row - the today view's group rows and the Projects browser list.
+static GBitmap *s_project_bitmap;
+#endif
 // Mic/dictation state - compiled out on aplite (#ifndef, not a runtime check):
 // no mic hardware, can never reach the "Add Task" row, and a runtime-only
 // guard cost aplite ~190 bytes of RAM headroom.
@@ -1151,17 +1156,19 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// A project's theme-colour swatch: a 16px square filled with the phone-packed
-// GColor8 byte, centred vertically, drawn at x. Returns the x for following
-// text - unchanged (nothing drawn) when color is 0. Shared by the grouped
-// today view's project rows and the Projects browser's list.
+// A project's icon chip: a 24px rounded square filled with the project's
+// theme colour (phone-packed GColor8 byte; a neutral grey when it has none)
+// with a white folder glyph on top. Centred vertically, drawn at x. Returns
+// the x where the following text should start. Shared by the grouped today
+// view's project rows and the Projects browser's list.
 static int16_t draw_project_swatch(GContext *ctx, int16_t x, int16_t cell_h, uint8_t color) {
-  if (color == 0) {
-    return x;
-  }
-  graphics_context_set_fill_color(ctx, (GColor8){ .argb = color });
-  graphics_fill_rect(ctx, GRect(x, (cell_h - 16) / 2, 16, 16), 0, GCornerNone);
-  return x + 22;
+  const int16_t sz = 24;
+  int16_t y = (cell_h - sz) / 2;
+  graphics_context_set_fill_color(ctx, color != 0 ? (GColor8){ .argb = color } : GColorDarkGray);
+  graphics_fill_rect(ctx, GRect(x, y, sz, sz), 3, GCornersAll);
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
+  graphics_draw_bitmap_in_rect(ctx, s_project_bitmap, GRect(x + 3, y + 3, 18, 18));
+  return x + sz + 6;
 }
 #endif
 
@@ -4983,6 +4990,9 @@ static void window_load(Window *window) {
   s_check_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_CHECK_WHITE);
   s_heart_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_HEART_CHECK);
   s_heart_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_HEART_CHECK_WHITE);
+#ifndef PBL_PLATFORM_APLITE
+  s_project_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_PROJECT_WHITE);
+#endif
 
   // Add Task row + dictation session - mic platforms only.
 #ifndef PBL_PLATFORM_APLITE
@@ -5078,6 +5088,9 @@ static void window_unload(Window *window) {
   gbitmap_destroy(s_check_white_bitmap);
   gbitmap_destroy(s_heart_bitmap);
   gbitmap_destroy(s_heart_white_bitmap);
+#ifndef PBL_PLATFORM_APLITE
+  gbitmap_destroy(s_project_bitmap);
+#endif
 #ifndef PBL_PLATFORM_APLITE
   dictation_session_destroy(s_dictation_session);
   gbitmap_destroy(s_mic_bitmap);
