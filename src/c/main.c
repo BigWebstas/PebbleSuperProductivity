@@ -55,6 +55,8 @@
 #define KEY_PRESENCE_DEVICE MESSAGE_KEY_PRESENCE_DEVICE
 #define KEY_PRESENCE_ELAPSED_S MESSAGE_KEY_PRESENCE_ELAPSED_S
 #define KEY_PRESENCE_CAN_STOP MESSAGE_KEY_PRESENCE_CAN_STOP
+#define KEY_PRESENCE_SPENT_MS MESSAGE_KEY_PRESENCE_SPENT_MS
+#define KEY_PRESENCE_ESTIMATE_MS MESSAGE_KEY_PRESENCE_ESTIMATE_MS
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -605,6 +607,10 @@ static char s_presence_device[24] = "";
 static bool s_presence_can_stop = false;
 static bool s_presence_stopping = false;   // Stop sent, awaiting the phone's clear
 static time_t s_presence_elapsed_base = 0; // time(NULL) - elapsed_s, stamped at receipt
+// The remote task's synced time-spent / estimate (0 = unknown / no estimate).
+// When both are set the detail window shows "spent / estimate" like a task row.
+static int s_presence_spent_ms = 0;
+static int s_presence_estimate_ms = 0;
 static Window *s_live_window = NULL;
 static TextLayer *s_live_state_layer = NULL;
 static TextLayer *s_live_task_layer = NULL;
@@ -3472,6 +3478,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         s_presence_elapsed_base = time(NULL) - (time_t)(elapsed_tuple ? elapsed_tuple->value->int32 : 0);
         Tuple *can_stop_tuple = dict_find(iterator, KEY_PRESENCE_CAN_STOP);
         s_presence_can_stop = can_stop_tuple && can_stop_tuple->value->int32 != 0;
+        Tuple *spent_tuple = dict_find(iterator, KEY_PRESENCE_SPENT_MS);
+        s_presence_spent_ms = spent_tuple ? spent_tuple->value->int32 : 0;
+        Tuple *estimate_tuple = dict_find(iterator, KEY_PRESENCE_ESTIMATE_MS);
+        s_presence_estimate_ms = estimate_tuple ? estimate_tuple->value->int32 : 0;
         // The phone confirms a stop by clearing (state 0), never by another
         // still-live update - so any fresh state drops the "Stopping..." latch.
         s_presence_stopping = false;
@@ -4823,19 +4833,32 @@ static void live_window_refresh(void) {
   text_layer_set_text(s_live_state_layer, presence_state_phrase());
   text_layer_set_text(s_live_task_layer, s_presence_task);
 
-  static char elapsed_buf[16];
+  static char elapsed_buf[32];
   if (s_presence_state == 1) {
     int total_s = (int)(time(NULL) - s_presence_elapsed_base);
     if (total_s < 0) {
       total_s = 0;
     }
-    int h = total_s / 3600;
-    int m = (total_s % 3600) / 60;
-    int s = total_s % 60;
-    if (h > 0) {
-      snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d:%02d", h, m, s);
+    if (s_presence_estimate_ms > 0) {
+      // "spent / estimate" like a task row: synced time-spent plus this
+      // session's running elapsed, over the estimate. A step down in font
+      // size - the combined string is too wide for GOTHIC_28 on a 144px watch.
+      char spent_text[20];
+      format_duration_ms(s_presence_spent_ms + total_s * 1000, false, spent_text, sizeof(spent_text));
+      char estimate_text[16];
+      format_duration_ms(s_presence_estimate_ms, false, estimate_text, sizeof(estimate_text));
+      snprintf(elapsed_buf, sizeof(elapsed_buf), "%s / %s", spent_text, estimate_text);
+      text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
     } else {
-      snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d", m, s);
+      int h = total_s / 3600;
+      int m = (total_s % 3600) / 60;
+      int s = total_s % 60;
+      if (h > 0) {
+        snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d:%02d", h, m, s);
+      } else {
+        snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d", m, s);
+      }
+      text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
     }
     text_layer_set_text(s_live_elapsed_layer, elapsed_buf);
     layer_set_hidden(text_layer_get_layer(s_live_elapsed_layer), false);
