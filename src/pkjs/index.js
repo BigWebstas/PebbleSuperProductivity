@@ -64,6 +64,7 @@ var MSG_PROJECT_TASKS_REQUEST = 35; // watch -> phone: PROJECT_ID
 var MSG_PROJECT_TASKS_START = 36;   // phone -> watch: PROJECT_ID, TASK_TOTAL
 var MSG_PROJECT_TASKS_ITEM = 37;    // phone -> watch: PROJECT_ID, TASK_INDEX, TASK_*, PROJECT_TASK_BACKLOG
 var MSG_PROJECT_TASKS_END = 38;     // phone -> watch: PROJECT_ID
+var MSG_TASK_PLAN_TODAY = 39;       // watch -> phone: TASK_ID (set the task's dueDay to today)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -1143,14 +1144,15 @@ function handleTaskToggle(taskId, done) {
     });
 }
 
-// Watch long-press Up / Down (or swipe-left) after a 3s cancel window:
-// toTomorrow=true sets the task's dueDay to tomorrow, false clears its
-// scheduling entirely. Both go out as a single "[Task Shared] updateTask" op -
-// the watch has no planner-list UI, and dueDay is the field every "today"
-// membership check keys off (task-store.js). dueWithTime/remindAt are cleared
-// alongside either way, mirroring the real app's own scheduleTask/unschedule
-// reducers (dueDay and dueWithTime are mutually exclusive there).
-function handleTaskReschedule(taskId, toTomorrow) {
+// Watch long-press Up / Down (or swipe-left) after a 3s cancel window. `when`:
+// 'today' / 'tomorrow' set the task's dueDay to that day, anything else
+// ('unschedule') clears its scheduling entirely. All go out as a single
+// "[Task Shared] updateTask" op - the watch has no planner-list UI, and dueDay
+// is the field every "today" membership check keys off (task-store.js).
+// dueWithTime/remindAt are cleared alongside either way, mirroring the real
+// app's own scheduleTask/unschedule reducers (dueDay and dueWithTime are
+// mutually exclusive there).
+function handleTaskReschedule(taskId, when) {
   var config = loadConfig();
   if (!config || !config.jwt) {
     sendStatus(STATUS_NOT_PAIRED);
@@ -1164,7 +1166,9 @@ function handleTaskReschedule(taskId, toTomorrow) {
   }
 
   var newDueDay = null;
-  if (toTomorrow) {
+  if (when === 'today') {
+    newDueDay = store.todayStr();
+  } else if (when === 'tomorrow') {
     var d = new Date();
     d.setDate(d.getDate() + 1);
     newDueDay = store.dateToDateStr(d);
@@ -2180,10 +2184,13 @@ Pebble.addEventListener('appmessage', function (e) {
       handleAddTask(payload.TASK_TITLE);
       break;
     case MSG_TASK_PLAN_TOMORROW:
-      handleTaskReschedule(payload.TASK_ID, true);
+      handleTaskReschedule(payload.TASK_ID, 'tomorrow');
+      break;
+    case MSG_TASK_PLAN_TODAY:
+      handleTaskReschedule(payload.TASK_ID, 'today');
       break;
     case MSG_TASK_UNSCHEDULE:
-      handleTaskReschedule(payload.TASK_ID, false);
+      handleTaskReschedule(payload.TASK_ID, 'unschedule');
       break;
     case MSG_PRESENCE_STOP:
       if (presenceClient && presenceLastSessionId) {

@@ -112,6 +112,7 @@ enum {
   MSG_PROJECT_TASKS_START = 36,     // phone -> watch: PROJECT_ID + TASK_TOTAL
   MSG_PROJECT_TASKS_ITEM = 37,      // phone -> watch: PROJECT_ID + TASK_INDEX + TASK_* + PROJECT_TASK_BACKLOG
   MSG_PROJECT_TASKS_END = 38,       // phone -> watch: PROJECT_ID
+  MSG_TASK_PLAN_TODAY = 39,         // watch -> phone: TASK_ID (set the task's dueDay to today)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -402,7 +403,7 @@ static char s_pending_toggle_task_id[MAX_ID_LEN] = "";
 // Below the SDK's 500ms default so a deliberate hold commits before UP/DOWN's
 // repeat-scroll walks the selection too far off the intended row.
 #define RESCHEDULE_LONGPRESS_MS 400
-typedef enum { RESCHEDULE_NONE, RESCHEDULE_TOMORROW, RESCHEDULE_UNSCHEDULE } RescheduleKind;
+typedef enum { RESCHEDULE_NONE, RESCHEDULE_TODAY, RESCHEDULE_TOMORROW, RESCHEDULE_UNSCHEDULE } RescheduleKind;
 static AppTimer *s_pending_reschedule_timer = NULL;
 static char s_pending_reschedule_task_id[MAX_ID_LEN] = "";
 static RescheduleKind s_pending_reschedule_kind = RESCHEDULE_NONE;
@@ -871,6 +872,7 @@ static void push_browse_window(const char *jump_to_project);
 static void browse_update_empty(void);
 static void request_project_list(void);
 static void request_project_tasks(const char *project_id);
+static Task *resolve_browse_task_at(MenuIndex index);
 #endif
 #if PROJECTS_CACHE
 static void save_browse_projects(void);
@@ -901,7 +903,7 @@ static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
 static void begin_pending_reschedule(RescheduleKind kind);
-static void send_task_reschedule(const char *task_id, bool tomorrow);
+static void send_task_reschedule(const char *task_id, RescheduleKind kind);
 static TaskGroup *resolve_project_row_at(MenuIndex index);
 #endif
 #ifndef PBL_PLATFORM_APLITE
@@ -1543,9 +1545,9 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
   // due/time text) for the 3s cancel window - see begin_pending_reschedule.
   if (s_pending_reschedule_kind != RESCHEDULE_NONE &&
       strncmp(s_pending_reschedule_task_id, task->id, MAX_ID_LEN) == 0) {
-    const char *pending_msg = s_pending_reschedule_kind == RESCHEDULE_TOMORROW
-                                  ? "Moving to tomorrow..."
-                                  : "Un-Scheduling...";
+    const char *pending_msg = s_pending_reschedule_kind == RESCHEDULE_TOMORROW ? "Moving to tomorrow..."
+                              : s_pending_reschedule_kind == RESCHEDULE_TODAY ? "Scheduling for today..."
+                              : "Un-Scheduling...";
     graphics_draw_text(ctx, pending_msg, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
     return;
@@ -1961,6 +1963,7 @@ static void send_pending_retry(void) {
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       break;
     case MSG_TASK_PLAN_TOMORROW:
+    case MSG_TASK_PLAN_TODAY:
     case MSG_TASK_UNSCHEDULE:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       break;
@@ -2055,11 +2058,14 @@ static void send_track_time_start(const char *task_id, int32_t elapsed_ms) {
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
-// Move the task to tomorrow (tomorrow=true) or clear its scheduling. The phone
+// Schedule the task for today / tomorrow, or clear its scheduling. The phone
 // turns this into an updateTask op and pushes a fresh list back - the task may
-// leave a Today-only view. aplite-excluded with the gesture.
-static void send_task_reschedule(const char *task_id, bool tomorrow) {
-  begin_send(tomorrow ? MSG_TASK_PLAN_TOMORROW : MSG_TASK_UNSCHEDULE, task_id, NULL, 0);
+// leave or join a Today-only view. aplite-excluded with the gesture.
+static void send_task_reschedule(const char *task_id, RescheduleKind kind) {
+  int msg_type = kind == RESCHEDULE_TODAY ? MSG_TASK_PLAN_TODAY
+                 : kind == RESCHEDULE_TOMORROW ? MSG_TASK_PLAN_TOMORROW
+                 : MSG_TASK_UNSCHEDULE;
+  begin_send(msg_type, task_id, NULL, 0);
 }
 #endif
 
@@ -2829,9 +2835,22 @@ static void pending_toggle_timer_callback(void *data) {
 }
 
 
-// Clears a pending move-to-tomorrow / unschedule (Select pressed within the
-// window, or the window's own task vanished) and redraws so the subtitle
-// reverts.
+// The pending-reschedule subtitle rides draw_task_row, which both the today
+// list and the Projects browser task view use - redraw whichever menus exist.
+static void reschedule_menus_reload(void) {
+  if (s_menu_layer) {
+    menu_layer_reload_data(s_menu_layer);
+  }
+#if PROJECTS_BROWSER
+  if (s_browse_menu) {
+    menu_layer_reload_data(s_browse_menu);
+  }
+#endif
+}
+
+// Clears a pending schedule-today / tomorrow / unschedule (Select pressed
+// within the window, or the window's own task vanished) and redraws so the
+// subtitle reverts.
 static void cancel_pending_reschedule(void) {
   if (s_pending_reschedule_timer) {
     app_timer_cancel(s_pending_reschedule_timer);
@@ -2839,39 +2858,52 @@ static void cancel_pending_reschedule(void) {
   }
   s_pending_reschedule_kind = RESCHEDULE_NONE;
   s_pending_reschedule_task_id[0] = '\0';
-  if (s_menu_layer) {
-    menu_layer_reload_data(s_menu_layer);
-  }
+  reschedule_menus_reload();
 }
 
-// Commits the pending move-to-tomorrow / unschedule once its 3s cancel window
-// passes. Looks the task up by id for the same background-sync reason as
-// pending_toggle_timer_callback.
+// Commits the pending reschedule once its cancel window passes. Sends by the
+// stashed id (the phone ignores a since-deleted task) - the task need not be
+// in s_tasks, since a browser task usually isn't.
 static void pending_reschedule_timer_callback(void *data) {
   s_pending_reschedule_timer = NULL;
   RescheduleKind kind = s_pending_reschedule_kind;
-  Task *task = find_task_by_id(s_pending_reschedule_task_id);
   s_pending_reschedule_kind = RESCHEDULE_NONE;
+  if (kind != RESCHEDULE_NONE && s_pending_reschedule_task_id[0] != '\0') {
+    send_task_reschedule(s_pending_reschedule_task_id, kind);
+  }
   s_pending_reschedule_task_id[0] = '\0';
-  if (task && kind != RESCHEDULE_NONE) {
-    send_task_reschedule(task->id, kind == RESCHEDULE_TOMORROW);
-  }
   // Drop the pending subtitle now; the phone's list push handles the rest.
-  if (s_menu_layer) {
-    menu_layer_reload_data(s_menu_layer);
-  }
+  reschedule_menus_reload();
 }
 
-// Starts (or replaces) the pending reschedule for the currently-selected task.
-// A long-press Up passes RESCHEDULE_UNSCHEDULE, long-press Down / swipe-left
-// RESCHEDULE_TOMORROW.
+// Starts (or replaces) the pending reschedule for the currently-selected task -
+// on the today list or the Projects browser's task view, whichever is on top.
+// Long-press Up = schedule today (browser) / unschedule (today list), long-
+// press Down = tomorrow on both.
 static void begin_pending_reschedule(RescheduleKind kind) {
-  if (s_error_overlay_active || s_task_count == 0 || kind == RESCHEDULE_NONE) {
+  if (s_error_overlay_active || kind == RESCHEDULE_NONE) {
     return;
   }
-  Task *task = resolve_selected_task();
-  if (!task) {
-    return; // selection is on a pinned/project/action row, not a task
+  const char *task_id = NULL;
+#if PROJECTS_BROWSER
+  if (window_stack_get_top_window() == s_browse_window && s_browse_level == 1 && s_browse_menu) {
+    Task *bt = resolve_browse_task_at(menu_layer_get_selected_index(s_browse_menu));
+    if (bt) {
+      task_id = bt->id;
+    }
+  } else
+#endif
+  {
+    if (s_task_count == 0) {
+      return;
+    }
+    Task *task = resolve_selected_task();
+    if (task) {
+      task_id = task->id; // NULL on a pinned/project/action row
+    }
+  }
+  if (!task_id) {
+    return;
   }
   // A pending done-toggle on the same tap sequence would otherwise commit
   // mid-window - drop it in favour of this.
@@ -2883,13 +2915,13 @@ static void begin_pending_reschedule(RescheduleKind kind) {
   if (s_pending_reschedule_timer) {
     app_timer_cancel(s_pending_reschedule_timer);
   }
-  strncpy(s_pending_reschedule_task_id, task->id, MAX_ID_LEN - 1);
+  strncpy(s_pending_reschedule_task_id, task_id, MAX_ID_LEN - 1);
   s_pending_reschedule_task_id[MAX_ID_LEN - 1] = '\0';
   s_pending_reschedule_kind = kind;
   s_pending_reschedule_timer =
       app_timer_register(RESCHEDULE_WINDOW_MS, pending_reschedule_timer_callback, NULL);
   vibes_short_pulse();
-  menu_layer_reload_data(s_menu_layer);
+  reschedule_menus_reload();
 }
 
 // True if a NOTE_SYNC_* reply for id/is_project is about what the notes overlay
@@ -4205,9 +4237,14 @@ static void browse_descend(const char *project_id) {
 }
 
 // Level 0: Select opens the project's tasks. Level 1: Select toggles the task
-// done - same send the today list uses, mirrored onto the today list too.
+// done - same send the today list uses, mirrored onto the today list too. A
+// Select within a pending-reschedule window just cancels it (no toggle).
 static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
+  if (s_pending_reschedule_kind != RESCHEDULE_NONE) {
+    cancel_pending_reschedule();
+    return;
+  }
   if (s_browse_level == 0) {
     BrowseProject *p = resolve_browse_project_at(*cell_index);
     if (!p) {
@@ -4313,11 +4350,28 @@ static void browse_back_click_handler(ClickRecognizerRef recognizer, void *conte
   window_stack_pop(true);
 }
 
+// Level 1 only: long-press Up = schedule today, long-press Down = tomorrow.
+// Same 3s-cancel-window / Select-to-cancel flow as the today list's Up/Down
+// (begin_pending_reschedule). A no-op at level 0 (the project list).
+static void browse_reschedule_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_browse_level != 1) {
+    return;
+  }
+  backlight_touch();
+  begin_pending_reschedule(click_recognizer_get_button_id(recognizer) == BUTTON_ID_UP
+                               ? RESCHEDULE_TODAY
+                               : RESCHEDULE_TOMORROW);
+}
+
 static void browse_menu_click_config_provider(void *context) {
   if (s_browse_menu_ccp) {
     s_browse_menu_ccp(context);
   }
   window_single_click_subscribe(BUTTON_ID_BACK, browse_back_click_handler);
+  window_long_click_subscribe(BUTTON_ID_UP, RESCHEDULE_LONGPRESS_MS,
+                              browse_reschedule_long_click_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_DOWN, RESCHEDULE_LONGPRESS_MS,
+                              browse_reschedule_long_click_handler, NULL);
 }
 
 static void browse_window_load(Window *window) {
