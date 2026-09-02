@@ -195,7 +195,30 @@ function createCrypto(password, persistence) {
     return base64.bytesToBase64(encryptSalt.concat(iv).concat(result.ciphertext).concat(result.tag));
   }
 
-  return { decrypt: decrypt, encrypt: encrypt };
+  // True when decrypt(payloadBase64) would hit the per-salt key cache rather
+  // than run a fresh Argon2id derivation. The live-tracking presence path
+  // (presence-client.js) uses this to avoid a multi-second (phone: tens of
+  // seconds) synchronous KDF stall inside a WebSocket onmessage handler -
+  // presence messages from another device are encrypted under THAT device's
+  // session salt, which is only in cache if a normal op sync already pulled
+  // (and decrypted) that device's ops. A miss means "show it opaquely", not
+  // "block the socket to derive". Legacy-format blobs use PBKDF2-1000, cheap
+  // enough to treat as always-decryptable.
+  function canDecryptWithoutDerive(payloadBase64) {
+    var bytes;
+    try {
+      bytes = base64.base64ToBytes(payloadBase64);
+    } catch (e) {
+      return false;
+    }
+    if (bytes.length < MIN_ARGON2_SIZE) {
+      return bytes.length >= MIN_LEGACY_SIZE;
+    }
+    var b64salt = base64.bytesToBase64(bytes.slice(0, SALT_LENGTH));
+    return !!decryptKeyCache[b64salt];
+  }
+
+  return { decrypt: decrypt, encrypt: encrypt, canDecryptWithoutDerive: canDecryptWithoutDerive };
 }
 
 function bytesToUtf8(bytes) {

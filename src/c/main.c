@@ -44,6 +44,11 @@
 #define KEY_OVERTIME_NOTIFY_ENABLED MESSAGE_KEY_OVERTIME_NOTIFY_ENABLED
 #define KEY_OVERTIME_REPEAT_ENABLED MESSAGE_KEY_OVERTIME_REPEAT_ENABLED
 #define KEY_PIN_TRACKED_TASK_ENABLED MESSAGE_KEY_PIN_TRACKED_TASK_ENABLED
+#define KEY_PRESENCE_STATE MESSAGE_KEY_PRESENCE_STATE
+#define KEY_PRESENCE_TASK_TITLE MESSAGE_KEY_PRESENCE_TASK_TITLE
+#define KEY_PRESENCE_DEVICE MESSAGE_KEY_PRESENCE_DEVICE
+#define KEY_PRESENCE_ELAPSED_S MESSAGE_KEY_PRESENCE_ELAPSED_S
+#define KEY_PRESENCE_CAN_STOP MESSAGE_KEY_PRESENCE_CAN_STOP
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -77,6 +82,16 @@ enum {
   MSG_PROJECT_NOTE_SYNC_END = 24,   // phone -> watch: PROJECT_ID
   MSG_TASK_PLAN_TOMORROW = 25,      // watch -> phone: TASK_ID (set the task's dueDay to tomorrow)
   MSG_TASK_UNSCHEDULE = 26,         // watch -> phone: TASK_ID (clear the task's scheduling)
+  // Live tracking presence (SuperSync only, opt-in, non-aplite). PRESENCE_STATE:
+  // 0 none, 1 tracking, 2 paused, 3 was-tracking, 4 stopped (brief linger);
+  // when != 0 the message also carries PRESENCE_TASK_TITLE / PRESENCE_DEVICE /
+  // PRESENCE_ELAPSED_S / PRESENCE_CAN_STOP. The phone owns the session id and
+  // the remote stop.
+  MSG_PRESENCE_UPDATE = 27,         // phone -> watch: PRESENCE_* (STATE 0 hides the LIVE UI)
+  MSG_PRESENCE_STOP = 28,           // watch -> phone: stop the session shown in the LIVE UI
+  // Phase 2 - the watch broadcasts its own time-tracking as presence ("Pebble").
+  MSG_TRACK_TIME_START = 29,        // watch -> phone: TASK_ID + TRACKED_MS (elapsed so far, 0 on a fresh start)
+  MSG_PRESENCE_STOP_LOCAL = 30,     // phone -> watch: a remote device stopped this watch's timer - stop it here
 };
 
 // STATUS_CODE values sent from the phone.
@@ -463,6 +478,26 @@ static bool s_overtime_repeat_enabled = false;
 // "Pin the task you're tracking to the top" (config.pinTrackedTask). Opt-in,
 // aplite-excluded with the pinned-section layout code.
 static bool s_pin_tracked_task_enabled = false;
+
+// Live tracking presence (config.liveTracking, MSG_PRESENCE_*). Opt-in,
+// aplite-excluded. Shows what ANOTHER device is tracking as a "LIVE" row in
+// section 0 plus a detail window; Select in that window asks the phone to stop
+// it. State: 0 none, 1 tracking, 2 paused (producer idle), 3 was-tracking
+// (producer went silent), 4 stopped (brief linger before it clears, mirrors
+// the desktop chip). The phone holds the session id and does the stop.
+static int s_presence_state = 0;
+static char s_presence_task[MAX_TITLE_LEN] = "";
+static char s_presence_device[24] = "";
+static bool s_presence_can_stop = false;
+static bool s_presence_stopping = false;   // Stop sent, awaiting the phone's clear
+static time_t s_presence_elapsed_base = 0; // time(NULL) - elapsed_s, stamped at receipt
+static Window *s_live_window = NULL;
+static TextLayer *s_live_state_layer = NULL;
+static TextLayer *s_live_task_layer = NULL;
+static TextLayer *s_live_elapsed_layer = NULL;
+static TextLayer *s_live_hint_layer = NULL;
+static StatusBarLayer *s_live_status_bar = NULL;
+static AppTimer *s_live_tick_timer = NULL;
 #endif
 #if defined(PBL_TOUCH)
 // "Touch navigation" (config.touchNav), off by default (see the touch block's
@@ -719,6 +754,11 @@ static void maybe_notify_overtime(void);
 static bool has_pinned_row(void);
 static int pinned_task_index(void);
 static void refresh_pinned_section(void);
+static void push_live_window(void);
+static void live_window_refresh(void);
+static void stop_live_tick(void);
+static const char *presence_state_phrase(void);
+static void send_presence_stop(void);
 #endif
 #ifndef PBL_PLATFORM_APLITE
 static void backlight_touch(void);
@@ -767,6 +807,7 @@ typedef enum {
   SECTION0_ROW_RESYNC,
   SECTION0_ROW_HABITS,
   SECTION0_ROW_ADD_TASK,
+  SECTION0_ROW_LIVE, // live tracking presence, row 0 when active (non-aplite)
 } Section0RowKind;
 
 // Whether the STATUS_OK/zero-tasks empty state shows section 0's normal
@@ -780,8 +821,19 @@ typedef enum {
 #define ACTIONABLE_EMPTY_ACTIVE() (s_status_code == STATUS_OK)
 #endif
 
+// Whether the "LIVE" presence row sits at the top of section 0. Compile-time
+// false on aplite (the whole feature is excluded).
+#ifdef PBL_PLATFORM_APLITE
+#define LIVE_ROW_ACTIVE() false
+#else
+#define LIVE_ROW_ACTIVE() (s_presence_state != 0)
+#endif
+
 static int section0_row_count(void) {
   int count = 1; // Resync always present.
+  if (LIVE_ROW_ACTIVE()) {
+    count++;
+  }
   if (s_habits_enabled) {
     count++;
   }
@@ -794,10 +846,17 @@ static int section0_row_count(void) {
 // Maps a section-0 row index to its action. Resync is row 0; Habits then Add
 // Task fill in after it, matching section0_row_count()'s order.
 static Section0RowKind section0_row_kind(int row) {
-  if (row == 0) {
+  int next = 0;
+  if (LIVE_ROW_ACTIVE()) {
+    if (row == 0) {
+      return SECTION0_ROW_LIVE;
+    }
+    next = 1;
+  }
+  if (row == next) {
     return SECTION0_ROW_RESYNC;
   }
-  int next = 1;
+  next++;
   if (s_habits_enabled) {
     if (row == next) {
       return SECTION0_ROW_HABITS;
@@ -1163,6 +1222,24 @@ static void stop_scroll_timer(void) {
   }
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// "Tracking on Desktop" / "Paused on Desktop" / "Was tracking on Desktop", or a
+// device-less form when the presence payload could not be decoded phone-side.
+static const char *presence_state_phrase(void) {
+  static char buf[48];
+  const char *verb = s_presence_state == 2 ? "Paused"
+                     : s_presence_state == 3 ? "Was tracking"
+                     : s_presence_state == 4 ? "Stopped"
+                     : "Tracking";
+  if (s_presence_device[0] != '\0') {
+    snprintf(buf, sizeof(buf), "%s on %s", verb, s_presence_device);
+  } else {
+    snprintf(buf, sizeof(buf), "%s on another device", verb);
+  }
+  return buf;
+}
+#endif
+
 static void scroll_timer_callback(void *data) {
   s_scroll_offset_px += SCROLL_STEP_PX;
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
@@ -1394,6 +1471,32 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     GRect bounds = layer_get_bounds(cell_layer);
     Section0RowKind kind = section0_row_kind((int)cell_index->row);
 
+#ifndef PBL_PLATFORM_APLITE
+    if (kind == SECTION0_ROW_LIVE) {
+      // Green like the "TRACKING" pinned header - this is another device's timer.
+      graphics_context_set_fill_color(ctx, GColorGreen);
+      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
+      // Title one size bigger (GOTHIC_24_BOLD) while a timer is actively
+      // running, GOTHIC_18 otherwise - the paused / stopped / was-tracking
+      // states pair with the long "a recently started task" fallback, which
+      // needs the room.
+      bool live_tracking = s_presence_state == 1;
+      const char *live_title_font = live_tracking ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_18;
+      int16_t live_title_h = live_tracking ? 26 : 22;
+      GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, live_title_h, CHROME_STRIP_H),
+                               bounds.size.w - TITLE_BOX_X * 2, live_title_h);
+      graphics_draw_text(ctx, s_presence_task[0] != '\0' ? s_presence_task : "Live tracking",
+                          fonts_get_system_font(live_title_font), title_box,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, live_title_h, CHROME_STRIP_H),
+                                  bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
+      graphics_draw_text(ctx, presence_state_phrase(), fonts_get_system_font(CHROME_FONT_KEY), subtitle_box,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      return;
+    }
+#endif
+
     if (kind == SECTION0_ROW_HABITS) {
       // Navigates to the habits (SimpleCounter) page. Icon matches the real
       // app's "heart_check" icon for this feature.
@@ -1603,6 +1706,7 @@ static void send_pending_retry(void) {
       dict_write_int32(iter, KEY_TASK_DONE, s_retry_int);
       break;
     case MSG_TRACK_TIME_STOP:
+    case MSG_TRACK_TIME_START:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_int32(iter, KEY_TRACKED_MS, s_retry_int);
       break;
@@ -1637,6 +1741,7 @@ static void send_pending_retry(void) {
       break;
     case MSG_FINISH_DAY:
     case MSG_REQUEST_SYNC:
+    case MSG_PRESENCE_STOP:
     default:
       break; // no extra keys
   }
@@ -1700,6 +1805,16 @@ static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
   begin_send(MSG_TRACK_TIME_STOP, task_id, NULL, tracked_ms);
 #endif
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// Phase 2 live-tracking presence: tells the phone this watch just started (or
+// resumed, elapsed_ms > 0) tracking a task, so it can broadcast "Tracking on
+// Pebble" to the account's other devices. aplite-excluded with the rest of
+// the presence feature.
+static void send_track_time_start(const char *task_id, int32_t elapsed_ms) {
+  begin_send(MSG_TRACK_TIME_START, task_id, NULL, elapsed_ms);
+}
+#endif
 
 #ifndef PBL_PLATFORM_APLITE
 // Move the task to tomorrow (tomorrow=true) or clear its scheduling. The phone
@@ -1927,6 +2042,8 @@ static void start_tracking(Task *task) {
     // Highlight the freshly-pinned row (section 1, row 0).
     menu_layer_set_selected_index(s_menu_layer, MenuIndex(1, 0), MenuRowAlignCenter, false);
   }
+  // Let the phone broadcast this as "Tracking on Pebble" to other devices.
+  send_track_time_start(task->id, 0);
 #endif
 }
 
@@ -1937,6 +2054,19 @@ static void stop_tracking_and_report(void) {
     return;
   }
   time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
+#ifndef PBL_PLATFORM_APLITE
+  // Always sent (even a 0ms session) so the phone can end the "Tracking on
+  // Pebble" presence broadcast; the phone ignores a 0 delta for the op upload.
+  int32_t elapsed_ms = elapsed_s > 0 ? (int32_t)elapsed_s * 1000 : 0;
+  send_track_time_stop(s_tracking_task_id, elapsed_ms);
+  if (elapsed_ms > 0) {
+    Task *tracked_task = find_task_by_id(s_tracking_task_id);
+    if (tracked_task) {
+      tracked_task->time_spent_ms += elapsed_ms;
+      save_tasks();
+    }
+  }
+#else
   if (elapsed_s > 0) {
     int32_t elapsed_ms = (int32_t)elapsed_s * 1000;
     send_track_time_stop(s_tracking_task_id, elapsed_ms);
@@ -1948,6 +2078,7 @@ static void stop_tracking_and_report(void) {
       save_tasks();
     }
   }
+#endif
   s_tracking_task_id[0] = '\0';
   s_tracking_start_epoch = 0;
   save_tracking();
@@ -2019,6 +2150,8 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
 #ifndef PBL_PLATFORM_APLITE
     } else if (kind == SECTION0_ROW_ADD_TASK) {
       start_add_task_dictation();
+    } else if (kind == SECTION0_ROW_LIVE) {
+      push_live_window();
 #endif
     } else {
       request_sync(); // the "Resync" row
@@ -2611,6 +2744,14 @@ static void request_sync(void) {
 #endif
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// Asks the phone to stop the live-tracking session it's currently showing us.
+// No keys - the phone holds the session id (CAS-guarded on its side).
+static void send_presence_stop(void) {
+  begin_send(MSG_PRESENCE_STOP, NULL, NULL, 0);
+}
+#endif
+
 // The single place s_status_code is assigned (from MSG_SYNC_STATUS and from
 // outbox_failed_handler's local STATUS_ERROR).
 //
@@ -2886,6 +3027,50 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       break;
     }
 #ifndef PBL_PLATFORM_APLITE
+    case MSG_PRESENCE_UPDATE: {
+      Tuple *state_tuple = dict_find(iterator, KEY_PRESENCE_STATE);
+      int new_state = state_tuple ? state_tuple->value->int32 : 0;
+      bool was_active = s_presence_state != 0;
+      s_presence_state = new_state;
+      if (new_state == 0) {
+        s_presence_task[0] = '\0';
+        s_presence_device[0] = '\0';
+        s_presence_can_stop = false;
+        s_presence_stopping = false;
+      } else {
+        Tuple *title_tuple = dict_find(iterator, KEY_PRESENCE_TASK_TITLE);
+        strncpy(s_presence_task, title_tuple ? title_tuple->value->cstring : "", sizeof(s_presence_task) - 1);
+        s_presence_task[sizeof(s_presence_task) - 1] = '\0';
+        Tuple *device_tuple = dict_find(iterator, KEY_PRESENCE_DEVICE);
+        strncpy(s_presence_device, device_tuple ? device_tuple->value->cstring : "", sizeof(s_presence_device) - 1);
+        s_presence_device[sizeof(s_presence_device) - 1] = '\0';
+        Tuple *elapsed_tuple = dict_find(iterator, KEY_PRESENCE_ELAPSED_S);
+        s_presence_elapsed_base = time(NULL) - (time_t)(elapsed_tuple ? elapsed_tuple->value->int32 : 0);
+        Tuple *can_stop_tuple = dict_find(iterator, KEY_PRESENCE_CAN_STOP);
+        s_presence_can_stop = can_stop_tuple && can_stop_tuple->value->int32 != 0;
+        // The phone confirms a stop by clearing (state 0), never by another
+        // still-live update - so any fresh state drops the "Stopping..." latch.
+        s_presence_stopping = false;
+      }
+      menu_layer_reload_data(s_menu_layer);
+      if (was_active != (s_presence_state != 0)) {
+        // The section-0 row count changed - the selection may have shifted.
+        refresh_scroll_state(true);
+      }
+      live_window_refresh(); // updates or pops the detail window if it's open
+      break;
+    }
+    case MSG_PRESENCE_STOP_LOCAL: {
+      // A remote device stopped the timer this watch is running. Stop it the
+      // same as a long-press would - stop_tracking_and_report() sends the
+      // MSG_TRACK_TIME_STOP the phone turns into the presence "stopped" ack.
+      if (s_tracking_task_id[0] != '\0') {
+        stop_tracking_and_report();
+        menu_layer_reload_data(s_menu_layer);
+        refresh_scroll_state(true);
+      }
+      break;
+    }
     case MSG_NOTE_SYNC_START: {
       Tuple *id_tuple = dict_find(iterator, KEY_TASK_ID);
       Tuple *total_tuple = dict_find(iterator, KEY_NOTE_TOTAL_LEN);
@@ -3786,6 +3971,160 @@ static void push_notes_window(void) {
 }
 #endif
 
+// ---------- live tracking window ----------
+
+#ifndef PBL_PLATFORM_APLITE
+static void live_tick_callback(void *data);
+
+static void stop_live_tick(void) {
+  if (s_live_tick_timer) {
+    app_timer_cancel(s_live_tick_timer);
+    s_live_tick_timer = NULL;
+  }
+}
+
+// Rewrites the live window's text from the current s_presence_* state, and
+// (re)arms the 1s elapsed tick only while the session is actively tracking.
+// A no-op unless the live window is the top window. State 0 pops it.
+static void live_window_refresh(void) {
+  if (!s_live_window || window_stack_get_top_window() != s_live_window) {
+    return;
+  }
+  if (s_presence_state == 0) {
+    stop_live_tick();
+    window_stack_pop(true);
+    return;
+  }
+
+  text_layer_set_text(s_live_state_layer, presence_state_phrase());
+  text_layer_set_text(s_live_task_layer, s_presence_task);
+
+  static char elapsed_buf[16];
+  if (s_presence_state == 1) {
+    int total_s = (int)(time(NULL) - s_presence_elapsed_base);
+    if (total_s < 0) {
+      total_s = 0;
+    }
+    int h = total_s / 3600;
+    int m = (total_s % 3600) / 60;
+    int s = total_s % 60;
+    if (h > 0) {
+      snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d:%02d", h, m, s);
+    } else {
+      snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d", m, s);
+    }
+    text_layer_set_text(s_live_elapsed_layer, elapsed_buf);
+    layer_set_hidden(text_layer_get_layer(s_live_elapsed_layer), false);
+    if (!s_live_tick_timer) {
+      s_live_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, live_tick_callback, NULL);
+    }
+  } else {
+    layer_set_hidden(text_layer_get_layer(s_live_elapsed_layer), true);
+    stop_live_tick();
+  }
+
+  const char *hint = "";
+  if (s_presence_stopping) {
+    hint = "Stopping...";
+  } else if (s_presence_can_stop) {
+    hint = "Select to stop";
+  }
+  text_layer_set_text(s_live_hint_layer, hint);
+}
+
+static void live_tick_callback(void *data) {
+  s_live_tick_timer = NULL;
+  if (s_presence_state == 1) {
+    live_window_refresh(); // re-arms the timer, or stops if the window closed
+  }
+}
+
+static void live_window_select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_presence_can_stop && !s_presence_stopping) {
+    s_presence_stopping = true;
+    send_presence_stop();
+    live_window_refresh(); // show "Stopping..."; the phone clears us on its ack
+  }
+}
+
+static void live_window_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_SELECT, live_window_select_click_handler);
+}
+
+static void live_window_load(Window *window) {
+  Layer *window_layer = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(window_layer);
+  backlight_touch();
+
+  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
+  s_live_status_bar = status_bar_layer_create();
+  layer_add_child(window_layer, status_bar_layer_get_layer(s_live_status_bar));
+
+  int16_t x = bounds.origin.x + 6;
+  int16_t w = bounds.size.w - 12;
+  int16_t y = bounds.origin.y + status_bar_height + 6;
+
+  // Task name first (what the user asked to see), wrapping to two lines.
+  s_live_task_layer = text_layer_create(GRect(x, y, w, 50));
+  text_layer_set_font(s_live_task_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  text_layer_set_text_alignment(s_live_task_layer, GTextAlignmentCenter);
+  text_layer_set_overflow_mode(s_live_task_layer, GTextOverflowModeWordWrap);
+  layer_add_child(window_layer, text_layer_get_layer(s_live_task_layer));
+  y += 54;
+
+  // Then the state line ("Tracking on Desktop" / "Stopped on Desktop"), smaller.
+  s_live_state_layer = text_layer_create(GRect(x, y, w, 22));
+  text_layer_set_font(s_live_state_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+  text_layer_set_text_alignment(s_live_state_layer, GTextAlignmentCenter);
+  layer_add_child(window_layer, text_layer_get_layer(s_live_state_layer));
+  y += 26;
+
+  s_live_elapsed_layer = text_layer_create(GRect(x, y, w, 30));
+  text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
+  text_layer_set_text_alignment(s_live_elapsed_layer, GTextAlignmentCenter);
+  layer_add_child(window_layer, text_layer_get_layer(s_live_elapsed_layer));
+
+  s_live_hint_layer = text_layer_create(GRect(x, bounds.size.h - 20, w, 18));
+  text_layer_set_font(s_live_hint_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_text_alignment(s_live_hint_layer, GTextAlignmentCenter);
+  text_layer_set_text_color(s_live_hint_layer, GColorDarkGray);
+  layer_add_child(window_layer, text_layer_get_layer(s_live_hint_layer));
+
+  window_set_click_config_provider(window, live_window_click_config_provider);
+  live_window_refresh();
+}
+
+static void live_window_unload(Window *window) {
+  stop_live_tick();
+  text_layer_destroy(s_live_state_layer);
+  text_layer_destroy(s_live_task_layer);
+  text_layer_destroy(s_live_elapsed_layer);
+  text_layer_destroy(s_live_hint_layer);
+  status_bar_layer_destroy(s_live_status_bar);
+  s_live_state_layer = NULL;
+  s_live_task_layer = NULL;
+  s_live_elapsed_layer = NULL;
+  s_live_hint_layer = NULL;
+  s_live_status_bar = NULL;
+}
+
+// Created once, reused (only its layers are rebuilt each visit) - matches
+// push_habits_window / push_notes_window.
+static void push_live_window(void) {
+  if (s_presence_state == 0) {
+    return;
+  }
+  if (!s_live_window) {
+    s_live_window = window_create();
+    window_set_window_handlers(s_live_window, (WindowHandlers) {
+      .load = live_window_load,
+      .unload = live_window_unload,
+    });
+  }
+  window_stack_push(s_live_window, true);
+}
+#endif
+
 // ---------- window lifecycle ----------
 
 #ifndef PBL_PLATFORM_APLITE
@@ -3942,6 +4281,11 @@ static void window_load(Window *window) {
   // elapsed total comes from the persisted start timestamp).
   if (s_tracking_task_id[0] != '\0') {
     start_tracking_tick();
+#ifndef PBL_PLATFORM_APLITE
+    // Re-announce the resumed session so the phone can broadcast it again.
+    time_t resumed_s = time(NULL) - s_tracking_start_epoch;
+    send_track_time_start(s_tracking_task_id, resumed_s > 0 ? (int32_t)resumed_s * 1000 : 0);
+#endif
   }
 }
 
@@ -4098,6 +4442,10 @@ static void deinit(void) {
 #ifndef PBL_PLATFORM_APLITE
   if (s_notes_window) {
     window_destroy(s_notes_window);
+  }
+  stop_live_tick();
+  if (s_live_window) {
+    window_destroy(s_live_window);
   }
 #endif
 }
