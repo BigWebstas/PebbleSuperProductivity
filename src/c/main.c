@@ -75,6 +75,8 @@ enum {
   MSG_PROJECT_NOTE_SYNC_START = 22, // phone -> watch: PROJECT_ID + NOTE_TOTAL_LEN
   MSG_PROJECT_NOTE_CHUNK = 23,      // phone -> watch: PROJECT_ID + NOTE_CHUNK_TEXT
   MSG_PROJECT_NOTE_SYNC_END = 24,   // phone -> watch: PROJECT_ID
+  MSG_TASK_PLAN_TOMORROW = 25,      // watch -> phone: TASK_ID (set the task's dueDay to tomorrow)
+  MSG_TASK_UNSCHEDULE = 26,         // watch -> phone: TASK_ID (clear the task's scheduling)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -335,6 +337,35 @@ static char s_pending_toggle_task_id[MAX_ID_LEN] = "";
 // row has no single-click action to commit if the second click never comes.
 static AppTimer *s_pending_project_click_timer = NULL;
 static char s_pending_project_click_id[MAX_PROJECT_ID_LEN] = "";
+
+// Long-press Up (unschedule) and long-press Down / swipe-left (move to tomorrow)
+// each open a 3s cancel window on the selected task, reusing the pending-toggle
+// pattern above: the row's subtitle shows "Moving to tomorrow..." / "Un-
+// Scheduling..." and a single Select cancels before the timer commits. Tracked
+// by id for the same background-sync reason. aplite-excluded for RAM (like the
+// send-retry buffer) - and the swipe half is PBL_TOUCH-only regardless.
+#define RESCHEDULE_WINDOW_MS 3000
+// Below the SDK's 500ms default so a deliberate hold commits before UP/DOWN's
+// repeat-scroll walks the selection too far off the intended row.
+#define RESCHEDULE_LONGPRESS_MS 400
+typedef enum { RESCHEDULE_NONE, RESCHEDULE_TOMORROW, RESCHEDULE_UNSCHEDULE } RescheduleKind;
+static AppTimer *s_pending_reschedule_timer = NULL;
+static char s_pending_reschedule_task_id[MAX_ID_LEN] = "";
+static RescheduleKind s_pending_reschedule_kind = RESCHEDULE_NONE;
+#endif
+
+#if defined(PBL_TOUCH)
+// A touch tap on the task / habits list only moves the selection - it must not
+// also toggle the row done / bump the habit the way the physical Select button
+// does. The touch bridge synthesises a SELECT click for every tap; when a tap
+// arms this guard (see arm_tap_select_guard by the touch handler) the next
+// menu_select_click / habits_menu_select_click swallows that one click.
+// Physical Select never routes through the guard. Time-boxed so a stray arm
+// (bridge fired no click) can't swallow a later button press.
+static bool s_ignore_next_menu_select = false;
+static AppTimer *s_tap_guard_timer = NULL;
+static void clear_tap_select_guard(void);
+static bool consume_tap_select_guard(void);
 #endif
 
 // Time tracking: long-select starts/stops tracking a task (one at a time,
@@ -701,6 +732,10 @@ static void hide_notes_overlay(void);
 static void push_notes_window(void);
 static void pending_toggle_timer_callback(void *data);
 static void pending_project_click_timer_callback(void *data);
+static void pending_reschedule_timer_callback(void *data);
+static void cancel_pending_reschedule(void);
+static void begin_pending_reschedule(RescheduleKind kind);
+static void send_task_reschedule(const char *task_id, bool tomorrow);
 static TaskGroup *resolve_project_row_at(MenuIndex index);
 #endif
 #ifndef PBL_PLATFORM_APLITE
@@ -1264,6 +1299,20 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
   GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, title_box_h, SUBTITLE_STRIP_H),
                               bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
 
+#ifndef PBL_PLATFORM_APLITE
+  // Pending reschedule: takes over the whole subtitle line (over "Done" and the
+  // due/time text) for the 3s cancel window - see begin_pending_reschedule.
+  if (s_pending_reschedule_kind != RESCHEDULE_NONE &&
+      strncmp(s_pending_reschedule_task_id, task->id, MAX_ID_LEN) == 0) {
+    const char *pending_msg = s_pending_reschedule_kind == RESCHEDULE_TOMORROW
+                                  ? "Moving to tomorrow..."
+                                  : "Un-Scheduling...";
+    graphics_draw_text(ctx, pending_msg, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    return;
+  }
+#endif
+
   if (task->done) {
     graphics_draw_text(ctx, "Done", fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
@@ -1575,6 +1624,10 @@ static void send_pending_retry(void) {
     case MSG_NOTE_REQUEST:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       break;
+    case MSG_TASK_PLAN_TOMORROW:
+    case MSG_TASK_UNSCHEDULE:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      break;
     case MSG_PROJECT_NOTE_APPEND:
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
       dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str2);
@@ -1647,6 +1700,15 @@ static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
   begin_send(MSG_TRACK_TIME_STOP, task_id, NULL, tracked_ms);
 #endif
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// Move the task to tomorrow (tomorrow=true) or clear its scheduling. The phone
+// turns this into an updateTask op and pushes a fresh list back - the task may
+// leave a Today-only view. aplite-excluded with the gesture.
+static void send_task_reschedule(const char *task_id, bool tomorrow) {
+  begin_send(tomorrow ? MSG_TASK_PLAN_TOMORROW : MSG_TASK_UNSCHEDULE, task_id, NULL, 0);
+}
+#endif
 
 #ifndef PBL_PLATFORM_APLITE
 // Set right before send_finish_day() queues its message; outbox_sent_handler
@@ -1907,7 +1969,23 @@ static void stop_tracking_and_report(void) {
 
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
+#if defined(PBL_TOUCH)
+  // A touch tap: the bridge has already moved the highlight to the tapped row,
+  // so just leave it selected - don't toggle it done, don't cancel a pending
+  // reschedule (a swipe's own synthesised SELECT lands here too). Checked
+  // before everything else. Physical Select is never guarded.
+  if (consume_tap_select_guard()) {
+    return;
+  }
+#endif
 #ifndef PBL_PLATFORM_APLITE
+  // A pending move-to-tomorrow / unschedule is cancelled by a physical Select
+  // during its window - checked before the normal row handling so the press
+  // only cancels (no toggle, no notes).
+  if (s_pending_reschedule_kind != RESCHEDULE_NONE) {
+    cancel_pending_reschedule();
+    return;
+  }
   // The over-estimate banner is a plain layer on the menu - a Select while
   // it's up just dismisses it, like the error overlay.
   if (s_overtime_banner_layer &&
@@ -2383,6 +2461,69 @@ static void pending_toggle_timer_callback(void *data) {
 static void pending_project_click_timer_callback(void *data) {
   s_pending_project_click_timer = NULL;
   s_pending_project_click_id[0] = '\0';
+}
+
+// Clears a pending move-to-tomorrow / unschedule (Select pressed within the
+// window, or the window's own task vanished) and redraws so the subtitle
+// reverts.
+static void cancel_pending_reschedule(void) {
+  if (s_pending_reschedule_timer) {
+    app_timer_cancel(s_pending_reschedule_timer);
+    s_pending_reschedule_timer = NULL;
+  }
+  s_pending_reschedule_kind = RESCHEDULE_NONE;
+  s_pending_reschedule_task_id[0] = '\0';
+  if (s_menu_layer) {
+    menu_layer_reload_data(s_menu_layer);
+  }
+}
+
+// Commits the pending move-to-tomorrow / unschedule once its 3s cancel window
+// passes. Looks the task up by id for the same background-sync reason as
+// pending_toggle_timer_callback.
+static void pending_reschedule_timer_callback(void *data) {
+  s_pending_reschedule_timer = NULL;
+  RescheduleKind kind = s_pending_reschedule_kind;
+  Task *task = find_task_by_id(s_pending_reschedule_task_id);
+  s_pending_reschedule_kind = RESCHEDULE_NONE;
+  s_pending_reschedule_task_id[0] = '\0';
+  if (task && kind != RESCHEDULE_NONE) {
+    send_task_reschedule(task->id, kind == RESCHEDULE_TOMORROW);
+  }
+  // Drop the pending subtitle now; the phone's list push handles the rest.
+  if (s_menu_layer) {
+    menu_layer_reload_data(s_menu_layer);
+  }
+}
+
+// Starts (or replaces) the pending reschedule for the currently-selected task.
+// A long-press Up passes RESCHEDULE_UNSCHEDULE, long-press Down / swipe-left
+// RESCHEDULE_TOMORROW.
+static void begin_pending_reschedule(RescheduleKind kind) {
+  if (s_error_overlay_active || s_task_count == 0 || kind == RESCHEDULE_NONE) {
+    return;
+  }
+  Task *task = resolve_selected_task();
+  if (!task) {
+    return; // selection is on a pinned/project/action row, not a task
+  }
+  // A pending done-toggle on the same tap sequence would otherwise commit
+  // mid-window - drop it in favour of this.
+  if (s_pending_toggle_timer) {
+    app_timer_cancel(s_pending_toggle_timer);
+    s_pending_toggle_timer = NULL;
+    s_pending_toggle_task_id[0] = '\0';
+  }
+  if (s_pending_reschedule_timer) {
+    app_timer_cancel(s_pending_reschedule_timer);
+  }
+  strncpy(s_pending_reschedule_task_id, task->id, MAX_ID_LEN - 1);
+  s_pending_reschedule_task_id[MAX_ID_LEN - 1] = '\0';
+  s_pending_reschedule_kind = kind;
+  s_pending_reschedule_timer =
+      app_timer_register(RESCHEDULE_WINDOW_MS, pending_reschedule_timer_callback, NULL);
+  vibes_short_pulse();
+  menu_layer_reload_data(s_menu_layer);
 }
 
 // True if a NOTE_SYNC_* reply for id/is_project is about what the notes overlay
@@ -3185,6 +3326,12 @@ static void adjust_habit(MenuIndex index, int32_t delta) {
 
 static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
+#if defined(PBL_TOUCH)
+  // A touch tap only selects the row - see menu_select_click's matching guard.
+  if (consume_tap_select_guard()) {
+    return;
+  }
+#endif
   Habit *habit = resolve_habit_at(*cell_index);
 #ifndef PBL_PLATFORM_APLITE
   // Select pauses/resumes an is_countdown habit's timer while it's tracking
@@ -3335,14 +3482,21 @@ static void notes_window_select_long_click_handler(ClickRecognizerRef recognizer
 // --- Touch navigation (emery and any other PBL_TOUCH platform) ---
 //
 // Hybrid model. The system touch-nav bridge (app_touch_navigation_enable)
-// handles most of it: a swipe scrolls, a tap on a row is delivered as a SELECT
-// single-click - all through the existing click handlers, no per-window code.
+// handles most of it: a swipe scrolls, a tap on a row moves the MenuLayer
+// highlight there and is delivered as a SELECT single-click.
 //
-// The bridge has no long-press gesture (start/stop tracking, Finish Day, habit
-// -1, dictate a note), so this raw touch_service handler adds only that,
-// running alongside the bridge. It does NOT handle swipe-right = Back (the
-// bridge already does; a second pop double-popped out of the app) or vertical
-// drags (the bridge's scrolling).
+// This raw touch_service handler runs alongside the bridge and adds what the
+// bridge can't:
+//   - long-press -> the selected row's long-click (tracking, Finish Day,
+//     habit -1, dictate a note); no point->row mapping needed (MenuLayer
+//     has no API), it just acts on whatever is selected.
+//   - left-swipe on the main list -> move the selected task to tomorrow
+//     (see begin_pending_reschedule; the Down button long-press does the same).
+//   - tap -> SELECT-ONLY: the bridge's synthesised SELECT click is swallowed
+//     (arm_tap_select_guard) so a tap just selects the row, it never toggles
+//     it done or bumps a habit. Those stay button-only actions.
+// It does NOT handle swipe-right = Back (the bridge already does; a second pop
+// double-popped out of the app) or vertical drags (the bridge's scrolling).
 //
 // The long-press acts on the MenuLayer's selected row, like the physical
 // long-click - no need to map a touch point to a row (MenuLayer has no API).
@@ -3355,11 +3509,20 @@ static void notes_window_select_long_click_handler(ClickRecognizerRef recognizer
 // out the smaller drift on a near-centre hold.
 
 #define TOUCH_LONGPRESS_MS 700
-#define TOUCH_SLOP_PX 25  // movement past this cancels the long-press
+#define TOUCH_SLOP_PX 25  // movement past this cancels the long-press / is not a tap
+// A decisive leftward drag on the task list = move the selected task to
+// tomorrow (the button long-press Down does the same). Right/vertical drags
+// stay the bridge's (Back / scroll). Gated on a shallow dy so a diagonal
+// scroll doesn't count. Kept modest (a real flick clears it in a frame or two)
+// because the old 60px value plus the slop-disarm below meant a swipe that
+// began even slightly vertical never registered.
+#define TOUCH_SWIPE_PX 45
 
 static AppTimer *s_touch_longpress_timer = NULL;
 static GPoint s_touch_down_point;
-static bool s_touch_armed = false;  // a navigational gesture is in progress
+static bool s_touch_armed = false;       // a gesture is in progress (armed at Touchdown)
+static bool s_touch_moved = false;       // finger has left the tap zone (scroll / swipe)
+static bool s_touch_swipe_fired = false; // left-swipe already handled this gesture
 
 static void touch_longpress_timer_cancel(void) {
   if (s_touch_longpress_timer) {
@@ -3368,9 +3531,52 @@ static void touch_longpress_timer_cancel(void) {
   }
 }
 
+// The guard window: any menu SELECT click that lands within this long of a
+// touch event is the bridge's synthesised tap-click, not a physical button
+// press. Generous because the bridge can emit the click slightly before OR
+// after the raw Liftoff, and the Time-2 driver's latency is not tight.
+#define TAP_GUARD_MS 450
+
+static void tap_guard_timer_cb(void *data) {
+  s_tap_guard_timer = NULL;
+  s_ignore_next_menu_select = false;
+}
+
+// Arm / refresh the guard. Called on every touch event that could precede a
+// synthesised SELECT (Touchdown, Liftoff, long-press fire) - NOT gated on a
+// motion "was it a tap" test, which is unreliable given the driver drift the
+// HARDWARE STATE note describes. A scroll / swipe / long-press just leaves the
+// guard to expire unused.
+static void arm_tap_select_guard(void) {
+  s_ignore_next_menu_select = true;
+  if (s_tap_guard_timer) {
+    app_timer_cancel(s_tap_guard_timer);
+  }
+  s_tap_guard_timer = app_timer_register(TAP_GUARD_MS, tap_guard_timer_cb, NULL);
+}
+
+static void clear_tap_select_guard(void) {
+  s_ignore_next_menu_select = false;
+  if (s_tap_guard_timer) {
+    app_timer_cancel(s_tap_guard_timer);
+    s_tap_guard_timer = NULL;
+  }
+}
+
+// True (and disarms) if a touch-synthesised SELECT is what's being handled -
+// the caller should treat this click as "select the row only", not activate it.
+static bool consume_tap_select_guard(void) {
+  if (!s_ignore_next_menu_select) {
+    return false;
+  }
+  clear_tap_select_guard();
+  return true;
+}
+
 static void touch_longpress_fire(void *data) {
   s_touch_longpress_timer = NULL;
   s_touch_armed = false;  // consumed - the eventual liftoff does nothing more
+  arm_tap_select_guard();  // swallow any SELECT the bridge emits on the release
   backlight_touch();
   vibes_short_pulse();  // the only "it registered" cue before the action lands
   Window *top = window_stack_get_top_window();
@@ -3385,36 +3591,75 @@ static void touch_longpress_fire(void *data) {
   }
 }
 
+// Left-swipe test: a decisive leftward drag with a shallow vertical component,
+// on the main list only.
+static bool touch_is_left_swipe(int dx, int dy) {
+  int adx = dx < 0 ? -dx : dx;
+  int ady = dy < 0 ? -dy : dy;
+  return dx <= -TOUCH_SWIPE_PX && ady * 2 <= adx;
+}
+
 static void touch_handler(const TouchEvent *event, void *context) {
   switch (event->type) {
   case TouchEvent_Touchdown:
     touch_longpress_timer_cancel();
+    s_touch_moved = false;
+    s_touch_swipe_fired = false;
     // non_navigational: contact without the watch being woken first - don't arm.
     s_touch_armed = !event->non_navigational;
     if (!s_touch_armed) {
+      clear_tap_select_guard();
       break;
     }
     s_touch_down_point = GPoint(event->x, event->y);
     s_touch_longpress_timer = app_timer_register(TOUCH_LONGPRESS_MS, touch_longpress_fire, NULL);
+    // Arm now - the bridge can synthesise its tap SELECT click before the raw
+    // Liftoff even reaches us. Re-armed on Liftoff to cover a late one.
+    arm_tap_select_guard();
     break;
 
   case TouchEvent_PositionUpdate: {
-    if (!s_touch_armed) {
+    if (!s_touch_armed || s_touch_swipe_fired) {
       break;
     }
     int dx = event->x - s_touch_down_point.x;
     int dy = event->y - s_touch_down_point.y;
-    if (dx * dx + dy * dy > TOUCH_SLOP_PX * TOUCH_SLOP_PX) {
-      touch_longpress_timer_cancel();  // a moving finger (scroll/swipe) isn't
-      s_touch_armed = false;           // a long-press - leave it to the bridge
+    int adx = dx < 0 ? -dx : dx;
+    int ady = dy < 0 ? -dy : dy;
+    if (adx > TOUCH_SLOP_PX || ady > TOUCH_SLOP_PX) {
+      s_touch_moved = true;
+      touch_longpress_timer_cancel();  // a moving finger isn't a long-press
+    }
+    // Keep evaluating dx for the whole drag - the old code disarmed at the slop,
+    // so a swipe that started even slightly vertical could never be recognised.
+    if (touch_is_left_swipe(dx, dy) && window_stack_get_top_window() == s_main_window) {
+      s_touch_swipe_fired = true;
+      begin_pending_reschedule(RESCHEDULE_TOMORROW);
     }
     break;
   }
 
-  case TouchEvent_Liftoff:
+  case TouchEvent_Liftoff: {
     touch_longpress_timer_cancel();
+    if (s_touch_armed && !s_touch_swipe_fired) {
+      int dx = event->x - s_touch_down_point.x;
+      int dy = event->y - s_touch_down_point.y;
+      if (touch_is_left_swipe(dx, dy) && window_stack_get_top_window() == s_main_window) {
+        // A fast flick can arrive as Touchdown -> Liftoff with no
+        // PositionUpdate between - catch it from the endpoint delta.
+        begin_pending_reschedule(RESCHEDULE_TOMORROW);
+        s_touch_swipe_fired = true;
+      }
+    }
+    // Re-arm the tap guard so a SELECT the bridge emits just after the release
+    // is swallowed too (tap = select-only; and after a swipe, a stray SELECT
+    // must not reach the pending-reschedule cancel path).
+    arm_tap_select_guard();
     s_touch_armed = false;
+    s_touch_moved = false;
+    s_touch_swipe_fired = false;
     break;
+  }
   }
 }
 
@@ -3425,7 +3670,10 @@ static void apply_touch_nav(void) {
   } else {
     touch_service_unsubscribe();
     touch_longpress_timer_cancel();
+    clear_tap_select_guard();
     s_touch_armed = false;
+    s_touch_moved = false;
+    s_touch_swipe_fired = false;
   }
 }
 #endif  // PBL_TOUCH
@@ -3540,6 +3788,34 @@ static void push_notes_window(void) {
 
 // ---------- window lifecycle ----------
 
+#ifndef PBL_PLATFORM_APLITE
+// MenuLayer owns the main window's click config (UP/DOWN scroll, SELECT single
+// and long). menu_layer_set_click_config_onto_window installs its provider on
+// the window; this wraps that provider to add a long-press on UP (unschedule)
+// and DOWN (move to tomorrow) without disturbing anything else - see
+// begin_pending_reschedule. The wrapped provider is called with MenuLayer's own
+// context (the MenuLayer*), which its handlers require.
+static ClickConfigProvider s_menu_click_config_provider = NULL;
+static void *s_menu_click_config_context = NULL;
+
+static void reschedule_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  backlight_touch();
+  begin_pending_reschedule(click_recognizer_get_button_id(recognizer) == BUTTON_ID_UP
+                               ? RESCHEDULE_UNSCHEDULE
+                               : RESCHEDULE_TOMORROW);
+}
+
+static void main_window_click_config_provider(void *context) {
+  if (s_menu_click_config_provider) {
+    s_menu_click_config_provider(context);
+  }
+  window_long_click_subscribe(BUTTON_ID_UP, RESCHEDULE_LONGPRESS_MS,
+                              reschedule_long_click_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_DOWN, RESCHEDULE_LONGPRESS_MS,
+                              reschedule_long_click_handler, NULL);
+}
+#endif
+
 static void window_load(Window *window) {
   Layer *window_layer = window_get_root_layer(window);
   GRect bounds = layer_get_bounds(window_layer);
@@ -3565,6 +3841,14 @@ static void window_load(Window *window) {
     .selection_changed = menu_selection_changed,
   });
   menu_layer_set_click_config_onto_window(s_menu_layer, window);
+#ifndef PBL_PLATFORM_APLITE
+  // Wrap MenuLayer's just-installed provider to add the long-press UP/DOWN
+  // reschedule gestures (see main_window_click_config_provider).
+  s_menu_click_config_provider = window_get_click_config_provider(window);
+  s_menu_click_config_context = window_get_click_config_context(window);
+  window_set_click_config_provider_with_context(window, main_window_click_config_provider,
+                                                s_menu_click_config_context);
+#endif
   layer_add_child(window_layer, menu_layer_get_layer(s_menu_layer));
   // A cached list may already have a selection that needs to scroll.
   refresh_scroll_state(true);
@@ -3688,6 +3972,17 @@ static void window_unload(Window *window) {
     app_timer_cancel(s_pending_project_click_timer);
     s_pending_project_click_timer = NULL;
   }
+  if (s_pending_reschedule_timer) {
+    app_timer_cancel(s_pending_reschedule_timer);
+    s_pending_reschedule_timer = NULL;
+  }
+  s_pending_reschedule_kind = RESCHEDULE_NONE;
+  s_pending_reschedule_task_id[0] = '\0';
+  s_menu_click_config_provider = NULL;
+  s_menu_click_config_context = NULL;
+#endif
+#if defined(PBL_TOUCH)
+  clear_tap_select_guard();
 #endif
   bitmap_layer_destroy(s_logo_layer);
   gbitmap_destroy(s_logo_bitmap);

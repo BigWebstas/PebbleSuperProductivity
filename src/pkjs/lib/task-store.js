@@ -1145,5 +1145,6 @@ module.exports = {
   getActiveTasks: getActiveTasks,
   getActiveHabits: getActiveHabits,
   todayStr: todayStr,
+  dateToDateStr: dateToDateStr,
   HIDE_DONE_GRACE_MS: HIDE_DONE_GRACE_MS,
 };
