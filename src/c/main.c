@@ -4082,8 +4082,10 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
       return;
     }
     // Green with bold black text - the same treatment the today view gives a
-    // project group header (menu_draw_header). Text inverts on selection.
-    graphics_context_set_fill_color(ctx, GColorGreen);
+    // project group header (menu_draw_header). The selected row darkens to
+    // GColorIslamicGreen with white text so it stands out (a bare text-colour
+    // flip on the bright green barely read).
+    graphics_context_set_fill_color(ctx, is_selected ? GColorIslamicGreen : GColorGreen);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
     graphics_draw_text(ctx, p->title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
