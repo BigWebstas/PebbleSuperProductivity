@@ -100,6 +100,7 @@
       "NOTE_TOTAL_LEN",
       "NOTE_CHUNK_TEXT",
       "TASK_PROJECT_ID",
+      "TASK_PROJECT_COLOR",
       "PROJECT_ID",
       "PROJECT_INDEX",
       "PROJECT_TITLE",

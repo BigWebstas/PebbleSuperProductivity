@@ -38,6 +38,7 @@
 #define KEY_NOTE_TOTAL_LEN MESSAGE_KEY_NOTE_TOTAL_LEN
 #define KEY_NOTE_CHUNK_TEXT MESSAGE_KEY_NOTE_CHUNK_TEXT
 #define KEY_TASK_PROJECT_ID MESSAGE_KEY_TASK_PROJECT_ID
+#define KEY_TASK_PROJECT_COLOR MESSAGE_KEY_TASK_PROJECT_COLOR
 #define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
 #define KEY_PROJECT_INDEX MESSAGE_KEY_PROJECT_INDEX
 #define KEY_PROJECT_TITLE MESSAGE_KEY_PROJECT_TITLE
@@ -146,6 +147,15 @@ enum {
 // fixed per-task field (phone truncates TASK_TAGS to 63 chars in sendTaskAt).
 #define MAX_TASK_TAGS_LEN 64
 
+// The grouped today view's project-row colour swatch. Off on aplite (no
+// grouping UI) and on emery, whose virtual-size budget is exhausted - emery
+// keeps the swatch on the Projects browser list, just not the today view.
+#if !defined(PBL_PLATFORM_APLITE) && !defined(PBL_PLATFORM_EMERY)
+#define TODAY_PROJECT_SWATCH 1
+#else
+#define TODAY_PROJECT_SWATCH 0
+#endif
+
 typedef struct {
   char id[MAX_ID_LEN];
   char title[MAX_TITLE_LEN];
@@ -159,6 +169,13 @@ typedef struct {
   char tags[MAX_TASK_TAGS_LEN];
 #endif
   bool done;
+#if TODAY_PROJECT_SWATCH
+  // Packed GColor8 byte for this task's project's theme-colour swatch (0 =
+  // none). Sits in the padding after `done`, costing the double-buffered
+  // s_tasks/s_incoming arrays nothing. The grouped today view reads it off
+  // whichever task starts each project group.
+  uint8_t project_color;
+#endif
   int due_min;       // minutes since local midnight, or -1 when the task has no dueWithTime
   int time_spent_ms; // total tracked time (all days, all devices), 0 if none
   int time_estimate_ms; // 0 if none
@@ -1133,6 +1150,21 @@ static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_in
 #endif
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// A project's theme-colour swatch: a 16px square filled with the phone-packed
+// GColor8 byte, centred vertically, drawn at x. Returns the x for following
+// text - unchanged (nothing drawn) when color is 0. Shared by the grouped
+// today view's project rows and the Projects browser's list.
+static int16_t draw_project_swatch(GContext *ctx, int16_t x, int16_t cell_h, uint8_t color) {
+  if (color == 0) {
+    return x;
+  }
+  graphics_context_set_fill_color(ctx, (GColor8){ .argb = color });
+  graphics_fill_rect(ctx, GRect(x, (cell_h - 16) / 2, 16, 16), 0, GCornerNone);
+  return x + 22;
+}
+#endif
+
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
     if (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) {
@@ -1768,11 +1800,17 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     GRect bounds = layer_get_bounds(cell_layer);
     GFont bold_font = fonts_get_system_font(HEADING_FONT_KEY);
     int16_t text_top = HEADING_TITLE_Y(bounds.size.h);
-    GRect text_rect = GRect(TITLE_BOX_X, text_top, bounds.size.w - TITLE_BOX_X * 2, bounds.size.h - 4);
     GColor fg = is_selected ? GColorWhite : GColorBlack;
 
     graphics_context_set_fill_color(ctx, GColorGreen);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+#if TODAY_PROJECT_SWATCH
+    int16_t text_x = draw_project_swatch(ctx, TITLE_BOX_X, bounds.size.h,
+                                          s_tasks[project_row->start].project_color);
+#else
+    int16_t text_x = TITLE_BOX_X;
+#endif
+    GRect text_rect = GRect(text_x, text_top, bounds.size.w - text_x - TITLE_BOX_X, bounds.size.h - 4);
     graphics_context_set_text_color(ctx, fg);
     graphics_draw_text(ctx, project_row->name, bold_font, text_rect,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
@@ -3022,6 +3060,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         Tuple *tags_tuple = dict_find(iterator, KEY_TASK_TAGS);
         strncpy(s_incoming[idx].tags, tags_tuple ? tags_tuple->value->cstring : "", MAX_TASK_TAGS_LEN - 1);
         s_incoming[idx].tags[MAX_TASK_TAGS_LEN - 1] = '\0';
+#if TODAY_PROJECT_SWATCH
+        Tuple *pcolor_tuple = dict_find(iterator, KEY_TASK_PROJECT_COLOR);
+        s_incoming[idx].project_color = pcolor_tuple ? (uint8_t)pcolor_tuple->value->int32 : 0;
+#endif
       }
 #endif
       s_incoming[idx].done = done_tuple && done_tuple->value->int32 != 0;
@@ -4110,14 +4152,9 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     // flip on the bright green barely read).
     graphics_context_set_fill_color(ctx, is_selected ? GColorIslamicGreen : GColorGreen);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-    // The project's theme colour as a swatch on the left - the phone already
-    // packed it into a GColor8 byte (see projectColorRgb). No swatch when 0.
-    int16_t text_x = TITLE_BOX_X;
-    if (p->color != 0) {
-      graphics_context_set_fill_color(ctx, (GColor8){ .argb = (uint8_t)p->color });
-      graphics_fill_rect(ctx, GRect(TITLE_BOX_X, (bounds.size.h - 16) / 2, 16, 16), 0, GCornerNone);
-      text_x = TITLE_BOX_X + 22;
-    }
+    // The project's theme colour as a swatch on the left (draw_project_swatch,
+    // shared with the today view). The phone already packed it to a GColor8.
+    int16_t text_x = draw_project_swatch(ctx, TITLE_BOX_X, bounds.size.h, (uint8_t)p->color);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
     graphics_draw_text(ctx, p->title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
                         GRect(text_x, HEADING_TITLE_Y(bounds.size.h),

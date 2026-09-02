@@ -960,10 +960,10 @@ function getProjectTasks(state, projectId, limit, hideDone) {
   var regular = [];
   var backlog = [];
   regularMains.forEach(function (t) {
-    pushTaskAndSubtasks(regular, state, allTasks, t, projName, pid, hideDone);
+    pushTaskAndSubtasks(regular, state, allTasks, t, projName, pid, 0, hideDone);
   });
   backlogMains.forEach(function (t) {
-    pushTaskAndSubtasks(backlog, state, allTasks, t, projName, pid, hideDone);
+    pushTaskAndSubtasks(backlog, state, allTasks, t, projName, pid, 0, hideDone);
   });
   return { regular: regular.slice(0, limit), backlog: backlog.slice(0, limit) };
 }
@@ -1124,24 +1124,26 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alway
     // means the merged group's notes button points at whichever of them was
     // seen first, same negligible edge case.
     var groupProjectIds = {};
+    var groupColors = {};
     mainTasks.forEach(function (t) {
       var name = projectTitleFor(state, t);
       if (!byProject[name]) {
         byProject[name] = [];
         groupProjectIds[name] = t.projectId || '';
+        groupColors[name] = t.projectId ? projectColorRgb((state.project && state.project[t.projectId]) || {}) : 0;
       }
       byProject[name].push(t);
     });
     Object.keys(byProject).sort(titleCompare).forEach(function (name) {
       byProject[name].sort(withinGroupSort);
       byProject[name].forEach(function (t) {
-        pushTaskAndSubtasks(rows, state, allTasks, t, name, groupProjectIds[name], hideDone);
+        pushTaskAndSubtasks(rows, state, allTasks, t, name, groupProjectIds[name], groupColors[name], hideDone);
       });
     });
   } else {
     mainTasks.sort(withinGroupSort);
     mainTasks.forEach(function (t) {
-      pushTaskAndSubtasks(rows, state, allTasks, t, '', '', hideDone);
+      pushTaskAndSubtasks(rows, state, allTasks, t, '', '', 0, hideDone);
     });
   }
 
@@ -1162,7 +1164,7 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alway
 // (~) for exactly that reason, before this was re-tested more thoroughly.
 var SUBTASK_PREFIX = '    » ';
 
-function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId, hideDone) {
+function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId, groupColor, hideDone) {
   // t is already guaranteed a real title here - getActiveTasks filters
   // ghost (title-less) records out of mainTasks before this is ever
   // called (hideDone's own done-main-task filtering happens there too, for
@@ -1185,11 +1187,11 @@ function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId
   // already fully available locally once TAG entities have replayed, so
   // there's no fetch round-trip worth avoiding the way there is for a
   // task's full notes text.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
     }
   });
 }

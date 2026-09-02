@@ -480,6 +480,11 @@ function fillTaskFields(dict, t) {
     // as TASK_DUE_MIN/TASK_TIME_SPENT_MS below.
     dict.TASK_PROJECT_ID = String(t.projectId).slice(0, 31);
   }
+  if (t.projectColor) {
+    // Packed GColor8 byte (task-store's projectColorRgb) - the grouped today
+    // view draws it as a swatch on the project row, same as the browser list.
+    dict.TASK_PROJECT_COLOR = t.projectColor;
+  }
   if (t.tags) {
     // Comma-joined tag names (see task-store.js's tagTitlesFor) for the
     // watch's read-only tags overlay - long-select Back on a task row, see
