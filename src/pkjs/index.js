@@ -64,6 +64,7 @@ var MSG_PROJECT_TASKS_REQUEST = 35; // watch -> phone: PROJECT_ID
 var MSG_PROJECT_TASKS_START = 36;   // phone -> watch: PROJECT_ID, TASK_TOTAL
 var MSG_PROJECT_TASKS_ITEM = 37;    // phone -> watch: PROJECT_ID, TASK_INDEX, TASK_*, PROJECT_TASK_BACKLOG
 var MSG_PROJECT_TASKS_END = 38;     // phone -> watch: PROJECT_ID
+var MSG_TASK_PLAN_TODAY = 39;       // watch -> phone: TASK_ID (set the task's dueDay to today)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -646,8 +647,14 @@ function handleProjectTasksRequest(projectId) {
   if (projectId === undefined || projectId === null) {
     return;
   }
-  var pid = String(projectId);
-  var split = store.getProjectTasks(loadState(), pid, MAX_TASKS, !!config.hideDoneTasks);
+  sendProjectTasks(String(projectId), loadState(), config);
+}
+
+// Pushes one project's task list to the watch (regular rows then backlog rows).
+// Also called after a reschedule that pulled a task out of that project's
+// backlog, so the browser's task view updates in place.
+function sendProjectTasks(pid, state, config) {
+  var split = store.getProjectTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks);
   var rows = split.regular.map(function (t) { return { t: t, backlog: 0 }; })
     .concat(split.backlog.map(function (t) { return { t: t, backlog: 1 }; }));
   var idField = pid.slice(0, 31);
@@ -899,14 +906,28 @@ function doSync() {
 // next op against this entity starts from a clock that beats what the
 // server actually has.
 function uploadSingleOp(op, config, clientId) {
+  return uploadOps([op], config, clientId);
+}
+
+// Uploads one or more ops in a single request. Rejection of any op throws with
+// the first rejected result attached (so the vectorClock-merge recovery below
+// still runs); accepted ops in the same batch still land server-side.
+function uploadOps(ops, config, clientId) {
   var client = new supersync.SuperSyncClient({ baseUrl: config.baseUrl, token: config.jwt });
   return client
-    .uploadOps([op], clientId, loadLastSeq())
+    .uploadOps(ops, clientId, loadLastSeq())
     .then(function (res) {
-      var result = res && res.results && res.results[0];
-      if (result && !result.accepted) {
-        var err = new Error((result.errorCode || 'REJECTED') + ': ' + (result.error || 'op rejected by server'));
-        err.rejectedResult = result;
+      var results = (res && res.results) || [];
+      var rejected = null;
+      for (var i = 0; i < results.length; i++) {
+        if (results[i] && !results[i].accepted) {
+          rejected = results[i];
+          break;
+        }
+      }
+      if (rejected) {
+        var err = new Error((rejected.errorCode || 'REJECTED') + ': ' + (rejected.error || 'op rejected by server'));
+        err.rejectedResult = rejected;
         throw err;
       }
       // Deliberately NOT saveLastSeq(res.latestSeq) here: confirmed against
@@ -1032,6 +1053,33 @@ function buildTaskUpdateOp(taskId, changes, clientId) {
   };
 }
 
+// "[Project] Move Task from backlog to regular" (project.actions.ts, but a TASK-
+// entity op - payload { taskId, afterTaskId, workContextId }, confirmed against
+// the shape task-store's replay and its tests use). workContextId is the
+// project id; afterTaskId null drops it at the top of the regular list.
+function buildBacklogToRegularOp(projectId, taskId, clientId) {
+  var crypto = getCrypto();
+  var payload = {
+    actionPayload: { taskId: taskId, afterTaskId: null, workContextId: projectId },
+    entityChanges: [],
+  };
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  return {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[Project] Move Task from backlog to regular',
+    entityType: 'TASK',
+    entityId: taskId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+}
+
 // Builds (and applies the matching local optimistic update for) the
 // parent's own updateTask op if taskId's just-applied completion left
 // every sibling subtask done too - see handleTaskToggle's own call site
@@ -1143,14 +1191,18 @@ function handleTaskToggle(taskId, done) {
     });
 }
 
-// Watch long-press Up / Down (or swipe-left) after a 3s cancel window:
-// toTomorrow=true sets the task's dueDay to tomorrow, false clears its
-// scheduling entirely. Both go out as a single "[Task Shared] updateTask" op -
-// the watch has no planner-list UI, and dueDay is the field every "today"
-// membership check keys off (task-store.js). dueWithTime/remindAt are cleared
-// alongside either way, mirroring the real app's own scheduleTask/unschedule
-// reducers (dueDay and dueWithTime are mutually exclusive there).
-function handleTaskReschedule(taskId, toTomorrow) {
+// Watch long-press Up / Down (or swipe-left) after a 3s cancel window. `when`:
+// 'today' / 'tomorrow' set the task's dueDay to that day, anything else
+// ('unschedule') clears its scheduling entirely. All go out as a single
+// "[Task Shared] updateTask" op - the watch has no planner-list UI, and dueDay
+// is the field every "today" membership check keys off (task-store.js).
+// dueWithTime/remindAt are cleared alongside either way, mirroring the real
+// app's own scheduleTask/unschedule reducers (dueDay and dueWithTime are
+// mutually exclusive there).
+// projectId is sent only when the gesture came from the Projects browser's
+// task view - used to pull the task out of that project's backlog (a scheduled
+// task belongs in the regular list) and to re-push that view.
+function handleTaskReschedule(taskId, when, projectId) {
   var config = loadConfig();
   if (!config || !config.jwt) {
     sendStatus(STATUS_NOT_PAIRED);
@@ -1164,7 +1216,9 @@ function handleTaskReschedule(taskId, toTomorrow) {
   }
 
   var newDueDay = null;
-  if (toTomorrow) {
+  if (when === 'today') {
+    newDueDay = store.todayStr();
+  } else if (when === 'tomorrow') {
     var d = new Date();
     d.setDate(d.getDate() + 1);
     newDueDay = store.dateToDateStr(d);
@@ -1173,17 +1227,33 @@ function handleTaskReschedule(taskId, toTomorrow) {
   // wire and actually clear on other clients, not just locally.
   var changes = { dueDay: newDueDay, dueWithTime: null, remindAt: null };
   state.task[taskId] = Object.assign({}, task, changes);
-  saveState(state);
 
   var clientId = getOrCreateClientId();
-  var op = buildTaskUpdateOp(taskId, changes, clientId);
+  var ops = [buildTaskUpdateOp(taskId, changes, clientId)];
 
-  // The task usually drops out of a Today-only view now - push the fresh list
-  // right away rather than waiting for the follow-up sync (same as archive).
-  sendTaskListToWatch(watchTaskList(state, config));
+  // Scheduling a task that's sitting in its project's backlog moves it into the
+  // regular list, both here and on other clients ([Project] Move Task from
+  // backlog to regular - the same action the desktop fires, which task-store's
+  // replay already handles).
+  if (projectId && newDueDay && task.__inBacklog) {
+    state.task[taskId].__inBacklog = false;
+    ops.push(buildBacklogToRegularOp(String(projectId), taskId, clientId));
+  }
+  saveState(state);
+
+  // Push a fresh list right away rather than waiting for the follow-up sync
+  // (same as archive). From the browser it's that project's task list, so the
+  // row jumps out of the backlog section there; the today list catches up on
+  // runAutoSyncAfterOp's follow-up sync. Two chunked sends back to back would
+  // fight over the one AppMessage slot, so it's one or the other.
+  if (projectId) {
+    sendProjectTasks(String(projectId), state, config);
+  } else {
+    sendTaskListToWatch(watchTaskList(state, config));
+  }
 
   var failureMsg = null;
-  uploadSingleOp(op, config, clientId)
+  uploadOps(ops, config, clientId)
     .catch(function (err) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload task reschedule: ' + failureMsg);
@@ -2180,10 +2250,13 @@ Pebble.addEventListener('appmessage', function (e) {
       handleAddTask(payload.TASK_TITLE);
       break;
     case MSG_TASK_PLAN_TOMORROW:
-      handleTaskReschedule(payload.TASK_ID, true);
+      handleTaskReschedule(payload.TASK_ID, 'tomorrow', payload.PROJECT_ID);
+      break;
+    case MSG_TASK_PLAN_TODAY:
+      handleTaskReschedule(payload.TASK_ID, 'today', payload.PROJECT_ID);
       break;
     case MSG_TASK_UNSCHEDULE:
-      handleTaskReschedule(payload.TASK_ID, false);
+      handleTaskReschedule(payload.TASK_ID, 'unschedule', payload.PROJECT_ID);
       break;
     case MSG_PRESENCE_STOP:
       if (presenceClient && presenceLastSessionId) {
