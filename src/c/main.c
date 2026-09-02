@@ -407,6 +407,10 @@ typedef enum { RESCHEDULE_NONE, RESCHEDULE_TODAY, RESCHEDULE_TOMORROW, RESCHEDUL
 static AppTimer *s_pending_reschedule_timer = NULL;
 static char s_pending_reschedule_task_id[MAX_ID_LEN] = "";
 static RescheduleKind s_pending_reschedule_kind = RESCHEDULE_NONE;
+// Set when the gesture came from the Projects browser task view - the phone
+// uses it to move a scheduled backlog task into the regular list and re-push
+// that view. Empty for a today-list reschedule.
+static char s_pending_reschedule_project_id[MAX_PROJECT_ID_LEN] = "";
 #endif
 
 #if defined(PBL_TOUCH)
@@ -903,7 +907,7 @@ static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
 static void begin_pending_reschedule(RescheduleKind kind);
-static void send_task_reschedule(const char *task_id, RescheduleKind kind);
+static void send_task_reschedule(const char *task_id, RescheduleKind kind, const char *project_id);
 static TaskGroup *resolve_project_row_at(MenuIndex index);
 #endif
 #ifndef PBL_PLATFORM_APLITE
@@ -1966,6 +1970,9 @@ static void send_pending_retry(void) {
     case MSG_TASK_PLAN_TODAY:
     case MSG_TASK_UNSCHEDULE:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      if (s_retry_str2[0] != '\0') {
+        dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2);
+      }
       break;
     case MSG_PROJECT_NOTE_APPEND:
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
@@ -2061,11 +2068,11 @@ static void send_track_time_start(const char *task_id, int32_t elapsed_ms) {
 // Schedule the task for today / tomorrow, or clear its scheduling. The phone
 // turns this into an updateTask op and pushes a fresh list back - the task may
 // leave or join a Today-only view. aplite-excluded with the gesture.
-static void send_task_reschedule(const char *task_id, RescheduleKind kind) {
+static void send_task_reschedule(const char *task_id, RescheduleKind kind, const char *project_id) {
   int msg_type = kind == RESCHEDULE_TODAY ? MSG_TASK_PLAN_TODAY
                  : kind == RESCHEDULE_TOMORROW ? MSG_TASK_PLAN_TOMORROW
                  : MSG_TASK_UNSCHEDULE;
-  begin_send(msg_type, task_id, NULL, 0);
+  begin_send(msg_type, task_id, (project_id && project_id[0] != '\0') ? project_id : NULL, 0);
 }
 #endif
 
@@ -2858,6 +2865,7 @@ static void cancel_pending_reschedule(void) {
   }
   s_pending_reschedule_kind = RESCHEDULE_NONE;
   s_pending_reschedule_task_id[0] = '\0';
+  s_pending_reschedule_project_id[0] = '\0';
   reschedule_menus_reload();
 }
 
@@ -2869,9 +2877,10 @@ static void pending_reschedule_timer_callback(void *data) {
   RescheduleKind kind = s_pending_reschedule_kind;
   s_pending_reschedule_kind = RESCHEDULE_NONE;
   if (kind != RESCHEDULE_NONE && s_pending_reschedule_task_id[0] != '\0') {
-    send_task_reschedule(s_pending_reschedule_task_id, kind);
+    send_task_reschedule(s_pending_reschedule_task_id, kind, s_pending_reschedule_project_id);
   }
   s_pending_reschedule_task_id[0] = '\0';
+  s_pending_reschedule_project_id[0] = '\0';
   // Drop the pending subtitle now; the phone's list push handles the rest.
   reschedule_menus_reload();
 }
@@ -2885,11 +2894,14 @@ static void begin_pending_reschedule(RescheduleKind kind) {
     return;
   }
   const char *task_id = NULL;
+  s_pending_reschedule_project_id[0] = '\0';
 #if PROJECTS_BROWSER
   if (window_stack_get_top_window() == s_browse_window && s_browse_level == 1 && s_browse_menu) {
     Task *bt = resolve_browse_task_at(menu_layer_get_selected_index(s_browse_menu));
     if (bt) {
       task_id = bt->id;
+      strncpy(s_pending_reschedule_project_id, s_browse_project_id, MAX_PROJECT_ID_LEN - 1);
+      s_pending_reschedule_project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
     }
   } else
 #endif
