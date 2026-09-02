@@ -41,8 +41,8 @@ tasks — the live list, then its backlog under a divider. Not on `aplite`.
 - **Long-press Select** a project — open its notes
 - **Select** a task — toggle it done
 - **Long-press Select** a task — start / stop tracking it
-- **Long-press Down** a task — schedule it for tomorrow
-- **Long-press Up** a task — schedule it for today
+- **Long-press Down** a task — move it to tomorrow
+- **Long-press Up** a task — move it to today
 
 Scheduling a task that's in the backlog also moves it into the regular list.
 Toggling done and tracking round-trip to the desktop, and a task tracked here
