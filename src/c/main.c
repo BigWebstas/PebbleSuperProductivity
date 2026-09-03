@@ -507,6 +507,17 @@ static time_t s_break_last_stop_epoch = 0;   // when the last session ended (gap
 // break, so a quick stop/restart doesn't re-nag.
 static bool s_break_notified = false;
 #define BREAK_RESET_GAP_S (5 * 60)
+
+// Idle detection while tracking (a sub-behaviour of the break reminder - only
+// runs when s_break_reminder_min > 0). No step count change for IDLE_GAP_S is
+// treated as a break: the "Time for a break" banner fires and the tally zeroes,
+// same as if the user had stopped tracking. s_idle_steps is the last step-count
+// seen; s_idle_since the epoch it last changed. Re-armed when steps resume or
+// on start_tracking.
+static int s_idle_steps = -1;
+static time_t s_idle_since = 0;
+static bool s_idle_notified = false;
+#define IDLE_GAP_S (10 * 60)
 #endif
 
 // Pinned "TRACKING" section - the tracked task (local, or a remote device's
@@ -2499,7 +2510,28 @@ static void maybe_notify_overtime(void) {
 // reaches s_break_reminder_min. Latched via s_break_notified until start_tracking
 // sees a real gap. Local task tracking only.
 static void maybe_notify_break(void) {
-  if (s_break_reminder_min <= 0 || s_tracking_task_id[0] == '\0' || s_break_notified) {
+  if (s_break_reminder_min <= 0 || s_tracking_task_id[0] == '\0') {
+    return;
+  }
+
+  // Idle: no step-count movement for IDLE_GAP_S while tracking counts as a break
+  // (peek is a fast cached read - fine to call each tick).
+  int steps = (int)health_service_peek_current_value(HealthMetricStepCount);
+  if (steps != s_idle_steps) {
+    s_idle_steps = steps;
+    s_idle_since = time(NULL);
+    s_idle_notified = false;
+  } else if (!s_idle_notified && s_idle_since != 0 &&
+             time(NULL) - s_idle_since >= IDLE_GAP_S && !s_error_overlay_active) {
+    s_idle_notified = true;
+    s_break_notified = true;
+    s_break_accum_s = 0;
+    s_break_last_stop_epoch = time(NULL);
+    show_top_banner("Idle - break counted");
+    return;
+  }
+
+  if (s_break_notified) {
     return;
   }
   int elapsed_s = (int)(time(NULL) - s_tracking_start_epoch);
@@ -2589,6 +2621,10 @@ static void start_tracking(Task *task) {
     s_break_notified = false;
   }
   save_break_state();
+  // Fresh idle window for this session.
+  s_idle_steps = -1;
+  s_idle_since = time(NULL);
+  s_idle_notified = false;
 #endif
   // Pin this task to the top (if enabled); cancel any grace timer from a
   // just-stopped task and re-lay-out the list.
