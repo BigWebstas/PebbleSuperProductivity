@@ -1054,6 +1054,18 @@ static void backlight_touch(void);
 #else
 #define backlight_touch() ((void)0)
 #endif
+
+// The shared head of the sub-window loads: root layer, backlight, a status bar
+// (into *status), and the content rect below it (the return value). *root is
+// the window's root layer, for the caller's own layer_add_child calls.
+static GRect window_chrome(Window *window, StatusBarLayer **status, Layer **root) {
+  *root = window_get_root_layer(window);
+  GRect b = layer_get_bounds(*root);
+  backlight_touch();
+  *status = add_status_bar(*root);
+  return GRect(b.origin.x, b.origin.y + STATUS_BAR_LAYER_HEIGHT,
+               b.size.w, b.size.h - STATUS_BAR_LAYER_HEIGHT);
+}
 #ifndef PBL_PLATFORM_APLITE
 static void show_notes_overlay(Task *task);
 static void show_project_notes_overlay(TaskGroup *group);
@@ -4335,16 +4347,8 @@ static void habits_menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_i
 #endif
 
 static void habits_window_load(Window *window) {
-  Layer *window_layer = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(window_layer);
-
-  backlight_touch();
-
-  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_habits_status_bar = add_status_bar(window_layer);
-
-  GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
-                                bounds.size.w, bounds.size.h - status_bar_height);
+  Layer *window_layer;
+  GRect content_bounds = window_chrome(window, &s_habits_status_bar, &window_layer);
 
   s_habits_menu_layer = menu_layer_create(content_bounds);
   menu_layer_set_callbacks(s_habits_menu_layer, NULL, (MenuLayerCallbacks) {
@@ -4703,14 +4707,8 @@ static void browse_menu_click_config_provider(void *context) {
 }
 
 static void browse_window_load(Window *window) {
-  Layer *window_layer = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(window_layer);
-  backlight_touch();
-
-  s_browse_status_bar = add_status_bar(window_layer);
-
-  GRect content = GRect(bounds.origin.x, bounds.origin.y + STATUS_BAR_LAYER_HEIGHT,
-                         bounds.size.w, bounds.size.h - STATUS_BAR_LAYER_HEIGHT);
+  Layer *window_layer;
+  GRect content = window_chrome(window, &s_browse_status_bar, &window_layer);
 
   s_browse_menu = menu_layer_create(content);
   menu_layer_set_callbacks(s_browse_menu, NULL, (MenuLayerCallbacks) {
@@ -5028,16 +5026,8 @@ static void notes_tags_layer_draw(Layer *layer, GContext *ctx) {
 }
 
 static void notes_window_load(Window *window) {
-  Layer *window_layer = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(window_layer);
-
-  backlight_touch();
-
-  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_notes_status_bar = add_status_bar(window_layer);
-
-  GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
-                                bounds.size.w, bounds.size.h - status_bar_height);
+  Layer *window_layer;
+  GRect content_bounds = window_chrome(window, &s_notes_status_bar, &window_layer);
   s_notes_content_bounds = content_bounds;
 
   // Fixed header added to window_layer, not the ScrollLayer, so it stays put
@@ -5282,15 +5272,8 @@ static void request_stats(void) {
 }
 
 static void stats_window_load(Window *window) {
-  Layer *window_layer = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(window_layer);
-  backlight_touch();
-
-  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_stats_status_bar = add_status_bar(window_layer);
-
-  s_stats_content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
-                                  bounds.size.w, bounds.size.h - status_bar_height);
+  Layer *window_layer;
+  s_stats_content_bounds = window_chrome(window, &s_stats_status_bar, &window_layer);
 
   s_stats_scroll_layer = scroll_layer_create(s_stats_content_bounds);
   scroll_layer_set_content_size(s_stats_scroll_layer, s_stats_content_bounds.size);
@@ -5452,15 +5435,8 @@ static void schedule_menu_selection_changed(MenuLayer *menu_layer, MenuIndex new
 }
 
 static void schedule_window_load(Window *window) {
-  Layer *window_layer = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(window_layer);
-  backlight_touch();
-
-  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_schedule_status_bar = add_status_bar(window_layer);
-
-  GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
-                                bounds.size.w, bounds.size.h - status_bar_height);
+  Layer *window_layer;
+  GRect content_bounds = window_chrome(window, &s_schedule_status_bar, &window_layer);
 
   schedule_rebuild();
 
@@ -5630,16 +5606,13 @@ static void live_window_click_config_provider(void *context) {
 }
 
 static void live_window_load(Window *window) {
-  Layer *window_layer = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(window_layer);
-  backlight_touch();
+  Layer *window_layer;
+  GRect content = window_chrome(window, &s_live_status_bar, &window_layer);
 
-  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_live_status_bar = add_status_bar(window_layer);
-
-  int16_t x = bounds.origin.x + 6;
-  int16_t w = bounds.size.w - 12;
-  int16_t y = bounds.origin.y + status_bar_height + 6;
+  int16_t x = content.origin.x + 6;
+  int16_t w = content.size.w - 12;
+  int16_t y = content.origin.y + 6;
+  int16_t bottom = content.origin.y + content.size.h;
 
   // Task name first (what the user asked to see), wrapping to two lines.
   s_live_task_layer = make_text_layer(window_layer, GRect(x, y, w, 50),
@@ -5655,7 +5628,7 @@ static void live_window_load(Window *window) {
   s_live_elapsed_layer = make_text_layer(window_layer, GRect(x, y, w, 30),
                                          FONT_KEY_GOTHIC_28_BOLD, GTextAlignmentCenter);
 
-  s_live_hint_layer = make_text_layer(window_layer, GRect(x, bounds.size.h - 20, w, 18),
+  s_live_hint_layer = make_text_layer(window_layer, GRect(x, bottom - 20, w, 18),
                                       FONT_KEY_GOTHIC_14, GTextAlignmentCenter);
   text_layer_set_text_color(s_live_hint_layer, GColorDarkGray);
 
@@ -5725,16 +5698,8 @@ static void main_window_click_config_provider(void *context) {
 #endif
 
 static void window_load(Window *window) {
-  Layer *window_layer = window_get_root_layer(window);
-  GRect bounds = layer_get_bounds(window_layer);
-
-  backlight_touch();
-
-  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_status_bar = add_status_bar(window_layer);
-
-  GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
-                                bounds.size.w, bounds.size.h - status_bar_height);
+  Layer *window_layer;
+  GRect content_bounds = window_chrome(window, &s_status_bar, &window_layer);
 
   s_menu_layer = menu_layer_create(content_bounds);
   menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks) {
