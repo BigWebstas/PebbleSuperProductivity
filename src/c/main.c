@@ -830,6 +830,13 @@ static void draw_text(GContext *ctx, const char *text, const char *font_key,
   graphics_draw_text(ctx, text, fonts_get_system_font(font_key), box, overflow, align, NULL);
 }
 
+// Flat colour fill of `r` - the set-fill-colour + square-cornered fill_rect
+// pair every row/header draw proc opens with.
+static void fill_bg(GContext *ctx, GRect r, GColor color) {
+  graphics_context_set_fill_color(ctx, color);
+  graphics_fill_rect(ctx, r, 0, GCornerNone);
+}
+
 // The create + add-to-parent pair every window_load repeats.
 static StatusBarLayer *add_status_bar(Layer *parent) {
   StatusBarLayer *sb = status_bar_layer_create();
@@ -854,8 +861,7 @@ static TextLayer *make_text_layer(Layer *parent, GRect frame, const char *font_k
 // each row's own icon geometry.
 static void draw_nav_row(GContext *ctx, GRect bounds, bool is_selected, GColor bg,
                          const char *label, GBitmap *icon, GBitmap *icon_white, GRect icon_rect) {
-  graphics_context_set_fill_color(ctx, bg);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  fill_bg(ctx, bounds, bg);
   graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
   draw_text(ctx, label, HEADING_FONT_KEY,
             GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
@@ -1378,8 +1384,7 @@ static int16_t draw_project_swatch(GContext *ctx, int16_t x, int16_t cell_h, uin
   if (color == 0) {
     return x;
   }
-  graphics_context_set_fill_color(ctx, (GColor8){ .argb = color });
-  graphics_fill_rect(ctx, GRect(x, (cell_h - 16) / 2, 16, 16), 0, GCornerNone);
+  fill_bg(ctx, GRect(x, (cell_h - 16) / 2, 16, 16), (GColor8){ .argb = color });
   return x + 22;
 }
 
@@ -1407,8 +1412,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
     if (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) {
       // "No tasks for today." above the still-reachable section-0 rows.
       GRect bounds = layer_get_bounds(cell_layer);
-      graphics_context_set_fill_color(ctx, GColorWhite);
-      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      fill_bg(ctx, bounds, GColorWhite);
       graphics_context_set_text_color(ctx, GColorBlack);
       draw_text(ctx, "No tasks for today.", EMPTY_MSG_FONT_KEY, bounds, GTextOverflowModeWordWrap, GTextAlignmentCenter);
     }
@@ -1423,8 +1427,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   // longer "TRACKING/FOCUSING" label still fits the strip on a 144px watch.
   if (has_pinned_row() && section_index == 1) {
     GRect hb = layer_get_bounds(cell_layer);
-    graphics_context_set_fill_color(ctx, GColorGreen);
-    graphics_fill_rect(ctx, hb, 0, GCornerNone);
+    fill_bg(ctx, hb, GColorGreen);
     graphics_context_set_text_color(ctx, GColorBlack);
     draw_text(ctx, "TRACKING/FOCUSING", CHROME_FONT_KEY, GRect(TITLE_BOX_X, 0, hb.size.w - TITLE_BOX_X * 2, hb.size.h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     graphics_context_set_stroke_color(ctx, GColorBlack);
@@ -1443,8 +1446,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
 
   // Fill first - a MenuLayer header has no built-in background, so the text and
   // lines below would otherwise draw onto stale framebuffer content.
-  graphics_context_set_fill_color(ctx, GColorGreen);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  fill_bg(ctx, bounds, GColorGreen);
 
   graphics_context_set_text_color(ctx, GColorBlack);
   graphics_draw_text(ctx, name, bold_font, text_rect,
@@ -1771,8 +1773,7 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
   if (task->done) {
     fg = is_selected ? GColorLightGray : GColorDarkGray;
   }
-  graphics_context_set_fill_color(ctx, bg);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  fill_bg(ctx, bounds, bg);
   graphics_context_set_text_color(ctx, fg);
 
   GFont title_font = fonts_get_system_font(TITLE_FONT_KEY);
@@ -1894,8 +1895,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       // Dark blue - a distinct "this is another device" strip (the pinned
       // local-tracking header is green, Habits cerulean). Constant background,
       // text inverts on selection - same treatment as the Resync row.
-      graphics_context_set_fill_color(ctx, GColorDukeBlue);
-      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      fill_bg(ctx, bounds, GColorDukeBlue);
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
       // Title one size bigger (GOTHIC_24_BOLD) while a timer is actively
       // running, GOTHIC_18 otherwise - the paused / stopped / was-tracking
@@ -1957,8 +1957,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       // Projects purple). A clock glyph on the right, drawn from primitives (no
       // bitmap asset), black normally / white when selected like the others.
       GColor icon = is_selected ? GColorWhite : GColorBlack;
-      graphics_context_set_fill_color(ctx, GColorTiffanyBlue);
-      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      fill_bg(ctx, bounds, GColorTiffanyBlue);
       graphics_context_set_text_color(ctx, icon);
       GRect sched_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                      bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
@@ -2008,8 +2007,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
     // Background stays red regardless of selection so this row reads as a
     // standing call-to-action, not a task; the text still inverts on select.
-    graphics_context_set_fill_color(ctx, GColorRed);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    fill_bg(ctx, bounds, GColorRed);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
     GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                              bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
@@ -2037,8 +2035,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     GRect bounds = layer_get_bounds(cell_layer);
     GColor bg = is_selected ? GColorBlack : GColorWhite;
     GColor fg = is_selected ? GColorWhite : GColorBlack;
-    graphics_context_set_fill_color(ctx, bg);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    fill_bg(ctx, bounds, bg);
     graphics_context_set_text_color(ctx, fg);
     GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                              bounds.size.w - TITLE_BOX_X * 2, HEADING_TITLE_H);
@@ -2051,8 +2048,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 #else
     // Plain version-only footer - no tap/long-select action on aplite.
     GRect bounds = layer_get_bounds(cell_layer);
-    graphics_context_set_fill_color(ctx, GColorWhite);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    fill_bg(ctx, bounds, GColorWhite);
     graphics_context_set_text_color(ctx, GColorBlack);
     draw_text(ctx, "v" APP_VERSION, FONT_KEY_GOTHIC_14, bounds, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
 #endif
@@ -2071,8 +2067,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     int16_t text_top = HEADING_TITLE_Y(bounds.size.h);
     GColor fg = is_selected ? GColorWhite : GColorBlack;
 
-    graphics_context_set_fill_color(ctx, GColorGreen);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    fill_bg(ctx, bounds, GColorGreen);
 #if TODAY_PROJECT_SWATCH
     int16_t text_x = draw_project_marker(ctx, TITLE_BOX_X, bounds.size.h,
                                           project_row->project_id,
@@ -2102,8 +2097,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                         menu_layer_get_selected_index(s_menu_layer).row == 0;
     GColor bg = is_selected ? GColorBlack : GColorWhite;
     GColor fg = is_selected ? GColorWhite : GColorBlack;
-    graphics_context_set_fill_color(ctx, bg);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    fill_bg(ctx, bounds, bg);
     graphics_context_set_text_color(ctx, fg);
     GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                              bounds.size.w - TITLE_BOX_X * 2, HEADING_TITLE_H);
@@ -4178,8 +4172,7 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // goal / decremented below it on the same day, so dimming would flicker.
   // Text stays black even when selected - the cerulean is light enough.
   GColor fg = GColorBlack;
-  graphics_context_set_fill_color(ctx, bg);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  fill_bg(ctx, bounds, bg);
   graphics_context_set_text_color(ctx, fg);
 
   // Non-emery: the fixed 30px top-aligned title box, unchanged. Emery: a
@@ -4532,8 +4525,7 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     // project group header (menu_draw_header). The selected row darkens to
     // GColorIslamicGreen with white text so it stands out (a bare text-colour
     // flip on the bright green barely read).
-    graphics_context_set_fill_color(ctx, is_selected ? GColorIslamicGreen : GColorGreen);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    fill_bg(ctx, bounds, is_selected ? GColorIslamicGreen : GColorGreen);
     // The Inbox glyph for the default project, else the project's theme colour
     // as a swatch (draw_project_marker, shared with the today view). The phone
     // already packed the colour to a GColor8.
@@ -5016,8 +5008,7 @@ static void notes_window_click_config_provider(void *context) {
 // font weights. A no-op when the frame is zero-height (a project subject).
 static void notes_tags_layer_draw(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
-  graphics_context_set_fill_color(ctx, NOTES_TAGS_BG_COLOR);
-  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  fill_bg(ctx, bounds, NOTES_TAGS_BG_COLOR);
   graphics_context_set_text_color(ctx, GColorBlack);
 
   int16_t content_w = bounds.size.w - NOTES_TAGS_PADDING_X * 2;
@@ -5173,8 +5164,7 @@ static void stats_compute_values(void) {
 // Draws one label bar (black, white text) with its value below (black text).
 static int16_t stats_draw_metric(GContext *ctx, int16_t y, int16_t w,
                                   const char *label, const char *value) {
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, GRect(0, y, w, STATS_LABEL_H), 0, GCornerNone);
+  fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
   graphics_context_set_text_color(ctx, GColorWhite);
   draw_text(ctx, label, STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   y += STATS_LABEL_H;
@@ -5206,8 +5196,7 @@ static int16_t stats_content_height(void) {
 static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   int16_t w = b.size.w;
-  graphics_context_set_fill_color(ctx, GColorWhite);
-  graphics_fill_rect(ctx, b, 0, GCornerNone);
+  fill_bg(ctx, b, GColorWhite);
 
   if (!s_stats_have_data) {
     graphics_context_set_text_color(ctx, GColorBlack);
@@ -5224,8 +5213,7 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   y = stats_draw_metric(ctx, y, w, "Current session", s_stats_session);
   y = stats_draw_metric(ctx, y, w, "Completed today", done_buf);
 
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_rect(ctx, GRect(0, y, w, STATS_LABEL_H), 0, GCornerNone);
+  fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
   graphics_context_set_text_color(ctx, GColorWhite);
   draw_text(ctx, "PROJECTS", STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   y += STATS_LABEL_H + 2;
