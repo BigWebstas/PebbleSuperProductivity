@@ -34,7 +34,8 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
   var overtimeRepeat = !!options.overtimeRepeat;
-  var overtimeSound = !!options.overtimeSound;
+  var audibleNotifications = options.audibleNotifications != null
+    ? !!options.audibleNotifications : !!options.overtimeSound;
   var breakReminderMin = options.breakReminderMin || 0;
   var dueReminderMin = options.dueReminderMin || 0;
   var liveTracking = !!options.liveTracking;
@@ -235,14 +236,15 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    only once. Stops when you stop tracking.\n' +
 '  </p>\n' +
 '\n' +
-'  <div class="checkbox-row sub">\n' +
-'    <input id="overtimeSound" type="checkbox"' + (overtimeSound ? ' checked' : '') + (overtimeNotify ? '' : ' disabled') + '>\n' +
-'    <label for="overtimeSound">Also play a sound</label>\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="audibleNotifications" type="checkbox"' + (audibleNotifications ? ' checked' : '') + '>\n' +
+'    <label for="audibleNotifications">Enable audible notifications</label>\n' +
 '  </div>\n' +
-'  <p class="hint sub">\n' +
-'    Plays a short audible ping along with the banner. Only the Pebble\n' +
-'    Time 2 has a speaker - other watches ignore this. Respects the\n' +
-'    watch\'s system mute (Settings &rarr; Notifications).\n' +
+'  <p class="hint">\n' +
+'    Plays a short ping alongside every watch banner - over-estimate, take\n' +
+'    a break, idle, and task-due. Only the Pebble Time 2 has a speaker;\n' +
+'    other watches just vibrate. Respects the watch\'s system mute\n' +
+'    (Settings &rarr; Notifications).\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="breakReminderMin">Remind me to take a break</label>\n' +
@@ -419,18 +421,14 @@ taskEstimateOptions + '\n' +
 '    location.href = \'pebblejs://close#\' + encoded;\n' +
 '  }\n' +
 '\n' +
-'  // The over-estimate sub-options ("Repeat every 5 minutes", "Also play a\n' +
-'  // sound") only make sense while the parent "Notify when a task runs over\n' +
-'  // its estimate" is on - grey them out (and clear them) otherwise. The\n' +
-'  // watch ignores them in that case anyway.\n' +
+'  // "Repeat every 5 minutes" only makes sense while the parent "Notify when a\n' +
+'  // task runs over its estimate" is on - grey it out (and clear it) otherwise.\n' +
 '  (function () {\n' +
 '    var parent = document.getElementById(\'overtimeNotify\');\n' +
-'    var subs = [document.getElementById(\'overtimeRepeat\'), document.getElementById(\'overtimeSound\')];\n' +
+'    var sub = document.getElementById(\'overtimeRepeat\');\n' +
 '    function sync() {\n' +
-'      subs.forEach(function (sub) {\n' +
-'        sub.disabled = !parent.checked;\n' +
-'        if (!parent.checked) { sub.checked = false; }\n' +
-'      });\n' +
+'      sub.disabled = !parent.checked;\n' +
+'      if (!parent.checked) { sub.checked = false; }\n' +
 '    }\n' +
 '    parent.addEventListener(\'change\', sync);\n' +
 '    sync();\n' +
@@ -474,7 +472,7 @@ taskEstimateOptions + '\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +
-'      overtimeSound: document.getElementById(\'overtimeSound\').checked,\n' +
+'      audibleNotifications: document.getElementById(\'audibleNotifications\').checked,\n' +
 '      breakReminderMin: parseInt(document.getElementById(\'breakReminderMin\').value, 10) || 0,\n' +
 '      dueReminderMin: parseInt(document.getElementById(\'dueReminderMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +

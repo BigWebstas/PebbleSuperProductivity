@@ -387,11 +387,13 @@ function sendStatus(code, message) {
     // stays over, instead of just once per session. Inert on the watch when
     // overtimeNotify itself is off. Always included, same reasoning as above.
     OVERTIME_REPEAT_ENABLED: config.overtimeRepeat ? 1 : 0,
-    // Sub-option of OVERTIME_NOTIFY_ENABLED: also play an audible ping with the
-    // over-estimate banner. Only speaker-equipped watches (Pebble Time 2) can
-    // sound it - the others silently ignore it, as does aplite. Inert when
-    // overtimeNotify itself is off. Always included, same reasoning as above.
-    OVERTIME_SOUND_ENABLED: config.overtimeSound ? 1 : 0,
+    // "Enable audible notifications" - a short ping with every banner
+    // (over-estimate, break, idle, task-due). Only speaker-equipped watches
+    // (Pebble Time 2) sound it. Migrates the old overtimeSound sub-option.
+    // Always included, same reasoning as above.
+    AUDIBLE_NOTIFICATIONS: (config.audibleNotifications != null
+                              ? config.audibleNotifications
+                              : config.overtimeSound) ? 1 : 0,
     // "Remind me to take a break" - minutes of tracked time on the watch,
     // banked across sessions until a real pause, before it shows a "time for a
     // break" banner. 0 = off. Drives main.c's s_break_reminder_min /
@@ -2514,7 +2516,8 @@ Pebble.addEventListener('showConfiguration', function () {
       touchNav: !!config.touchNav,
       overtimeNotify: !!config.overtimeNotify,
       overtimeRepeat: !!config.overtimeRepeat,
-      overtimeSound: !!config.overtimeSound,
+      audibleNotifications: config.audibleNotifications != null
+        ? !!config.audibleNotifications : !!config.overtimeSound,
       breakReminderMin: config.breakReminderMin || 0,
       dueReminderMin: config.dueReminderMin || 0,
       liveTracking: !!config.liveTracking,
@@ -2591,7 +2594,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     touchNav: !!result.touchNav,
     overtimeNotify: !!result.overtimeNotify,
     overtimeRepeat: !!result.overtimeRepeat,
-    overtimeSound: !!result.overtimeSound,
+    audibleNotifications: !!result.audibleNotifications,
     breakReminderMin: parseInt(result.breakReminderMin, 10) || 0,
     dueReminderMin: parseInt(result.dueReminderMin, 10) || 0,
     liveTracking: !!result.liveTracking,

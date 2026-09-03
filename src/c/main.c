@@ -49,7 +49,7 @@
 #define KEY_TOUCH_NAV_ENABLED MESSAGE_KEY_TOUCH_NAV_ENABLED
 #define KEY_OVERTIME_NOTIFY_ENABLED MESSAGE_KEY_OVERTIME_NOTIFY_ENABLED
 #define KEY_OVERTIME_REPEAT_ENABLED MESSAGE_KEY_OVERTIME_REPEAT_ENABLED
-#define KEY_OVERTIME_SOUND_ENABLED MESSAGE_KEY_OVERTIME_SOUND_ENABLED
+#define KEY_AUDIBLE_NOTIFICATIONS MESSAGE_KEY_AUDIBLE_NOTIFICATIONS
 #define KEY_BREAK_REMINDER_MIN MESSAGE_KEY_BREAK_REMINDER_MIN
 #define KEY_DUE_REMINDER_MIN MESSAGE_KEY_DUE_REMINDER_MIN
 #define KEY_PRESENCE_STATE MESSAGE_KEY_PRESENCE_STATE
@@ -677,10 +677,11 @@ static bool s_overtime_notify_enabled = false;
 // "Repeat every 5 minutes" (config.overtimeRepeat), a modifier on the above:
 // re-fire the banner every OVERTIME_REPEAT_INTERVAL_S while the task stays over.
 static bool s_overtime_repeat_enabled = false;
-// "Also play a sound" (config.overtimeSound), a modifier on the above: sound an
-// audible ping with the banner. Only PBL_SPEAKER hardware (Pebble Time 2) can
-// honour it - the call is compiled out everywhere else.
-static bool s_overtime_sound_enabled = false;
+// "Enable audible notifications" (config.audibleNotifications): sound a short
+// ping alongside every banner - over-estimate, break, idle, task-due. Only
+// PBL_SPEAKER hardware (Pebble Time 2) can honour it; the call is compiled out
+// everywhere else. Respects the watch's system mute.
+static bool s_audible_notify = false;
 // Live tracking presence (config.liveTracking, MSG_PRESENCE_*). Opt-in,
 // aplite-excluded. Shows what ANOTHER device is tracking as a "LIVE" row in
 // section 0 plus a detail window; Select in that window asks the phone to stop
@@ -2412,10 +2413,10 @@ static void hide_overtime_banner(void) {
   }
 }
 
-// Short rising two-note chime for the over-estimate banner. Only compiled on
-// speaker hardware (Pebble Time 2); a no-op call otherwise. Skipped when the
-// user muted the watch system-wide so it can't sound something they can't hear.
-static void overtime_ping(void) {
+// Short rising two-note chime played with any banner when s_audible_notify is
+// on. Only compiled on speaker hardware (Pebble Time 2); a no-op call otherwise.
+// Skipped when the user muted the watch system-wide.
+static void banner_ping(void) {
 #ifdef PBL_SPEAKER
   if (speaker_is_muted()) {
     return;
@@ -2428,10 +2429,11 @@ static void overtime_ping(void) {
 #endif
 }
 
-// Shows `text` in the top banner strip with a double vibe and (re)arms the
-// auto-dismiss timer. `text` must stay valid until the banner hides -
-// s_overtime_banner_text or a string literal. Shared by the over-estimate and
-// break banners; only one shows at a time (last writer wins).
+// Shows `text` in the top banner strip with a double vibe (and a ping when
+// audible notifications are on), and (re)arms the auto-dismiss timer. `text`
+// must stay valid until the banner hides - s_overtime_banner_text or a string
+// literal. Shared by the over-estimate / break / idle / task-due banners; only
+// one shows at a time (last writer wins).
 static void show_top_banner(const char *text) {
   if (!s_overtime_banner_layer) {
     return;
@@ -2440,6 +2442,9 @@ static void show_top_banner(const char *text) {
   layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), false);
   layer_mark_dirty(text_layer_get_layer(s_overtime_banner_layer));
   vibes_double_pulse();
+  if (s_audible_notify) {
+    banner_ping();
+  }
   if (s_overtime_banner_timer) {
     app_timer_cancel(s_overtime_banner_timer);
   }
@@ -2450,9 +2455,6 @@ static void show_overtime_banner(const char *task_title) {
   snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
             "Over estimate\n%s", task_title);
   show_top_banner(s_overtime_banner_text);
-  if (s_overtime_sound_enabled) {
-    overtime_ping();
-  }
 }
 
 // Called once per tracking tick: fires the over-estimate banner the first time
@@ -3762,10 +3764,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
           s_overtime_last_notify_epoch = time(NULL);
         }
       }
-      Tuple *overtime_sound_tuple = dict_find(iterator, KEY_OVERTIME_SOUND_ENABLED);
-      if (overtime_sound_tuple) {
-        s_overtime_sound_enabled = overtime_sound_tuple->value->int32 != 0;
-      }
+      s_audible_notify = tuple_int(iterator, KEY_AUDIBLE_NOTIFICATIONS, s_audible_notify) != 0;
 #ifdef BREAK_REMINDER
       // "Remind me to take a break" interval in minutes (0 = off). Re-sent every
       // sync like the flags above; the tally itself lives in persist.
