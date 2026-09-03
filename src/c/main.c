@@ -57,6 +57,10 @@
 #define KEY_PRESENCE_CAN_STOP MESSAGE_KEY_PRESENCE_CAN_STOP
 #define KEY_PRESENCE_SPENT_MS MESSAGE_KEY_PRESENCE_SPENT_MS
 #define KEY_PRESENCE_ESTIMATE_MS MESSAGE_KEY_PRESENCE_ESTIMATE_MS
+#define KEY_STATS_ENABLED MESSAGE_KEY_STATS_ENABLED
+#define KEY_STATS_EST_REMAINING_MS MESSAGE_KEY_STATS_EST_REMAINING_MS
+#define KEY_STATS_WORKED_TODAY_MS MESSAGE_KEY_STATS_WORKED_TODAY_MS
+#define KEY_STATS_TEXT MESSAGE_KEY_STATS_TEXT
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -115,6 +119,11 @@ enum {
   MSG_PROJECT_TASKS_ITEM = 37,      // phone -> watch: PROJECT_ID + TASK_INDEX + TASK_* + PROJECT_TASK_BACKLOG
   MSG_PROJECT_TASKS_END = 38,       // phone -> watch: PROJECT_ID
   MSG_TASK_PLAN_TODAY = 39,         // watch -> phone: TASK_ID (set the task's dueDay to today)
+  // Stats page (config.enableStats, non-aplite). One request, one reply: the
+  // two headline durations as ms plus STATS_TEXT (the project list
+  // preformatted as "Title\tcount" lines the watch prints verbatim).
+  MSG_STATS_REQUEST = 40,           // watch -> phone: (no keys)
+  MSG_STATS_DATA = 41,             // phone -> watch: STATS_EST_REMAINING_MS + STATS_WORKED_TODAY_MS + STATS_TEXT
 };
 
 // STATUS_CODE values sent from the phone.
@@ -272,6 +281,9 @@ static GBitmap *s_heart_white_bitmap;
 // when selected, matching the Habits / Add Task icon pair.
 static GBitmap *s_project_bitmap;
 static GBitmap *s_project_white_bitmap;
+// Bar-chart glyph for the section-0 "Stats" nav row - same black/white pair.
+static GBitmap *s_stats_bitmap;
+static GBitmap *s_stats_white_bitmap;
 #endif
 // Mic/dictation state - compiled out on aplite (#ifndef, not a runtime check):
 // no mic hardware, can never reach the "Add Task" row, and a runtime-only
@@ -519,6 +531,21 @@ static bool s_add_task_enabled = true;
 // aplite (RAM) and emery (PROJECTS_BROWSER, below); the flag stays a plain
 // unconditional static (trivial) and is simply never read there.
 static bool s_projects_enabled = true;
+#ifndef PBL_PLATFORM_APLITE
+// "Stats" page row (config.enableStats, default on) and the last
+// MSG_STATS_DATA payload - kept across visits so a re-open shows the previous
+// numbers immediately while a fresh request is in flight. Declared here (not
+// in the stats-page block far below) because inbox_received_handler and the
+// section-0 callbacks reference them. s_stats_have_data starts false so the
+// first visit shows "Loading…". All aplite-excluded - that build has no
+// Stats row (STATS_ROW_ACTIVE() is a compile-time false) and ~zero RAM to
+// spare.
+static bool s_stats_enabled = true;
+static char s_stats_projects[640] = "";
+static int s_stats_est_remaining_ms = 0;
+static int s_stats_worked_today_ms = 0;
+static bool s_stats_have_data = false;
+#endif
 
 // The Projects browser is built on every platform except aplite (too little
 // RAM, like several other features here). PROJECTS_ROW_ACTIVE() is a
@@ -877,6 +904,10 @@ static void hide_error_overlay(void);
 static void push_habits_window(void);
 static void update_habits_empty_layer(void);
 static Task *find_task_by_id(const char *id);
+#ifndef PBL_PLATFORM_APLITE
+static void push_stats_window(void);
+static void stats_render(void);
+#endif
 #if PROJECTS_BROWSER
 static void push_browse_window(const char *jump_to_project);
 static void browse_update_empty(void);
@@ -945,6 +976,7 @@ typedef enum {
   SECTION0_ROW_RESYNC,
   SECTION0_ROW_HABITS,
   SECTION0_ROW_PROJECTS, // projects browser, between Habits and Add Task (non-aplite)
+  SECTION0_ROW_STATS,    // stats page, between Projects and Add Task (non-aplite)
   SECTION0_ROW_ADD_TASK,
   SECTION0_ROW_LIVE, // live tracking presence, row 0 when active (non-aplite)
 } Section0RowKind;
@@ -968,6 +1000,13 @@ typedef enum {
 #define PROJECTS_ROW_ACTIVE() false
 #endif
 
+// Whether the "Stats" row sits in section 0. Compile-time false on aplite.
+#ifdef PBL_PLATFORM_APLITE
+#define STATS_ROW_ACTIVE() false
+#else
+#define STATS_ROW_ACTIVE() (s_stats_enabled)
+#endif
+
 // Whether the "LIVE" presence row sits at the top of section 0. Compile-time
 // false on aplite (the whole feature is excluded).
 #ifdef PBL_PLATFORM_APLITE
@@ -987,6 +1026,9 @@ static int section0_row_count(void) {
     count++;
   }
   if (PROJECTS_ROW_ACTIVE()) {
+    count++;
+  }
+  if (STATS_ROW_ACTIVE()) {
     count++;
   }
   if (PBL_IF_MICROPHONE_ELSE(s_add_task_enabled, false)) {
@@ -1018,6 +1060,12 @@ static Section0RowKind section0_row_kind(int row) {
   if (PROJECTS_ROW_ACTIVE()) {
     if (row == next) {
       return SECTION0_ROW_PROJECTS;
+    }
+    next++;
+  }
+  if (STATS_ROW_ACTIVE()) {
+    if (row == next) {
+      return SECTION0_ROW_STATS;
     }
     next++;
   }
@@ -1708,6 +1756,25 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                           GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
       graphics_context_set_compositing_mode(ctx, GCompOpSet);
       graphics_draw_bitmap_in_rect(ctx, is_selected ? s_project_white_bitmap : s_project_bitmap,
+                                    GRect(bounds.size.w - ROW_ICON_SIZE - 8, (bounds.size.h - 20) / 2, 20, 20));
+      return;
+    }
+#endif
+
+#ifndef PBL_PLATFORM_APLITE
+    if (kind == SECTION0_ROW_STATS) {
+      // Opens the read-only Stats page. Orange - its own colour among the
+      // section-0 nav rows. Bar-chart icon on the right, black normally,
+      // white when selected, matching the Projects folder pair.
+      graphics_context_set_fill_color(ctx, GColorOrange);
+      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
+      GRect stats_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                                     bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+      graphics_draw_text(ctx, "Stats", fonts_get_system_font(HEADING_FONT_KEY), stats_title_box,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      graphics_context_set_compositing_mode(ctx, GCompOpSet);
+      graphics_draw_bitmap_in_rect(ctx, is_selected ? s_stats_white_bitmap : s_stats_bitmap,
                                     GRect(bounds.size.w - ROW_ICON_SIZE - 8, (bounds.size.h - 20) / 2, 20, 20));
       return;
     }
@@ -2407,6 +2474,8 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
       push_browse_window(NULL);
 #endif
 #ifndef PBL_PLATFORM_APLITE
+    } else if (kind == SECTION0_ROW_STATS) {
+      push_stats_window();
     } else if (kind == SECTION0_ROW_ADD_TASK) {
       start_add_task_dictation();
     } else if (kind == SECTION0_ROW_LIVE) {
@@ -3354,6 +3423,24 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       break;
     }
 #endif
+#ifndef PBL_PLATFORM_APLITE
+    case MSG_STATS_DATA: {
+      Tuple *est_tuple = dict_find(iterator, KEY_STATS_EST_REMAINING_MS);
+      Tuple *worked_tuple = dict_find(iterator, KEY_STATS_WORKED_TODAY_MS);
+      Tuple *text_tuple = dict_find(iterator, KEY_STATS_TEXT);
+      s_stats_est_remaining_ms = est_tuple ? est_tuple->value->int32 : 0;
+      s_stats_worked_today_ms = worked_tuple ? worked_tuple->value->int32 : 0;
+      if (text_tuple) {
+        strncpy(s_stats_projects, text_tuple->value->cstring, sizeof(s_stats_projects) - 1);
+        s_stats_projects[sizeof(s_stats_projects) - 1] = '\0';
+      } else {
+        s_stats_projects[0] = '\0';
+      }
+      s_stats_have_data = true;
+      stats_render(); // no-op if the window was closed before the reply landed
+      break;
+    }
+#endif
     case MSG_SYNC_STATUS: {
       Tuple *status_tuple = dict_find(iterator, KEY_STATUS_CODE);
       if (status_tuple) {
@@ -3381,6 +3468,12 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (projects_enabled_tuple) {
         s_projects_enabled = projects_enabled_tuple->value->int32 != 0;
       }
+#ifndef PBL_PLATFORM_APLITE
+      Tuple *stats_enabled_tuple = dict_find(iterator, KEY_STATS_ENABLED);
+      if (stats_enabled_tuple) {
+        s_stats_enabled = stats_enabled_tuple->value->int32 != 0;
+      }
+#endif
       // Only re-applied when the value actually changed - this field is sent on
       // every status push (including routine background syncs), and re-triggering
       // the backlight each time would defeat a custom timeout.
@@ -4805,6 +4898,133 @@ static void push_notes_window(void) {
 }
 #endif
 
+// ---------- stats page ----------
+#ifndef PBL_PLATFORM_APLITE
+// A pinned section-0 row ("Stats", between Projects and Add Task) opens this
+// read-only scrollable summary: estimate remaining today, time worked today,
+// the current tracking session, then every project with its task count. The
+// phone sends the two durations plus a preformatted project block in one
+// MSG_STATS_DATA; the watch composes the visible text and reflows a
+// ScrollLayer/TextLayer, the notes-overlay shape minus the fetch state
+// machine. "Current session" is watch-local (s_tracking_start_epoch),
+// filled in whenever the text is (re)composed.
+#define STATS_BODY_CAP 1200
+static Window *s_stats_window;
+static StatusBarLayer *s_stats_status_bar;
+static ScrollLayer *s_stats_scroll_layer;
+static TextLayer *s_stats_text_layer;
+static GRect s_stats_content_bounds;
+static char *s_stats_body = NULL;        // malloc'd on load, freed on unload
+
+static void stats_compose_body(void) {
+  if (!s_stats_body) {
+    return;
+  }
+  if (!s_stats_have_data) {
+    strncpy(s_stats_body, "Loading…", STATS_BODY_CAP - 1);
+    s_stats_body[STATS_BODY_CAP - 1] = '\0';
+    return;
+  }
+  char est[24], worked[24], session[24];
+  format_duration_ms(s_stats_est_remaining_ms < 0 ? 0 : s_stats_est_remaining_ms, false, est, sizeof(est));
+  format_duration_ms(s_stats_worked_today_ms < 0 ? 0 : s_stats_worked_today_ms, false, worked, sizeof(worked));
+  if (s_tracking_task_id[0] != '\0') {
+    int elapsed_ms = (int)((time(NULL) - s_tracking_start_epoch) * 1000);
+    if (elapsed_ms < 0) {
+      elapsed_ms = 0;
+    }
+    format_duration_ms(elapsed_ms, false, session, sizeof(session));
+  } else {
+    strncpy(session, "Not tracking", sizeof(session) - 1);
+    session[sizeof(session) - 1] = '\0';
+  }
+  snprintf(s_stats_body, STATS_BODY_CAP,
+           "Estimate remaining\n%s\n\nWorked today\n%s\n\nCurrent session\n%s\n\nPROJECTS\n%s",
+           est, worked, session, s_stats_projects[0] != '\0' ? s_stats_projects : "None");
+}
+
+static void stats_render(void) {
+  if (!s_stats_text_layer) {
+    return;
+  }
+  stats_compose_body();
+  text_layer_set_text(s_stats_text_layer, s_stats_body);
+  int16_t w = s_stats_content_bounds.size.w - NOTES_TAGS_PADDING_X * 2;
+  int16_t h = measure_notes_text_height(w, s_stats_body);
+  if (h < s_stats_content_bounds.size.h) {
+    h = s_stats_content_bounds.size.h;
+  }
+  GRect tf = layer_get_frame(text_layer_get_layer(s_stats_text_layer));
+  tf.origin.y = 0;
+  tf.size.h = h;
+  layer_set_frame(text_layer_get_layer(s_stats_text_layer), tf);
+  scroll_layer_set_content_size(s_stats_scroll_layer, GSize(s_stats_content_bounds.size.w, h));
+  scroll_layer_set_content_offset(s_stats_scroll_layer, GPointZero, false);
+}
+
+static void request_stats(void) {
+  begin_send(MSG_STATS_REQUEST, NULL, NULL, 0);
+}
+
+static void stats_window_load(Window *window) {
+  Layer *window_layer = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(window_layer);
+  backlight_touch();
+
+  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
+  s_stats_status_bar = status_bar_layer_create();
+  layer_add_child(window_layer, status_bar_layer_get_layer(s_stats_status_bar));
+
+  s_stats_content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
+                                  bounds.size.w, bounds.size.h - status_bar_height);
+
+  s_stats_scroll_layer = scroll_layer_create(s_stats_content_bounds);
+  scroll_layer_set_content_size(s_stats_scroll_layer, s_stats_content_bounds.size);
+  scroll_layer_set_click_config_onto_window(s_stats_scroll_layer, window);
+
+  s_stats_text_layer = text_layer_create(GRect(NOTES_TAGS_PADDING_X, 0,
+                                               s_stats_content_bounds.size.w - NOTES_TAGS_PADDING_X * 2,
+                                               s_stats_content_bounds.size.h));
+  text_layer_set_text_alignment(s_stats_text_layer, GTextAlignmentLeft);
+  text_layer_set_font(s_stats_text_layer, fonts_get_system_font(NOTES_BODY_FONT_KEY));
+  text_layer_set_background_color(s_stats_text_layer, GColorWhite);
+  text_layer_set_text_color(s_stats_text_layer, GColorBlack);
+  text_layer_set_overflow_mode(s_stats_text_layer, GTextOverflowModeWordWrap);
+  scroll_layer_add_child(s_stats_scroll_layer, text_layer_get_layer(s_stats_text_layer));
+  layer_add_child(window_layer, scroll_layer_get_layer(s_stats_scroll_layer));
+
+  if (!s_stats_body) {
+    s_stats_body = malloc(STATS_BODY_CAP);
+  }
+  stats_render();
+}
+
+static void stats_window_unload(Window *window) {
+  text_layer_destroy(s_stats_text_layer);
+  s_stats_text_layer = NULL;
+  scroll_layer_destroy(s_stats_scroll_layer);
+  s_stats_scroll_layer = NULL;
+  status_bar_layer_destroy(s_stats_status_bar);
+  s_stats_status_bar = NULL;
+  free(s_stats_body);
+  s_stats_body = NULL;
+}
+
+// Created once and reused, like push_notes_window. Keeps whatever data the
+// last visit fetched on screen and re-requests in the background.
+static void push_stats_window(void) {
+  if (!s_stats_window) {
+    s_stats_window = window_create();
+    window_set_window_handlers(s_stats_window, (WindowHandlers) {
+      .load = stats_window_load,
+      .unload = stats_window_unload,
+    });
+  }
+  window_stack_push(s_stats_window, true);
+  request_stats();
+}
+#endif
+
 // ---------- live tracking window ----------
 
 #ifndef PBL_PLATFORM_APLITE
@@ -5085,6 +5305,8 @@ static void window_load(Window *window) {
 #ifndef PBL_PLATFORM_APLITE
   s_project_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_PROJECT);
   s_project_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_PROJECT_WHITE);
+  s_stats_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_STATS);
+  s_stats_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_STATS_WHITE);
 #endif
 
   // Add Task row + dictation session - mic platforms only.
@@ -5184,6 +5406,8 @@ static void window_unload(Window *window) {
 #ifndef PBL_PLATFORM_APLITE
   gbitmap_destroy(s_project_bitmap);
   gbitmap_destroy(s_project_white_bitmap);
+  gbitmap_destroy(s_stats_bitmap);
+  gbitmap_destroy(s_stats_white_bitmap);
 #endif
 #ifndef PBL_PLATFORM_APLITE
   dictation_session_destroy(s_dictation_session);

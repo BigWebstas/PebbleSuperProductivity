@@ -1247,6 +1247,84 @@ function getActiveHabits(state, limit) {
   return rows.slice(0, limit);
 }
 
+// The watch's Stats page (a pinned row, non-aplite) - the headline numbers
+// the desktop's Today panel shows, plus every project's task count.
+//
+//   estimateRemainingMs - over today's undone tasks, the sum of
+//     max(0, timeEstimate - timeSpent). A parent that has subtasks is
+//     summed from its own undone subtasks (SP treats the parent estimate
+//     as a roll-up of them); a task with no subtasks uses its own figures.
+//   workedTodayMs - the sum of timeSpentOnDay[today] across every leaf
+//     task and subtask. Roll-up parents (those with subtasks) are skipped
+//     so their children's time isn't counted twice.
+//   projects - getProjectList order, each with taskCount = its undone,
+//     non-backlog main tasks (matching the desktop sidebar's badge).
+//
+// The desktop's third headline, "time without a break", is local runtime
+// state from its TakeABreakService (it resets on idle detection) and never
+// enters the SuperSync op log - the watch fills that slot with its own
+// current tracking-session length instead, computed on the watch.
+function computeStats(state) {
+  var tasks = state.task || {};
+  var today = todayStr();
+  var estimateRemainingMs = 0;
+  var workedTodayMs = 0;
+
+  Object.keys(tasks).forEach(function (id) {
+    var t = tasks[id];
+    if (!t || !t.title) {
+      return;
+    }
+    var subIds = (t.subTaskIds || []).filter(function (s) { return tasks[s]; });
+    var hasSubs = subIds.length > 0;
+
+    if (!hasSubs) {
+      workedTodayMs += (t.timeSpentOnDay && t.timeSpentOnDay[today]) || 0;
+    }
+
+    if (!isMainTask(t) || t.isDone) {
+      return;
+    }
+    var plannedToday = taskIsPlannedForToday(t, today) || subIds.some(function (sid) {
+      return taskIsPlannedForToday(tasks[sid], today);
+    });
+    if (!plannedToday) {
+      return;
+    }
+    if (hasSubs) {
+      subIds.forEach(function (sid) {
+        var s = tasks[sid];
+        if (s && !s.isDone) {
+          estimateRemainingMs += Math.max(0, (s.timeEstimate || 0) - (s.timeSpent || 0));
+        }
+      });
+    } else {
+      estimateRemainingMs += Math.max(0, (t.timeEstimate || 0) - (t.timeSpent || 0));
+    }
+  });
+
+  var projects = getProjectList(state).map(function (p) {
+    var wantNoProject = p.id === NO_PROJECT_ID;
+    var count = 0;
+    Object.keys(tasks).forEach(function (id) {
+      var t = tasks[id];
+      if (!t || !t.title || !isMainTask(t) || t.isDone || t.__inBacklog) {
+        return;
+      }
+      if (wantNoProject ? !t.projectId : t.projectId === p.id) {
+        count++;
+      }
+    });
+    return { id: p.id, title: p.title, taskCount: count };
+  });
+
+  return {
+    estimateRemainingMs: estimateRemainingMs,
+    workedTodayMs: workedTodayMs,
+    projects: projects,
+  };
+}
+
 module.exports = {
   emptyState: emptyState,
   applyOperation: applyOperation,
@@ -1255,6 +1333,7 @@ module.exports = {
   getActiveHabits: getActiveHabits,
   getProjectList: getProjectList,
   getProjectTasks: getProjectTasks,
+  computeStats: computeStats,
   NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,
   dateToDateStr: dateToDateStr,
