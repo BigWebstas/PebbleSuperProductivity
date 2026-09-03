@@ -285,6 +285,11 @@ static GBitmap *s_project_white_bitmap;
 // Bar-chart glyph for the section-0 "Stats" nav row - same black/white pair.
 static GBitmap *s_stats_bitmap;
 static GBitmap *s_stats_white_bitmap;
+// Inbox-tray glyph drawn in place of a colour swatch for Super Productivity's
+// default "Inbox" project (fixed id, present on every instance, usually has no
+// theme colour). Black/white pair for row selection.
+static GBitmap *s_inbox_bitmap;
+static GBitmap *s_inbox_white_bitmap;
 #endif
 // Mic/dictation state - compiled out on aplite (#ifndef, not a runtime check):
 // no mic hardware, can never reach the "Add Task" row, and a runtime-only
@@ -1231,6 +1236,24 @@ static int16_t draw_project_swatch(GContext *ctx, int16_t x, int16_t cell_h, uin
   graphics_fill_rect(ctx, GRect(x, (cell_h - 16) / 2, 16, 16), 0, GCornerNone);
   return x + 22;
 }
+
+// Super Productivity's built-in default project - a fixed id, the same on every
+// instance (see index.js's Inbox fallback for Add Task).
+#define INBOX_PROJECT_ID "INBOX_PROJECT"
+
+// The left-of-title marker on a project row: the Inbox glyph for the default
+// project (which typically has no theme colour to show a swatch for), else the
+// project's colour swatch. Returns the x the title text should start at.
+static int16_t draw_project_marker(GContext *ctx, int16_t x, int16_t cell_h,
+                                    const char *project_id, uint8_t color, bool is_selected) {
+  if (project_id && strcmp(project_id, INBOX_PROJECT_ID) == 0) {
+    graphics_context_set_compositing_mode(ctx, GCompOpSet);
+    graphics_draw_bitmap_in_rect(ctx, is_selected ? s_inbox_white_bitmap : s_inbox_bitmap,
+                                  GRect(x, (cell_h - 16) / 2, 16, 16));
+    return x + 22;
+  }
+  return draw_project_swatch(ctx, x, cell_h, color);
+}
 #endif
 
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
@@ -1896,8 +1919,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_context_set_fill_color(ctx, GColorGreen);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 #if TODAY_PROJECT_SWATCH
-    int16_t text_x = draw_project_swatch(ctx, TITLE_BOX_X, bounds.size.h,
-                                          s_tasks[project_row->start].project_color);
+    int16_t text_x = draw_project_marker(ctx, TITLE_BOX_X, bounds.size.h,
+                                          project_row->project_id,
+                                          s_tasks[project_row->start].project_color, is_selected);
 #else
     int16_t text_x = TITLE_BOX_X;
 #endif
@@ -4313,9 +4337,11 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     // flip on the bright green barely read).
     graphics_context_set_fill_color(ctx, is_selected ? GColorIslamicGreen : GColorGreen);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-    // The project's theme colour as a swatch on the left (draw_project_swatch,
-    // shared with the today view). The phone already packed it to a GColor8.
-    int16_t text_x = draw_project_swatch(ctx, TITLE_BOX_X, bounds.size.h, (uint8_t)p->color);
+    // The Inbox glyph for the default project, else the project's theme colour
+    // as a swatch (draw_project_marker, shared with the today view). The phone
+    // already packed the colour to a GColor8.
+    int16_t text_x = draw_project_marker(ctx, TITLE_BOX_X, bounds.size.h, p->id,
+                                          (uint8_t)p->color, is_selected);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
     graphics_draw_text(ctx, p->title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
                         GRect(text_x, HEADING_TITLE_Y(bounds.size.h),
@@ -5320,6 +5346,8 @@ static void window_load(Window *window) {
   s_project_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_PROJECT_WHITE);
   s_stats_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_STATS);
   s_stats_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_STATS_WHITE);
+  s_inbox_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_INBOX);
+  s_inbox_white_bitmap = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_INBOX_WHITE);
 #endif
 
   // Add Task row + dictation session - mic platforms only.
@@ -5421,6 +5449,8 @@ static void window_unload(Window *window) {
   gbitmap_destroy(s_project_white_bitmap);
   gbitmap_destroy(s_stats_bitmap);
   gbitmap_destroy(s_stats_white_bitmap);
+  gbitmap_destroy(s_inbox_bitmap);
+  gbitmap_destroy(s_inbox_white_bitmap);
 #endif
 #ifndef PBL_PLATFORM_APLITE
   dictation_session_destroy(s_dictation_session);
