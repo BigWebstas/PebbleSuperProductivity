@@ -5180,6 +5180,7 @@ static GRect s_stats_content_bounds;
 static char s_stats_est[24] = "";
 static char s_stats_worked[24] = "";
 static char s_stats_session[40] = "";
+static char s_stats_nobreak[24] = "";
 
 // Recompute the value strings (the durations from the last payload, the
 // session from live tracking state).
@@ -5203,6 +5204,14 @@ static void stats_compute_values(void) {
     strncpy(s_stats_session, "Not tracking", sizeof(s_stats_session) - 1);
     s_stats_session[sizeof(s_stats_session) - 1] = '\0';
   }
+
+  // "Without a break" - the break reminder's tally: watch-tracked time banked
+  // since the last pause of BREAK_RESET_GAP_S or more, plus the running session.
+  int nb = s_break_accum_s;
+  if (s_tracking_task_id[0] != '\0' && time(NULL) > s_tracking_start_epoch) {
+    nb += (int)(time(NULL) - s_tracking_start_epoch);
+  }
+  format_duration_ms(nb * 1000, false, s_stats_nobreak, sizeof(s_stats_nobreak));
 }
 
 // Draws one label bar (black, white text) with its value below (black text).
@@ -5236,7 +5245,7 @@ static int stats_project_line_count(void) {
 }
 
 static int16_t stats_content_height(void) {
-  return (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 4  // the four metrics
+  return (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 5  // the five metrics
        + STATS_LABEL_H + 2                                 // PROJECTS bar
        + stats_project_line_count() * STATS_LINE_H
        + 8;
@@ -5262,6 +5271,7 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   y = stats_draw_metric(ctx, y, w, "Estimate remaining", s_stats_est);
   y = stats_draw_metric(ctx, y, w, "Worked today", s_stats_worked);
   y = stats_draw_metric(ctx, y, w, "Current session", s_stats_session);
+  y = stats_draw_metric(ctx, y, w, "Without a break", s_stats_nobreak);
   y = stats_draw_metric(ctx, y, w, "Completed today", done_buf);
 
   graphics_context_set_fill_color(ctx, GColorBlack);
