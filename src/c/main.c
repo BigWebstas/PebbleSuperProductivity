@@ -811,6 +811,13 @@ static void str_copy(char *dst, const char *src, size_t cap) {
   dst[cap - 1] = '\0';
 }
 
+// graphics_draw_text with the system-font lookup and the always-NULL text
+// attributes arg folded in - the shape nearly every draw_* proc uses.
+static void draw_text(GContext *ctx, const char *text, const char *font_key,
+                      GRect box, GTextOverflowMode overflow, GTextAlignment align) {
+  graphics_draw_text(ctx, text, fonts_get_system_font(font_key), box, overflow, align, NULL);
+}
+
 // Read an optional AppMessage tuple, `fb` when the key is absent. The task /
 // habit / project / stats / presence payloads are full of "present it if sent,
 // else a default" fields.
@@ -1344,8 +1351,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
       graphics_context_set_fill_color(ctx, GColorWhite);
       graphics_fill_rect(ctx, bounds, 0, GCornerNone);
       graphics_context_set_text_color(ctx, GColorBlack);
-      graphics_draw_text(ctx, "No tasks for today.", fonts_get_system_font(EMPTY_MSG_FONT_KEY),
-                          bounds, GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+      draw_text(ctx, "No tasks for today.", EMPTY_MSG_FONT_KEY, bounds, GTextOverflowModeWordWrap, GTextAlignmentCenter);
     }
     return;
   }
@@ -1360,9 +1366,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
     graphics_context_set_fill_color(ctx, GColorGreen);
     graphics_fill_rect(ctx, hb, 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorBlack);
-    graphics_draw_text(ctx, "TRACKING", fonts_get_system_font(TRACKING_FONT_KEY),
-                        GRect(TITLE_BOX_X, 0, hb.size.w - TITLE_BOX_X * 2, hb.size.h),
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    draw_text(ctx, "TRACKING", TRACKING_FONT_KEY, GRect(TITLE_BOX_X, 0, hb.size.w - TITLE_BOX_X * 2, hb.size.h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     graphics_context_set_stroke_color(ctx, GColorBlack);
     graphics_draw_line(ctx, GPoint(0, hb.size.h - 1), GPoint(hb.size.w, hb.size.h - 1));
     return;
@@ -1743,15 +1747,13 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
     const char *pending_msg = s_pending_reschedule_kind == RESCHEDULE_TOMORROW ? "Moving to tomorrow..."
                               : s_pending_reschedule_kind == RESCHEDULE_TODAY ? "Scheduling for today..."
                               : "Un-Scheduling...";
-    graphics_draw_text(ctx, pending_msg, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    draw_text(ctx, pending_msg, SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
     return;
   }
 #endif
 
   if (task->done) {
-    graphics_draw_text(ctx, "Done", fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    draw_text(ctx, "Done", SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
     return;
   }
 
@@ -1811,8 +1813,7 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
 #endif
 
   if (subtitle[0] != '\0') {
-    graphics_draw_text(ctx, subtitle, fonts_get_system_font(SUBTITLE_FONT_KEY), left_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    draw_text(ctx, subtitle, SUBTITLE_FONT_KEY, left_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   }
 }
 
@@ -1852,8 +1853,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                           title_natural_width_font(live_title, live_font) > title_box.size.w);
       GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, live_title_h, CHROME_STRIP_H),
                                   bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
-      graphics_draw_text(ctx, presence_state_phrase(), fonts_get_system_font(CHROME_FONT_KEY), subtitle_box,
-                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      draw_text(ctx, presence_state_phrase(), CHROME_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       return;
     }
 #endif
@@ -1866,8 +1866,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
       GRect title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      graphics_draw_text(ctx, "Habits", fonts_get_system_font(HEADING_FONT_KEY), title_box,
-                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      draw_text(ctx, "Habits", HEADING_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
                                ROW_ICON_SIZE, ROW_ICON_SIZE);
       // GCompOpSet (not the GCompOpAssign default) so the bitmap's alpha (its
@@ -1889,8 +1888,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
       GRect title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      graphics_draw_text(ctx, "Projects", fonts_get_system_font(HEADING_FONT_KEY), title_box,
-                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      draw_text(ctx, "Projects", HEADING_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       graphics_context_set_compositing_mode(ctx, GCompOpSet);
       graphics_draw_bitmap_in_rect(ctx, is_selected ? s_project_white_bitmap : s_project_bitmap,
                                     GRect(bounds.size.w - ROW_ICON_SIZE - 8, (bounds.size.h - 20) / 2, 20, 20));
@@ -1908,8 +1906,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
       GRect stats_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                      bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      graphics_draw_text(ctx, "Stats", fonts_get_system_font(HEADING_FONT_KEY), stats_title_box,
-                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      draw_text(ctx, "Stats", HEADING_FONT_KEY, stats_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       graphics_context_set_compositing_mode(ctx, GCompOpSet);
       graphics_draw_bitmap_in_rect(ctx, is_selected ? s_stats_white_bitmap : s_stats_bitmap,
                                     GRect(bounds.size.w - ROW_ICON_SIZE - 8, (bounds.size.h - 20) / 2, 20, 20));
@@ -1929,8 +1926,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       graphics_context_set_text_color(ctx, icon);
       GRect sched_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                      bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      graphics_draw_text(ctx, "Schedule", fonts_get_system_font(HEADING_FONT_KEY), sched_title_box,
-                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      draw_text(ctx, "Schedule", HEADING_FONT_KEY, sched_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       GPoint clock_c = GPoint(bounds.size.w - ROW_ICON_SIZE - 8 + 10, bounds.size.h / 2);
       graphics_context_set_stroke_color(ctx, icon);
       graphics_draw_circle(ctx, clock_c, 8);
@@ -1949,8 +1945,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
       GRect title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      graphics_draw_text(ctx, "Add Task", fonts_get_system_font(HEADING_FONT_KEY), title_box,
-                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      draw_text(ctx, "Add Task", HEADING_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
                                ROW_ICON_SIZE, ROW_ICON_SIZE);
       graphics_context_set_compositing_mode(ctx, GCompOpSet);
@@ -1988,14 +1983,12 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
     GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                              bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-    graphics_draw_text(ctx, "Resync", fonts_get_system_font(HEADING_FONT_KEY), title_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    draw_text(ctx, "Resync", HEADING_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     // Full row width - not truncating a "Failed: ..." status matters more than
     // dodging the icon, which sits up in the title band.
     GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                                 bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
-    graphics_draw_text(ctx, subtitle, fonts_get_system_font(CHROME_FONT_KEY), subtitle_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    draw_text(ctx, subtitle, CHROME_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     // The sp checkmark logo, matching the Habits row's icon.
     GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10,
                              ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H) + 2,
@@ -2019,22 +2012,19 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_context_set_text_color(ctx, fg);
     GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                              bounds.size.w - TITLE_BOX_X * 2, HEADING_TITLE_H);
-    graphics_draw_text(ctx, "Finish Day", fonts_get_system_font(HEADING_FONT_KEY), title_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    draw_text(ctx, "Finish Day", HEADING_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
     // Version text as this row's subtitle - the same footer slot it's lived in
     // since v0.6.5, just no longer alone.
     GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                                 bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
-    graphics_draw_text(ctx, "v" APP_VERSION, fonts_get_system_font(CHROME_FONT_KEY), subtitle_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    draw_text(ctx, "v" APP_VERSION, CHROME_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
 #else
     // Plain version-only footer - no tap/long-select action on aplite.
     GRect bounds = layer_get_bounds(cell_layer);
     graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorBlack);
-    graphics_draw_text(ctx, "v" APP_VERSION, fonts_get_system_font(FONT_KEY_GOTHIC_14), bounds,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    draw_text(ctx, "v" APP_VERSION, FONT_KEY_GOTHIC_14, bounds, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
 #endif
     return;
   }
@@ -2110,8 +2100,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
     GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                                 bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
-    graphics_draw_text(ctx, sub, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    draw_text(ctx, sub, SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     return;
   }
 #endif
@@ -4177,8 +4166,7 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 #else
   GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
-  graphics_draw_text(ctx, habit->title, fonts_get_system_font(TITLE_FONT_KEY), title_box,
-                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  draw_text(ctx, habit->title, TITLE_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
 #endif
 
   // "value/goal" always visible, " - Done" appended once the count reaches goal
@@ -4245,8 +4233,7 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - SUBTITLE_STRIP_H,
                               bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
 #endif
-  graphics_draw_text(ctx, subtitle, fonts_get_system_font(SUBTITLE_FONT_KEY), subtitle_box,
-                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  draw_text(ctx, subtitle, SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
 }
 
 // Select +1, long-select -1 (never below 0). The phone applies the delta to its
@@ -4535,10 +4522,7 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     int16_t text_x = draw_project_marker(ctx, TITLE_BOX_X, bounds.size.h, p->id,
                                           (uint8_t)p->color, is_selected);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-    graphics_draw_text(ctx, p->title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD),
-                        GRect(text_x, HEADING_TITLE_Y(bounds.size.h),
-                              bounds.size.w - text_x - TITLE_BOX_X, HEADING_TITLE_H),
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    draw_text(ctx, p->title, FONT_KEY_GOTHIC_24_BOLD, GRect(text_x, HEADING_TITLE_Y(bounds.size.h), bounds.size.w - text_x - TITLE_BOX_X, HEADING_TITLE_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     return;
   }
   Task *bt = resolve_browse_task_at(*cell_index);
@@ -5033,12 +5017,10 @@ static void notes_tags_layer_draw(Layer *layer, GContext *ctx) {
   measure_notes_tags_parts(content_w, &label_h, &names_h);
 
   GRect label_rect = GRect(NOTES_TAGS_PADDING_X, NOTES_TAGS_PADDING_Y, content_w, label_h);
-  graphics_draw_text(ctx, NOTES_TAGS_LABEL, fonts_get_system_font(NOTES_LABEL_FONT_KEY), label_rect,
-                      GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+  draw_text(ctx, NOTES_TAGS_LABEL, NOTES_LABEL_FONT_KEY, label_rect, GTextOverflowModeWordWrap, GTextAlignmentLeft);
 
   GRect names_rect = GRect(NOTES_TAGS_PADDING_X, NOTES_TAGS_PADDING_Y + label_h, content_w, names_h);
-  graphics_draw_text(ctx, notes_tags_display_line(), fonts_get_system_font(NOTES_BODY_FONT_KEY), names_rect,
-                      GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
+  draw_text(ctx, notes_tags_display_line(), NOTES_BODY_FONT_KEY, names_rect, GTextOverflowModeWordWrap, GTextAlignmentLeft);
 }
 
 static void notes_window_load(Window *window) {
@@ -5195,14 +5177,10 @@ static int16_t stats_draw_metric(GContext *ctx, int16_t y, int16_t w,
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, GRect(0, y, w, STATS_LABEL_H), 0, GCornerNone);
   graphics_context_set_text_color(ctx, GColorWhite);
-  graphics_draw_text(ctx, label, fonts_get_system_font(STATS_LABEL_FONT),
-                      GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
-                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  draw_text(ctx, label, STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   y += STATS_LABEL_H;
   graphics_context_set_text_color(ctx, GColorBlack);
-  graphics_draw_text(ctx, value, fonts_get_system_font(STATS_VALUE_FONT),
-                      GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_VALUE_H),
-                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  draw_text(ctx, value, STATS_VALUE_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_VALUE_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   return y + STATS_VALUE_H + STATS_GAP;
 }
 
@@ -5234,9 +5212,7 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
 
   if (!s_stats_have_data) {
     graphics_context_set_text_color(ctx, GColorBlack);
-    graphics_draw_text(ctx, "Loading…", fonts_get_system_font(STATS_LINE_FONT),
-                        GRect(STATS_PAD_X, 8, w - STATS_PAD_X * 2, STATS_LINE_H),
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    draw_text(ctx, "Loading…", STATS_LINE_FONT, GRect(STATS_PAD_X, 8, w - STATS_PAD_X * 2, STATS_LINE_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     return;
   }
 
@@ -5252,9 +5228,7 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, GRect(0, y, w, STATS_LABEL_H), 0, GCornerNone);
   graphics_context_set_text_color(ctx, GColorWhite);
-  graphics_draw_text(ctx, "PROJECTS", fonts_get_system_font(STATS_LABEL_FONT),
-                      GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
-                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  draw_text(ctx, "PROJECTS", STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
   y += STATS_LABEL_H + 2;
 
   graphics_context_set_text_color(ctx, GColorBlack);
