@@ -493,7 +493,17 @@ static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
 // s_break_accum_s (whole sessions that have ended) plus the running session's
 // elapsed. A gap between a stop and the next start of at least BREAK_RESET_GAP_S
 // counts as a break and zeroes the tally (see start_tracking). Local task
-// tracking only; app-open only, like the over-estimate banner. aplite-excluded.
+// tracking only; app-open only, like the over-estimate banner.
+//
+// aplite-excluded (RAM). Also emery-excluded: the emery build is right against
+// PebbleOS's 64 KB app-size ceiling and this feature doesn't fit there (an -flto
+// build that would have made room produces binaries the watch rejects at
+// install - "Sentinel does not match" - so that route is closed).
+#if !defined(PBL_PLATFORM_APLITE) && !defined(PBL_PLATFORM_EMERY)
+#define BREAK_REMINDER
+#endif
+
+#ifdef BREAK_REMINDER
 static int s_break_reminder_min = 0;         // config.breakReminderMin, 0 = off
 static int s_break_accum_s = 0;              // tracked secs banked since the last break
 static time_t s_break_last_stop_epoch = 0;   // when the last session ended (gap detection)
@@ -501,6 +511,7 @@ static time_t s_break_last_stop_epoch = 0;   // when the last session ended (gap
 // break, so a quick stop/restart doesn't re-nag.
 static bool s_break_notified = false;
 #define BREAK_RESET_GAP_S (5 * 60)
+#endif
 
 // Pinned "TRACKING" section - the tracked task (local, or a remote device's
 // via remote_in_pinned_section) shows in its own section below the
@@ -898,7 +909,7 @@ static void load_tracking(void) {
   }
 }
 
-#ifndef PBL_PLATFORM_APLITE
+#ifdef BREAK_REMINDER
 static const uint32_t PERSIST_KEY_BREAK_ACCUM_S = 112;
 static const uint32_t PERSIST_KEY_BREAK_LAST_STOP = 113;
 
@@ -914,7 +925,9 @@ static void load_break_state(void) {
   s_break_accum_s = persist_read_int(PERSIST_KEY_BREAK_ACCUM_S);
   s_break_last_stop_epoch = (time_t)persist_read_int(PERSIST_KEY_BREAK_LAST_STOP);
 }
+#endif
 
+#ifndef PBL_PLATFORM_APLITE
 static const uint32_t PERSIST_KEY_HABIT_TRACKING_ID = 130;
 static const uint32_t PERSIST_KEY_HABIT_TRACKING_START = 131;
 static const uint32_t PERSIST_KEY_HABIT_COUNTDOWN_PAUSED = 132;
@@ -2510,6 +2523,7 @@ static void maybe_notify_overtime(void) {
   }
 }
 
+#ifdef BREAK_REMINDER
 // Called once per tracking tick, next to maybe_notify_overtime: fires the
 // "time for a break" banner the first time this watch's banked tracked time
 // since the last break (s_break_accum_s + the running session's elapsed)
@@ -2532,6 +2546,7 @@ static void maybe_notify_break(void) {
   s_break_notified = true;
   show_top_banner("Time for a break");
 }
+#endif
 
 // Re-lays-out the task list after the pinned "TRACKING" section appears or
 // disappears - the section and row counts change, so a full reload_data plus a
@@ -2566,6 +2581,8 @@ static void tracking_tick_callback(void *data) {
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
 #ifndef PBL_PLATFORM_APLITE
   maybe_notify_overtime();
+#endif
+#ifdef BREAK_REMINDER
   maybe_notify_break();
 #endif
   s_tracking_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, tracking_tick_callback, NULL);
@@ -2594,6 +2611,7 @@ static void start_tracking(Task *task) {
   s_overtime_notified = false;
   s_overtime_last_notify_epoch = 0;
   hide_overtime_banner();
+#ifdef BREAK_REMINDER
   // Break reminder: a long enough pause since the last session counts as a real
   // break - zero the running tally and re-arm the banner. A shorter gap just
   // carries the tally forward into this session.
@@ -2603,6 +2621,7 @@ static void start_tracking(Task *task) {
     s_break_notified = false;
   }
   save_break_state();
+#endif
   // Pin this task to the top (if enabled); cancel any grace timer from a
   // just-stopped task and re-lay-out the list.
   cancel_unpin_timer();
@@ -2660,12 +2679,14 @@ static void stop_tracking_and_report(void) {
   s_overtime_notified = false;
   s_overtime_last_notify_epoch = 0;
   hide_overtime_banner();
+#ifdef BREAK_REMINDER
   // Bank this session's tracked time and stamp the stop, so the next start can
   // tell a real break from a brief pause. s_break_notified is deliberately kept
   // - a quick stop/restart shouldn't clear an already-shown break banner.
   s_break_accum_s += elapsed_s > 0 ? (int)elapsed_s : 0;
   s_break_last_stop_epoch = time(NULL);
   save_break_state();
+#endif
   // Keep the just-stopped task pinned for a short grace period so it slides
   // back into its group smoothly. A new start_tracking() cancels this.
   if (s_pinned_task_id[0] != '\0') {
@@ -3795,12 +3816,14 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (overtime_sound_tuple) {
         s_overtime_sound_enabled = overtime_sound_tuple->value->int32 != 0;
       }
+#ifdef BREAK_REMINDER
       // "Remind me to take a break" interval in minutes (0 = off). Re-sent every
       // sync like the flags above; the tally itself lives in persist.
       Tuple *break_reminder_tuple = dict_find(iterator, KEY_BREAK_REMINDER_MIN);
       if (break_reminder_tuple) {
         s_break_reminder_min = break_reminder_tuple->value->int32;
       }
+#endif
 #endif
       // reload_data refreshes the Resync row's status subtitle;
       // update_empty_layer() handles the empty screen. Both no-op while the
@@ -6007,6 +6030,8 @@ static void init(void) {
   load_tracking();
 #ifndef PBL_PLATFORM_APLITE
   load_habit_tracking();
+#endif
+#ifdef BREAK_REMINDER
   load_break_state();
 #endif
   recompute_groups();

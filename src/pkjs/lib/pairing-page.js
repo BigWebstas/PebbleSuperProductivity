@@ -255,7 +255,8 @@ breakReminderOptions + '\n' +
 '    pause. Stopping the timer for 5 minutes or more counts as a break and\n' +
 '    resets the count; shorter gaps (switching tasks) carry it over. Only\n' +
 '    counts time tracked on the watch, and only fires while the watchapp is\n' +
-'    open. Not available on original Pebble/Pebble Steel (aplite).\n' +
+'    open. Not available on original Pebble/Pebble Steel (aplite) or Pebble\n' +
+'    Time 2 (emery) - no room left in those builds.\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
