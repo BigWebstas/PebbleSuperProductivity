@@ -58,6 +58,7 @@
 #define KEY_PRESENCE_CAN_STOP MESSAGE_KEY_PRESENCE_CAN_STOP
 #define KEY_PRESENCE_SPENT_MS MESSAGE_KEY_PRESENCE_SPENT_MS
 #define KEY_PRESENCE_ESTIMATE_MS MESSAGE_KEY_PRESENCE_ESTIMATE_MS
+#define KEY_PRESENCE_NEW_SESSION MESSAGE_KEY_PRESENCE_NEW_SESSION
 #define KEY_STATS_ENABLED MESSAGE_KEY_STATS_ENABLED
 #define KEY_STATS_EST_REMAINING_MS MESSAGE_KEY_STATS_EST_REMAINING_MS
 #define KEY_STATS_WORKED_TODAY_MS MESSAGE_KEY_STATS_WORKED_TODAY_MS
@@ -2409,24 +2410,46 @@ static void show_overtime_banner(const char *task_title) {
 }
 
 // Called once per tracking tick: fires the over-estimate banner the first time
-// effective time (synced spent + this session's elapsed) reaches the estimate.
-// Latched via s_overtime_notified (re-armed if effective time drops back under).
-// With the "repeat every 5 minutes" sub-option, re-fires every
-// OVERTIME_REPEAT_INTERVAL_S while the task stays over.
+// effective time (synced spent + the running session's elapsed) reaches the
+// estimate. Covers both a task tracked ON this watch and one tracked on another
+// device (remote presence, state 1) when the phone has sent that task's synced
+// spent + estimate. Latched via s_overtime_notified (re-armed if effective time
+// drops back under). With the "repeat every 5 minutes" sub-option, re-fires
+// every OVERTIME_REPEAT_INTERVAL_S while the task stays over.
 static void maybe_notify_overtime(void) {
-  if (!s_overtime_notify_enabled || s_tracking_task_id[0] == '\0') {
+  if (!s_overtime_notify_enabled) {
     return;
   }
-  Task *task = find_task_by_id(s_tracking_task_id);
-  if (!task || task->time_estimate_ms <= 0) {
+
+  const char *over_title;
+  int effective_ms;
+  int estimate_ms;
+  int elapsed_s;
+
+  if (s_tracking_task_id[0] != '\0') {
+    Task *task = find_task_by_id(s_tracking_task_id);
+    if (!task || task->time_estimate_ms <= 0) {
+      return;
+    }
+    effective_ms = task->time_spent_ms;
+    elapsed_s = (int)(time(NULL) - s_tracking_start_epoch);
+    estimate_ms = task->time_estimate_ms;
+    over_title = task->title;
+  } else if (s_presence_state == 1 && s_presence_estimate_ms > 0) {
+    // Another device is tracking; s_presence_spent_ms is that task's synced
+    // time-spent, s_presence_elapsed_base the running session's start.
+    effective_ms = s_presence_spent_ms;
+    elapsed_s = (int)(time(NULL) - s_presence_elapsed_base);
+    estimate_ms = s_presence_estimate_ms;
+    over_title = s_presence_task[0] != '\0' ? s_presence_task : "Live tracking";
+  } else {
     return;
   }
-  int effective_ms = task->time_spent_ms;
-  time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
   if (elapsed_s > 0) {
-    effective_ms += (int)elapsed_s * 1000;
+    effective_ms += elapsed_s * 1000;
   }
-  if (effective_ms < task->time_estimate_ms) {
+
+  if (effective_ms < estimate_ms) {
     s_overtime_notified = false; // re-arm for a later crossing
     return;
   }
@@ -2436,14 +2459,14 @@ static void maybe_notify_overtime(void) {
   if (!s_overtime_notified) {
     s_overtime_notified = true;
     s_overtime_last_notify_epoch = time(NULL);
-    show_overtime_banner(task->title);
+    show_overtime_banner(over_title);
     return;
   }
   // Already notified this crossing - "repeat every 5 minutes" re-fires it.
   if (s_overtime_repeat_enabled &&
       time(NULL) - s_overtime_last_notify_epoch >= OVERTIME_REPEAT_INTERVAL_S) {
     s_overtime_last_notify_epoch = time(NULL);
-    show_overtime_banner(task->title);
+    show_overtime_banner(over_title);
   }
 }
 
@@ -3747,6 +3770,18 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         // The phone confirms a stop by clearing (state 0), never by another
         // still-live update - so any fresh state drops the "Stopping..." latch.
         s_presence_stopping = false;
+      }
+      // A remote session that just started or switched task begins its own
+      // over-estimate crossing - re-arm the latch and drop any banner it left
+      // up. The phone flags this (PRESENCE_NEW_SESSION, a new sessionId); a
+      // same-session heartbeat clears it so the repeat interval isn't reset
+      // every 60s. Skipped while tracking locally - that session owns the latch.
+      Tuple *new_session_tuple = dict_find(iterator, KEY_PRESENCE_NEW_SESSION);
+      if (s_tracking_task_id[0] == '\0' && new_session_tuple &&
+          new_session_tuple->value->int32 != 0) {
+        s_overtime_notified = false;
+        s_overtime_last_notify_epoch = 0;
+        hide_overtime_banner();
       }
       // reload + scroll refresh covers both the dark-blue section-0 row count
       // changing and the pinned "TRACKING" section appearing/disappearing.

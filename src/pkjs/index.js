@@ -2266,7 +2266,7 @@ function sendPresenceClear() {
 
 // Pushes one decoded presence view to the watch. `stale` forces the
 // "was tracking" state regardless of what the producer last reported.
-function pushPresenceToWatch(view, stale) {
+function pushPresenceToWatch(view, stale, isNewSession) {
   var state;
   var title;
   var device = '';
@@ -2316,6 +2316,11 @@ function pushPresenceToWatch(view, stale) {
     dict.PRESENCE_SPENT_MS = Math.min(t.timeSpent || 0, 2000000000);
     dict.PRESENCE_ESTIMATE_MS = Math.min(t.timeEstimate, 2000000000);
   }
+  // Tells the watch to re-arm its over-estimate notification for a freshly
+  // started / switched remote session (see maybe_notify_overtime).
+  if (isNewSession) {
+    dict.PRESENCE_NEW_SESSION = 1;
+  }
   sendWithRetry(dict, function () {}, function (e) {
     console.log('[pkjs] giving up on PRESENCE_UPDATE: ' + JSON.stringify(e));
   });
@@ -2323,7 +2328,11 @@ function pushPresenceToWatch(view, stale) {
 
 function onPresenceState(view) {
   presenceLastReceivedAt = Date.now();
-  presenceLastSessionId = view.opaque ? null : view.sessionId;
+  var newSessionId = view.opaque ? null : view.sessionId;
+  // A different sessionId means the remote device started (or switched) a
+  // tracking session - the watch re-arms its over-estimate latch on this.
+  var isNewSession = !!(newSessionId && newSessionId !== presenceLastSessionId);
+  presenceLastSessionId = newSessionId;
 
   // While THIS watch is broadcasting its own tracking, a remote device also
   // claiming "tracking" is a takeover contest (only one active session
@@ -2343,7 +2352,7 @@ function onPresenceState(view) {
     }
   }
 
-  pushPresenceToWatch(view, false);
+  pushPresenceToWatch(view, false, isNewSession);
   catchUpTrackedTask(view);
 
   stopPresenceStaleTimer();
