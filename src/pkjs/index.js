@@ -9,6 +9,7 @@ var store = require('./lib/task-store.js');
 var pairingPage = require('./lib/pairing-page.js');
 var sha256lib = require('./lib/sha256.js');
 var presence = require('./lib/presence-client.js');
+var opQueue = require('./lib/op-queue.js');
 
 // Keep in sync with the enums at the top of src/c/main.c.
 var MSG_TASK_SYNC_START = 1;
@@ -905,9 +906,15 @@ function doSync() {
     });
   };
 
-  var work = (isFirstSync ? bootstrapFromSnapshot() : Promise.resolve()).then(function () {
-    return pullPage();
-  });
+  var work = (isFirstSync ? bootstrapFromSnapshot() : Promise.resolve())
+    .then(function () {
+      // Drain any ops queued while offline before pulling - so the pull
+      // below already reflects them, and so their order is preserved.
+      return flushPendingOps(config);
+    })
+    .then(function () {
+      return pullPage();
+    });
 
   // Returned so callers that trigger a sync as a side effect (e.g.
   // handleTaskToggle's autoSyncOnComplete) can tell once it's actually
@@ -990,8 +997,74 @@ function uploadOps(ops, config, clientId) {
       if (err && err.rejectedResult && err.rejectedResult.existingClock) {
         saveVectorClock(mergeVectorClocks(loadVectorClock(), err.rejectedResult.existingClock));
       }
+      // A transport failure - no server response at all (offline), a
+      // timeout, or a 5xx - queues these ops for re-upload at the top of
+      // the next sync (see lib/op-queue.js and flushPendingOps). A
+      // server-side per-op rejection (err.rejectedResult set: conflict,
+      // quota, duplicate id, validation) is NOT queued - it won't pass on
+      // a retry, and SuperSync's op-log ordering is this client's whole
+      // conflict story. A 4xx that isn't per-op (auth, a malformed
+      // request) is left for the user to fix by re-pairing, not retried.
+      if (err && !err.rejectedResult && (!err.status || err.status >= 500)) {
+        opQueue.enqueue(localStorage, ops);
+      }
       throw err;
     });
+}
+
+// Re-uploads ops queued by an earlier offline session (lib/op-queue.js),
+// oldest first, as the first step of every doSync() - before the pull, so
+// the watch's offline changes land server-side in the order they happened.
+//
+// A transport failure (statusless network error, timeout, or 5xx) pauses
+// the flush: that op and every later one stay queued, in order, for the
+// next attempt. Any real per-op server response - accepted, or rejected for
+// a conflict / quota / duplicate - takes the op out of the queue (a
+// rejection won't become an acceptance later, and doSync()'s own pull
+// reconciles whatever the server kept). A non-per-op 4xx drops just the
+// head op so it can't wedge the queue forever, and leaves the rest for next
+// time. Always resolves: a flush problem must never mask the sync after it.
+function flushPendingOps(config) {
+  var queued = opQueue.list(localStorage);
+  if (!queued.length) {
+    return Promise.resolve();
+  }
+  var clientId = getOrCreateClientId();
+  var client = new supersync.SuperSyncClient({ baseUrl: config.baseUrl, token: config.jwt });
+  var index = 0;
+  var step = function () {
+    if (index >= queued.length) {
+      return Promise.resolve();
+    }
+    var op = queued[index];
+    // No .catch on this chain: a thrown error stops step()'s recursion
+    // with `op` (and everything after it) still queued - handled below.
+    return client.uploadOps([op], clientId, loadLastSeq()).then(function (res) {
+      var result = (res && res.results && res.results[0]) || {};
+      if (!result.accepted && result.existingClock) {
+        // Same recovery uploadOps() does on a conflict - start the next op
+        // against this entity from a clock that beats the server's.
+        saveVectorClock(mergeVectorClocks(loadVectorClock(), result.existingClock));
+      }
+      opQueue.remove(localStorage, op.id);
+      index++;
+      return step();
+    });
+  };
+  return step().catch(function (err) {
+    var status = err && err.status;
+    if (status && status >= 400 && status < 500 && status !== 408 && status !== 429) {
+      var head = queued[index];
+      if (head && head.id) {
+        opQueue.remove(localStorage, head.id);
+      }
+      console.log('[pkjs] flushPendingOps: dropped a queued op after HTTP ' + status +
+        '; ' + Math.max(0, queued.length - index - 1) + ' still queued');
+      return;
+    }
+    console.log('[pkjs] flushPendingOps: paused with ' + Math.max(0, queued.length - index) +
+      ' queued (' + (err && err.message) + ')');
+  });
 }
 
 // Runs after a single-op upload (success or failure) when the setting is
@@ -1221,9 +1294,10 @@ function handleTaskToggle(taskId, done) {
   var toggleFailureMsg = null;
   Promise.all(uploads)
     .catch(function (err) {
-      // MVP: log and leave the local optimistic update(s) in place; the
-      // next full sync will reconcile. A persisted retry queue for
-      // offline use is a known gap, called out in README.md.
+      // Log and leave the local optimistic update(s) in place. uploadOps()
+      // has already queued the op(s) if this was a transport failure, so
+      // the next sync's flushPendingOps() re-sends them; a hard server
+      // rejection isn't queued and the next full pull reconciles it.
       toggleFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload task toggle: ' + toggleFailureMsg);
       sendStatus(STATUS_ERROR, toggleFailureMsg);
@@ -2265,7 +2339,8 @@ Pebble.addEventListener('ready', function () {
   // for the passive "app just opened" trigger, and only when paired (an
   // unpaired watch has never actually synced, so lastSyncedAt is always 0
   // there and this condition can't be true).
-  if (config && config.jwt && lastSyncedAt && Date.now() - lastSyncedAt < RECENT_SYNC_SKIP_MS) {
+  if (config && config.jwt && lastSyncedAt && Date.now() - lastSyncedAt < RECENT_SYNC_SKIP_MS &&
+      opQueue.count(localStorage) === 0) {
     console.log('[pkjs] skipping sync on open, last synced ' + Math.round((Date.now() - lastSyncedAt) / 1000) + 's ago');
     pushCachedStateToWatch(config);
   } else {
@@ -2485,6 +2560,10 @@ Pebble.addEventListener('webviewclosed', function (e) {
     localStorage.removeItem('sp_entities');
     localStorage.removeItem('sp_last_seq');
     localStorage.removeItem('sp_vector_clock');
+    // Queued offline ops carry a payload encrypted with the OLD password
+    // and, on a jwt change, belong to a different account entirely - both
+    // make them undecryptable garbage to the new pairing. Drop them.
+    opQueue.clear(localStorage);
     // Persisted Argon2id keys are tied to the old password (and, via
     // jwtChanged, possibly a different account entirely) - drop them so we
     // don't try to decrypt the new account's ops with stale keys. The
