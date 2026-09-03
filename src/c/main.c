@@ -62,6 +62,7 @@
 #define KEY_STATS_WORKED_TODAY_MS MESSAGE_KEY_STATS_WORKED_TODAY_MS
 #define KEY_STATS_DONE_TODAY MESSAGE_KEY_STATS_DONE_TODAY
 #define KEY_STATS_TEXT MESSAGE_KEY_STATS_TEXT
+#define KEY_SCHEDULE_ENABLED MESSAGE_KEY_SCHEDULE_ENABLED
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -538,6 +539,10 @@ static bool s_add_task_enabled = true;
 // unconditional static (trivial) and is simply never read there.
 static bool s_projects_enabled = true;
 #ifndef PBL_PLATFORM_APLITE
+// "Schedule" page row (config.enableSchedule, default on). A time-ordered
+// view of today's timed tasks - see the schedule-page block far below.
+// aplite-excluded (RAM), same as Stats.
+static bool s_schedule_enabled = true;
 // "Stats" page row (config.enableStats, default on) and the last
 // MSG_STATS_DATA payload - kept across visits so a re-open shows the previous
 // numbers immediately while a fresh request is in flight. Declared here (not
@@ -914,6 +919,8 @@ static Task *find_task_by_id(const char *id);
 #ifndef PBL_PLATFORM_APLITE
 static void push_stats_window(void);
 static void stats_render(void);
+static void push_schedule_window(void);
+static void schedule_refresh_if_open(void);
 #endif
 #if PROJECTS_BROWSER
 static void push_browse_window(const char *jump_to_project);
@@ -984,6 +991,7 @@ typedef enum {
   SECTION0_ROW_HABITS,
   SECTION0_ROW_PROJECTS, // projects browser, between Habits and Add Task (non-aplite)
   SECTION0_ROW_STATS,    // stats page, between Projects and Add Task (non-aplite)
+  SECTION0_ROW_SCHEDULE, // schedule page, between Stats and Add Task (non-aplite)
   SECTION0_ROW_ADD_TASK,
   SECTION0_ROW_LIVE, // live tracking presence, row 0 when active (non-aplite)
 } Section0RowKind;
@@ -1014,6 +1022,13 @@ typedef enum {
 #define STATS_ROW_ACTIVE() (s_stats_enabled)
 #endif
 
+// Whether the "Schedule" row sits in section 0. Compile-time false on aplite.
+#ifdef PBL_PLATFORM_APLITE
+#define SCHEDULE_ROW_ACTIVE() false
+#else
+#define SCHEDULE_ROW_ACTIVE() (s_schedule_enabled)
+#endif
+
 // Whether the "LIVE" presence row sits at the top of section 0. Compile-time
 // false on aplite (the whole feature is excluded).
 #ifdef PBL_PLATFORM_APLITE
@@ -1036,6 +1051,9 @@ static int section0_row_count(void) {
     count++;
   }
   if (STATS_ROW_ACTIVE()) {
+    count++;
+  }
+  if (SCHEDULE_ROW_ACTIVE()) {
     count++;
   }
   if (PBL_IF_MICROPHONE_ELSE(s_add_task_enabled, false)) {
@@ -1073,6 +1091,12 @@ static Section0RowKind section0_row_kind(int row) {
   if (STATS_ROW_ACTIVE()) {
     if (row == next) {
       return SECTION0_ROW_STATS;
+    }
+    next++;
+  }
+  if (SCHEDULE_ROW_ACTIVE()) {
+    if (row == next) {
+      return SECTION0_ROW_SCHEDULE;
     }
     next++;
   }
@@ -1861,6 +1885,29 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
+    if (kind == SECTION0_ROW_SCHEDULE) {
+      // Opens the Schedule page - today's timed tasks in time order. Teal, its
+      // own colour among the section-0 nav rows (Stats orange, Habits cerulean,
+      // Projects purple). A clock glyph on the right, drawn from primitives (no
+      // bitmap asset), black normally / white when selected like the others.
+      GColor icon = is_selected ? GColorWhite : GColorBlack;
+      graphics_context_set_fill_color(ctx, GColorTiffanyBlue);
+      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+      graphics_context_set_text_color(ctx, icon);
+      GRect sched_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                                     bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+      graphics_draw_text(ctx, "Schedule", fonts_get_system_font(HEADING_FONT_KEY), sched_title_box,
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      GPoint clock_c = GPoint(bounds.size.w - ROW_ICON_SIZE - 8 + 10, bounds.size.h / 2);
+      graphics_context_set_stroke_color(ctx, icon);
+      graphics_draw_circle(ctx, clock_c, 8);
+      graphics_draw_line(ctx, clock_c, GPoint(clock_c.x, clock_c.y - 5));     // minute hand
+      graphics_draw_line(ctx, clock_c, GPoint(clock_c.x + 4, clock_c.y + 2)); // hour hand
+      return;
+    }
+#endif
+
+#ifndef PBL_PLATFORM_APLITE
     if (kind == SECTION0_ROW_ADD_TASK) {
       // Mic platforms with the feature enabled only. Starts dictation via
       // menu_select_click.
@@ -2559,6 +2606,8 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
 #ifndef PBL_PLATFORM_APLITE
     } else if (kind == SECTION0_ROW_STATS) {
       push_stats_window();
+    } else if (kind == SECTION0_ROW_SCHEDULE) {
+      push_schedule_window();
     } else if (kind == SECTION0_ROW_ADD_TASK) {
       start_add_task_dictation();
     } else if (kind == SECTION0_ROW_LIVE) {
@@ -3324,6 +3373,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       menu_layer_reload_data(s_menu_layer);
       update_empty_layer();
       refresh_scroll_state(true); // the selected row may now be different
+#ifndef PBL_PLATFORM_APLITE
+      schedule_refresh_if_open(); // rebuild the Schedule sub-page off the new list
+#endif
       break;
     }
     case MSG_HABIT_SYNC_START: {
@@ -3557,6 +3609,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *stats_enabled_tuple = dict_find(iterator, KEY_STATS_ENABLED);
       if (stats_enabled_tuple) {
         s_stats_enabled = stats_enabled_tuple->value->int32 != 0;
+      }
+      Tuple *schedule_enabled_tuple = dict_find(iterator, KEY_SCHEDULE_ENABLED);
+      if (schedule_enabled_tuple) {
+        s_schedule_enabled = schedule_enabled_tuple->value->int32 != 0;
       }
 #endif
       // Only re-applied when the value actually changed - this field is sent on
@@ -5211,6 +5267,185 @@ static void push_stats_window(void) {
 }
 #endif
 
+// ---------- schedule window ----------
+// A time-ordered view of today's tasks: every s_tasks entry with a due_min
+// (a Super Productivity dueWithTime), sorted ascending, like the desktop's
+// schedule-day panel. Pure watch-side - no phone request, it just re-reads
+// the already-synced list. Select toggles done, long-select toggles time
+// tracking, matching the main list. aplite-excluded (RAM), same as Stats.
+#ifndef PBL_PLATFORM_APLITE
+static Window *s_schedule_window;
+static MenuLayer *s_schedule_menu_layer;
+static TextLayer *s_schedule_empty_layer;
+static StatusBarLayer *s_schedule_status_bar;
+// s_tasks indices with a due_min, sorted by due_min ascending. Rebuilt on
+// open and whenever a sync replaces the list (schedule_refresh_if_open).
+static int s_schedule_order[MAX_TASKS];
+static int s_schedule_count = 0;
+
+static void schedule_rebuild(void) {
+  s_schedule_count = 0;
+  for (int i = 0; i < s_task_count && s_schedule_count < MAX_TASKS; i++) {
+    if (s_tasks[i].due_min >= 0) {
+      s_schedule_order[s_schedule_count++] = i;
+    }
+  }
+  // Insertion sort by due_min - stable, so same-time tasks keep the phone's
+  // order. s_schedule_count is small (today's timed tasks only).
+  for (int a = 1; a < s_schedule_count; a++) {
+    int key = s_schedule_order[a];
+    int key_min = s_tasks[key].due_min;
+    int b = a - 1;
+    while (b >= 0 && s_tasks[s_schedule_order[b]].due_min > key_min) {
+      s_schedule_order[b + 1] = s_schedule_order[b];
+      b--;
+    }
+    s_schedule_order[b + 1] = key;
+  }
+}
+
+static Task *schedule_task_at(MenuIndex index) {
+  if (index.section != 0 || (int)index.row >= s_schedule_count) {
+    return NULL;
+  }
+  int ti = s_schedule_order[index.row];
+  if (ti < 0 || ti >= s_task_count) {
+    return NULL;
+  }
+  return &s_tasks[ti];
+}
+
+static void schedule_update_empty_layer(void) {
+  bool show_empty = (s_schedule_count == 0);
+  layer_set_hidden(text_layer_get_layer(s_schedule_empty_layer), !show_empty);
+  layer_set_hidden(menu_layer_get_layer(s_schedule_menu_layer), show_empty);
+}
+
+// Rebuild + redraw the sub-page if it's currently loaded (menu layer alive).
+static void schedule_refresh_if_open(void) {
+  if (!s_schedule_menu_layer) {
+    return;
+  }
+  schedule_rebuild();
+  menu_layer_reload_data(s_schedule_menu_layer);
+  schedule_update_empty_layer();
+}
+
+static uint16_t schedule_menu_get_num_sections(MenuLayer *menu_layer, void *context) {
+  return 1;
+}
+
+static uint16_t schedule_menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+  return (uint16_t)s_schedule_count;
+}
+
+static void schedule_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
+  Task *task = schedule_task_at(*cell_index);
+  if (!task) {
+    return;
+  }
+  bool is_selected = menu_layer_get_selected_index(s_schedule_menu_layer).row == cell_index->row;
+  // Reuse the today-list row renderer - same look (dim-on-done, "@ 9:41 AM"
+  // due subtitle, tracked/estimate time), with the project name shown
+  // right-aligned since this view crosses projects.
+  draw_task_row(ctx, layer_get_bounds(cell_layer), task, is_selected, true);
+}
+
+static void schedule_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  backlight_touch();
+#if defined(PBL_TOUCH)
+  if (consume_tap_select_guard()) {
+    return;
+  }
+#endif
+  Task *task = schedule_task_at(*cell_index);
+  if (!task) {
+    return;
+  }
+  // Immediate optimistic toggle (no double-click-for-notes window here) - the
+  // next full sync corrects it, same as the aplite path in menu_select_click.
+  task->done = !task->done;
+  save_tasks();
+  menu_layer_reload_data(s_schedule_menu_layer);
+  send_task_toggle(task);
+}
+
+static void schedule_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+  backlight_touch();
+  Task *task = schedule_task_at(*cell_index);
+  if (!task || task->done) {
+    return;
+  }
+  bool already_tracking_this = s_tracking_task_id[0] != '\0' &&
+                                strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
+  stop_tracking_and_report();
+  if (!already_tracking_this) {
+    start_tracking(task);
+  }
+  menu_layer_reload_data(s_schedule_menu_layer);
+}
+
+static void schedule_menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, MenuIndex old_index, void *context) {
+  backlight_touch();
+}
+
+static void schedule_window_load(Window *window) {
+  Layer *window_layer = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(window_layer);
+  backlight_touch();
+
+  const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
+  s_schedule_status_bar = status_bar_layer_create();
+  layer_add_child(window_layer, status_bar_layer_get_layer(s_schedule_status_bar));
+
+  GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
+                                bounds.size.w, bounds.size.h - status_bar_height);
+
+  schedule_rebuild();
+
+  s_schedule_menu_layer = menu_layer_create(content_bounds);
+  menu_layer_set_callbacks(s_schedule_menu_layer, NULL, (MenuLayerCallbacks) {
+    .get_num_sections = schedule_menu_get_num_sections,
+    .get_num_rows = schedule_menu_get_num_rows,
+    .draw_row = schedule_menu_draw_row,
+    .select_click = schedule_menu_select_click,
+    .select_long_click = schedule_menu_select_long_click,
+    .selection_changed = schedule_menu_selection_changed,
+  });
+  menu_layer_set_click_config_onto_window(s_schedule_menu_layer, window);
+  layer_add_child(window_layer, menu_layer_get_layer(s_schedule_menu_layer));
+
+  s_schedule_empty_layer = text_layer_create(content_bounds);
+  text_layer_set_text_alignment(s_schedule_empty_layer, GTextAlignmentCenter);
+  text_layer_set_font(s_schedule_empty_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
+  text_layer_set_text(s_schedule_empty_layer, "Nothing scheduled for today.");
+  layer_add_child(window_layer, text_layer_get_layer(s_schedule_empty_layer));
+
+  schedule_update_empty_layer();
+}
+
+static void schedule_window_unload(Window *window) {
+  menu_layer_destroy(s_schedule_menu_layer);
+  s_schedule_menu_layer = NULL;
+  text_layer_destroy(s_schedule_empty_layer);
+  s_schedule_empty_layer = NULL;
+  status_bar_layer_destroy(s_schedule_status_bar);
+  s_schedule_status_bar = NULL;
+}
+
+// Created once and reused, like push_habits_window / push_stats_window.
+static void push_schedule_window(void) {
+  if (!s_schedule_window) {
+    s_schedule_window = window_create();
+    window_set_window_handlers(s_schedule_window, (WindowHandlers) {
+      .load = schedule_window_load,
+      .unload = schedule_window_unload,
+    });
+  }
+  window_stack_push(s_schedule_window, true);
+}
+#endif
+
 // ---------- live tracking window ----------
 
 #ifndef PBL_PLATFORM_APLITE
@@ -5707,6 +5942,9 @@ static void deinit(void) {
 #ifndef PBL_PLATFORM_APLITE
   if (s_notes_window) {
     window_destroy(s_notes_window);
+  }
+  if (s_schedule_window) {
+    window_destroy(s_schedule_window);
   }
   stop_live_tick();
   if (s_live_window) {

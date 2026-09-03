@@ -31,6 +31,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var enableAddTask = options.enableAddTask !== false;
   var enableProjects = options.enableProjects !== false;
   var enableStats = options.enableStats !== false;
+  var enableSchedule = options.enableSchedule !== false;
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
   var overtimeRepeat = !!options.overtimeRepeat;
@@ -299,6 +300,16 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableSchedule" type="checkbox"' + (enableSchedule ? ' checked' : '') + '>\n' +
+'    <label for="enableSchedule">Enable Schedule</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Shows a Schedule row on the watch: today\'s tasks that have a set time,\n' +
+'    listed in time order like the desktop\'s schedule panel. Select toggles\n' +
+'    done, long-press starts/stops tracking.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableAddTask" type="checkbox"' + (enableAddTask ? ' checked' : '') + '>\n' +
 '    <label for="enableAddTask">Enable Add Task (voice)</label>\n' +
 '  </div>\n' +
@@ -423,6 +434,7 @@ autoSyncIntervalOptions + '\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
 '      enableProjects: document.getElementById(\'enableProjects\').checked,\n' +
 '      enableStats: document.getElementById(\'enableStats\').checked,\n' +
+'      enableSchedule: document.getElementById(\'enableSchedule\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +

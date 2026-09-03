@@ -360,6 +360,11 @@ function sendStatus(code, message) {
     // s_stats_enabled / SECTION0_ROW_STATS. Same always-included,
     // next-sync-cycle self-correction reasoning as the flags above.
     STATS_ENABLED: config.enableStats !== false ? 1 : 0,
+    // Schedule page row (default on, like Stats). Drives main.c's
+    // s_schedule_enabled / SECTION0_ROW_SCHEDULE - a time-ordered view of
+    // today's tasks that carry a dueWithTime. Same always-included,
+    // next-sync-cycle self-correction reasoning as the flags above.
+    SCHEDULE_ENABLED: config.enableSchedule !== false ? 1 : 0,
     // 0 = system default, -1 = always on, N>0 = relight-and-hold for N
     // seconds after any button press - see main.c's own s_backlight_mode
     // comment. Always included (not conditionally), same reasoning as the
@@ -2516,6 +2521,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableAddTask: config.enableAddTask !== false,
       enableProjects: config.enableProjects !== false,
       enableStats: config.enableStats !== false,
+      enableSchedule: config.enableSchedule !== false,
       backlightMode: config.backlightMode || 0,
       touchNav: !!config.touchNav,
       overtimeNotify: !!config.overtimeNotify,
@@ -2589,6 +2595,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableAddTask: !!result.enableAddTask,
     enableProjects: !!result.enableProjects,
     enableStats: !!result.enableStats,
+    enableSchedule: !!result.enableSchedule,
     autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,
