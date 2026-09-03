@@ -714,7 +714,7 @@ function handleStatsRequest() {
   }
   var stats = store.computeStats(loadState());
   var lines = stats.projects.map(function (p) {
-    return String(p.title).replace(/[\t\n]/g, ' ').slice(0, 40) + '\t' + p.taskCount;
+    return String(p.title).replace(/[\t\n]/g, ' ').slice(0, 40) + ' - ' + p.taskCount;
   }).join('\n');
   if (lines.length > 600) {
     lines = lines.slice(0, 600);
