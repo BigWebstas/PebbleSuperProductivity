@@ -1269,6 +1269,7 @@ function computeStats(state) {
   var today = todayStr();
   var estimateRemainingMs = 0;
   var workedTodayMs = 0;
+  var completedTodayCount = 0;
 
   Object.keys(tasks).forEach(function (id) {
     var t = tasks[id];
@@ -1282,7 +1283,7 @@ function computeStats(state) {
       workedTodayMs += (t.timeSpentOnDay && t.timeSpentOnDay[today]) || 0;
     }
 
-    if (!isMainTask(t) || t.isDone) {
+    if (!isMainTask(t)) {
       return;
     }
     var plannedToday = taskIsPlannedForToday(t, today) || subIds.some(function (sid) {
@@ -1291,13 +1292,25 @@ function computeStats(state) {
     if (!plannedToday) {
       return;
     }
+    // For a task with subtasks, count/estimate each subtask (SP treats the
+    // parent as a roll-up); otherwise the task itself. "completed today" is
+    // the done items among today's list - the desktop's "N of M done" - not
+    // doneOn-dated, since doneOn only survives this replay for tasks
+    // completed via the watch (see isHiddenDone's own comment).
     if (hasSubs) {
       subIds.forEach(function (sid) {
         var s = tasks[sid];
-        if (s && !s.isDone) {
+        if (!s) {
+          return;
+        }
+        if (s.isDone) {
+          completedTodayCount++;
+        } else {
           estimateRemainingMs += Math.max(0, (s.timeEstimate || 0) - (s.timeSpent || 0));
         }
       });
+    } else if (t.isDone) {
+      completedTodayCount++;
     } else {
       estimateRemainingMs += Math.max(0, (t.timeEstimate || 0) - (t.timeSpent || 0));
     }
@@ -1321,6 +1334,7 @@ function computeStats(state) {
   return {
     estimateRemainingMs: estimateRemainingMs,
     workedTodayMs: workedTodayMs,
+    completedTodayCount: completedTodayCount,
     projects: projects,
   };
 }

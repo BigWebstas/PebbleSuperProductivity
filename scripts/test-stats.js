@@ -47,6 +47,7 @@ check('empty state -> zeros and no projects', () => {
   const stats = store.computeStats(store.emptyState());
   assert.strictEqual(stats.estimateRemainingMs, 0);
   assert.strictEqual(stats.workedTodayMs, 0);
+  assert.strictEqual(stats.completedTodayCount, 0);
   assert.deepStrictEqual(stats.projects, []);
 });
 
@@ -60,13 +61,34 @@ check('estimate remaining sums (estimate - spent), clamped at 0, today undone on
   assert.strictEqual(store.computeStats(s).estimateRemainingMs, 3000000 + 1800000);
 });
 
-check('a done task counts toward worked-time but not estimate-remaining', () => {
+check('a done today task: worked-time yes, estimate no, completed-today +1', () => {
   const s = build([
     addTask({ id: 'a', title: 'A', dueDay: today, isDone: true, timeEstimate: 3600000, timeSpent: 600000, timeSpentOnDay: dayMap(600000) }),
+    addTask({ id: 'b', title: 'B', dueDay: today, isDone: false, timeEstimate: 900000, timeSpent: 0 }),
   ]);
   const stats = store.computeStats(s);
-  assert.strictEqual(stats.estimateRemainingMs, 0);
+  assert.strictEqual(stats.estimateRemainingMs, 900000);
   assert.strictEqual(stats.workedTodayMs, 600000);
+  assert.strictEqual(stats.completedTodayCount, 1);
+});
+
+check('completed-today counts done subtasks of a today parent, not the parent itself', () => {
+  const s = build([
+    addTask({ id: 'p', title: 'P', dueDay: today, subTaskIds: ['s1', 's2', 's3'] }),
+    addTask({ id: 's1', title: 'S1', parentId: 'p', isDone: true }),
+    addTask({ id: 's2', title: 'S2', parentId: 'p', isDone: true }),
+    addTask({ id: 's3', title: 'S3', parentId: 'p', isDone: false, timeEstimate: 300000 }),
+  ]);
+  const stats = store.computeStats(s);
+  assert.strictEqual(stats.completedTodayCount, 2);
+  assert.strictEqual(stats.estimateRemainingMs, 300000);
+});
+
+check('a done task not on today list is not counted', () => {
+  const s = build([
+    addTask({ id: 'a', title: 'A', isDone: true }),
+  ]);
+  assert.strictEqual(store.computeStats(s).completedTodayCount, 0);
 });
 
 check('worked today sums timeSpentOnDay[today] across leaf tasks only', () => {

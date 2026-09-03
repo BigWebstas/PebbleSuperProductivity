@@ -56,9 +56,11 @@ Not on `aplite`.
 
 - **Estimate remaining** — unfinished estimated time across today's tasks
 - **Worked today** — time tracked today across every task
-- **Current session** — how long the watch's current tracking run has lasted
-  (the desktop's "time without a break" is local to the desktop and can't
-  sync, so the watch shows its own session here)
+- **Current session** — how long the active tracking run has lasted: the
+  watch's own, or a remote device's when the watch isn't tracking (the
+  desktop's "time without a break" is local to the desktop and can't sync,
+  so this is the closest number the watch has)
+- **Completed today** — tasks done among today's list
 - **Projects** — every project with its open-task count
 
 ### Touch (Pebble Time 2)

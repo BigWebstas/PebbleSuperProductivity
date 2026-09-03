@@ -69,7 +69,7 @@ var MSG_TASK_PLAN_TODAY = 39;       // watch -> phone: TASK_ID (set the task's d
 // two headline durations as ms, plus STATS_TEXT - the project list
 // preformatted as "Title\tcount" lines the watch prints verbatim.
 var MSG_STATS_REQUEST = 40;         // watch -> phone: (no keys)
-var MSG_STATS_DATA = 41;            // phone -> watch: STATS_EST_REMAINING_MS + STATS_WORKED_TODAY_MS + STATS_TEXT
+var MSG_STATS_DATA = 41;            // phone -> watch: STATS_EST_REMAINING_MS + STATS_WORKED_TODAY_MS + STATS_DONE_TODAY + STATS_TEXT
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -722,6 +722,7 @@ function handleStatsRequest() {
     MSG_TYPE: MSG_STATS_DATA,
     STATS_EST_REMAINING_MS: Math.min(stats.estimateRemainingMs, 2e9),
     STATS_WORKED_TODAY_MS: Math.min(stats.workedTodayMs, 2e9),
+    STATS_DONE_TODAY: stats.completedTodayCount,
     STATS_TEXT: lines,
   }, function () {}, function (e) {
     console.log('[pkjs] giving up on STATS_DATA after retries: ' + JSON.stringify(e));

@@ -60,6 +60,7 @@
 #define KEY_STATS_ENABLED MESSAGE_KEY_STATS_ENABLED
 #define KEY_STATS_EST_REMAINING_MS MESSAGE_KEY_STATS_EST_REMAINING_MS
 #define KEY_STATS_WORKED_TODAY_MS MESSAGE_KEY_STATS_WORKED_TODAY_MS
+#define KEY_STATS_DONE_TODAY MESSAGE_KEY_STATS_DONE_TODAY
 #define KEY_STATS_TEXT MESSAGE_KEY_STATS_TEXT
 
 // MSG_TYPE values, watch <-> phone.
@@ -544,6 +545,7 @@ static bool s_stats_enabled = true;
 static char s_stats_projects[640] = "";
 static int s_stats_est_remaining_ms = 0;
 static int s_stats_worked_today_ms = 0;
+static int s_stats_done_today = 0;
 static bool s_stats_have_data = false;
 #endif
 
@@ -3427,9 +3429,11 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     case MSG_STATS_DATA: {
       Tuple *est_tuple = dict_find(iterator, KEY_STATS_EST_REMAINING_MS);
       Tuple *worked_tuple = dict_find(iterator, KEY_STATS_WORKED_TODAY_MS);
+      Tuple *done_tuple = dict_find(iterator, KEY_STATS_DONE_TODAY);
       Tuple *text_tuple = dict_find(iterator, KEY_STATS_TEXT);
       s_stats_est_remaining_ms = est_tuple ? est_tuple->value->int32 : 0;
       s_stats_worked_today_ms = worked_tuple ? worked_tuple->value->int32 : 0;
+      s_stats_done_today = done_tuple ? done_tuple->value->int32 : 0;
       if (text_tuple) {
         strncpy(s_stats_projects, text_tuple->value->cstring, sizeof(s_stats_projects) - 1);
         s_stats_projects[sizeof(s_stats_projects) - 1] = '\0';
@@ -4902,12 +4906,14 @@ static void push_notes_window(void) {
 #ifndef PBL_PLATFORM_APLITE
 // A pinned section-0 row ("Stats", between Projects and Add Task) opens this
 // read-only scrollable summary: estimate remaining today, time worked today,
-// the current tracking session, then every project with its task count. The
-// phone sends the two durations plus a preformatted project block in one
-// MSG_STATS_DATA; the watch composes the visible text and reflows a
-// ScrollLayer/TextLayer, the notes-overlay shape minus the fetch state
-// machine. "Current session" is watch-local (s_tracking_start_epoch),
-// filled in whenever the text is (re)composed.
+// the current tracking session, tasks completed today, then every project
+// with its task count. The phone sends the two durations, the done count and
+// a preformatted project block in one MSG_STATS_DATA; the watch composes the
+// visible text and reflows a ScrollLayer/TextLayer, the notes-overlay shape
+// minus the fetch state machine. "Current session" is filled in whenever the
+// text is (re)composed - from the watch's own timer (s_tracking_start_epoch)
+// or, when the watch isn't tracking, from a remote device's live session
+// (s_presence_state / s_presence_elapsed_base).
 #define STATS_BODY_CAP 1200
 static Window *s_stats_window;
 static StatusBarLayer *s_stats_status_bar;
@@ -4925,22 +4931,29 @@ static void stats_compose_body(void) {
     s_stats_body[STATS_BODY_CAP - 1] = '\0';
     return;
   }
-  char est[24], worked[24], session[24];
+  char est[24], worked[24], session[40];
   format_duration_ms(s_stats_est_remaining_ms < 0 ? 0 : s_stats_est_remaining_ms, false, est, sizeof(est));
   format_duration_ms(s_stats_worked_today_ms < 0 ? 0 : s_stats_worked_today_ms, false, worked, sizeof(worked));
+  char session_dur[24];
   if (s_tracking_task_id[0] != '\0') {
     int elapsed_ms = (int)((time(NULL) - s_tracking_start_epoch) * 1000);
-    if (elapsed_ms < 0) {
-      elapsed_ms = 0;
-    }
-    format_duration_ms(elapsed_ms, false, session, sizeof(session));
+    format_duration_ms(elapsed_ms < 0 ? 0 : elapsed_ms, false, session_dur, sizeof(session_dur));
+    strncpy(session, session_dur, sizeof(session) - 1);
+    session[sizeof(session) - 1] = '\0';
+  } else if (s_presence_state == 1) {
+    // No watch timer running, but a remote device is - show that session.
+    int elapsed_ms = (int)((time(NULL) - s_presence_elapsed_base) * 1000);
+    format_duration_ms(elapsed_ms < 0 ? 0 : elapsed_ms, false, session_dur, sizeof(session_dur));
+    snprintf(session, sizeof(session), "%s (%s)", session_dur,
+             s_presence_device[0] != '\0' ? s_presence_device : "remote");
   } else {
     strncpy(session, "Not tracking", sizeof(session) - 1);
     session[sizeof(session) - 1] = '\0';
   }
   snprintf(s_stats_body, STATS_BODY_CAP,
-           "Estimate remaining\n%s\n\nWorked today\n%s\n\nCurrent session\n%s\n\nPROJECTS\n%s",
-           est, worked, session, s_stats_projects[0] != '\0' ? s_stats_projects : "None");
+           "Estimate remaining\n%s\n\nWorked today\n%s\n\nCurrent session\n%s\n\nCompleted today\n%d\n\nPROJECTS\n%s",
+           est, worked, session, s_stats_done_today,
+           s_stats_projects[0] != '\0' ? s_stats_projects : "None");
 }
 
 static void stats_render(void) {
