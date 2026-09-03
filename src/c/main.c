@@ -5146,15 +5146,15 @@ static void push_notes_window(void) {
 #ifndef PBL_PLATFORM_APLITE
 // A pinned section-0 row ("Stats", between Projects and Add Task) opens this
 // read-only scrollable summary: estimate remaining today, time worked today,
-// the current tracking session, tasks completed today, then every project
-// with its task count. The phone sends the two durations, the done count and
-// a preformatted "Name - count" project block in one MSG_STATS_DATA. A custom
-// layer inside a ScrollLayer draws each metric as a black label bar (white
-// text) with its value below in black - so the label reads as a heading and
-// the value as data. "Current session" is recomputed on every draw - from the
-// watch's own timer (s_tracking_start_epoch) or, when the watch isn't
-// tracking, a remote device's live session (s_presence_state /
-// s_presence_elapsed_base).
+// time tracked without a break, the current tracking session, tasks completed
+// today, then every project with its task count. The phone sends the two
+// durations, the done count and a preformatted "Name - count" project block in
+// one MSG_STATS_DATA. A custom layer inside a ScrollLayer draws each metric as a
+// black label bar (white text) with its value below in black - so the label
+// reads as a heading and the value as data. "Without a break" and "Current
+// session" are recomputed on every draw from watch-local state (s_break_*,
+// s_tracking_start_epoch), or - for the session - a remote device's live
+// presence (s_presence_state / s_presence_elapsed_base).
 #ifdef PBL_PLATFORM_EMERY
 #define STATS_LABEL_FONT FONT_KEY_GOTHIC_24_BOLD
 #define STATS_VALUE_FONT FONT_KEY_GOTHIC_28_BOLD
@@ -5270,8 +5270,8 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   int16_t y = 0;
   y = stats_draw_metric(ctx, y, w, "Estimate remaining", s_stats_est);
   y = stats_draw_metric(ctx, y, w, "Worked today", s_stats_worked);
-  y = stats_draw_metric(ctx, y, w, "Current session", s_stats_session);
   y = stats_draw_metric(ctx, y, w, "Without a break", s_stats_nobreak);
+  y = stats_draw_metric(ctx, y, w, "Current session", s_stats_session);
   y = stats_draw_metric(ctx, y, w, "Completed today", done_buf);
 
   graphics_context_set_fill_color(ctx, GColorBlack);
