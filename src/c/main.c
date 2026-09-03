@@ -2648,6 +2648,7 @@ static void stop_tracking_and_report(void) {
     cancel_unpin_timer();
     s_unpin_timer = app_timer_register(UNPIN_GRACE_MS, unpin_timer_callback, NULL);
   }
+  live_window_refresh(); // pop the detail screen if it was open on this session
 #endif
   stop_tracking_tick();
 }
@@ -2721,9 +2722,10 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // A remote presence session riding the pinned "TRACKING" section - open its
-  // detail screen, same as tapping the dark-blue LIVE row would.
-  if (remote_in_pinned_section() && cell_index->section == 1) {
+  // The pinned "TRACKING" row (section 1) - Select opens the full-screen
+  // tracking detail: the local session, or a remote device's (same screen the
+  // dark-blue LIVE row opens). Select there stops the timer.
+  if (cell_index->section == 1 && (s_tracking_task_id[0] != '\0' || remote_in_pinned_section())) {
     push_live_window();
     return;
   }
@@ -5542,13 +5544,62 @@ static void stop_live_tick(void) {
   }
 }
 
-// Rewrites the live window's text from the current s_presence_* state, and
-// (re)arms the 1s elapsed tick only while the session is actively tracking.
-// A no-op unless the live window is the top window. State 0 pops it.
+// Fills the elapsed layer: "spent / estimate" (est_ms > 0) or a running
+// H:MM:SS clock, with the font sized to match. Shared by the local and remote
+// branches of live_window_refresh. `buf` must outlive the call (a static).
+static void live_set_elapsed(char *buf, size_t bufsize, int spent_ms, int est_ms, int session_s) {
+  if (session_s < 0) {
+    session_s = 0;
+  }
+  if (est_ms > 0) {
+    // A step down in font size - "spent / estimate" is too wide for GOTHIC_28
+    // on a 144px watch.
+    char spent_text[20], estimate_text[16];
+    format_duration_ms(spent_ms + session_s * 1000, false, spent_text, sizeof(spent_text));
+    format_duration_ms(est_ms, false, estimate_text, sizeof(estimate_text));
+    snprintf(buf, bufsize, "%s / %s", spent_text, estimate_text);
+    text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+  } else {
+    int h = session_s / 3600, m = (session_s % 3600) / 60, s = session_s % 60;
+    if (h > 0) {
+      snprintf(buf, bufsize, "%d:%02d:%02d", h, m, s);
+    } else {
+      snprintf(buf, bufsize, "%d:%02d", m, s);
+    }
+    text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
+  }
+  text_layer_set_text(s_live_elapsed_layer, buf);
+  layer_set_hidden(text_layer_get_layer(s_live_elapsed_layer), false);
+}
+
+// Rewrites the tracking-detail window's text. Two sources: this watch's own
+// timer (s_tracking_*) when it's tracking, otherwise a remote device's presence
+// session (s_presence_*). (Re)arms the 1s elapsed tick while tracking. A no-op
+// unless the window is on top; pops when nothing is being tracked anywhere.
 static void live_window_refresh(void) {
   if (!s_live_window || window_stack_get_top_window() != s_live_window) {
     return;
   }
+  static char elapsed_buf[32];
+
+  if (s_tracking_task_id[0] != '\0') {
+    Task *t = find_task_by_id(s_tracking_task_id);
+    if (!t) {
+      stop_live_tick();
+      window_stack_pop(true);
+      return;
+    }
+    text_layer_set_text(s_live_state_layer, "Tracking");
+    text_layer_set_text(s_live_task_layer, t->title);
+    live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), t->time_spent_ms, t->time_estimate_ms,
+                     (int)(time(NULL) - s_tracking_start_epoch));
+    text_layer_set_text(s_live_hint_layer, "Select to stop");
+    if (!s_live_tick_timer) {
+      s_live_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, live_tick_callback, NULL);
+    }
+    return;
+  }
+
   if (s_presence_state == 0) {
     stop_live_tick();
     window_stack_pop(true);
@@ -5558,35 +5609,9 @@ static void live_window_refresh(void) {
   text_layer_set_text(s_live_state_layer, presence_state_phrase());
   text_layer_set_text(s_live_task_layer, s_presence_task);
 
-  static char elapsed_buf[32];
   if (s_presence_state == 1) {
-    int total_s = (int)(time(NULL) - s_presence_elapsed_base);
-    if (total_s < 0) {
-      total_s = 0;
-    }
-    if (s_presence_estimate_ms > 0) {
-      // "spent / estimate" like a task row: synced time-spent plus this
-      // session's running elapsed, over the estimate. A step down in font
-      // size - the combined string is too wide for GOTHIC_28 on a 144px watch.
-      char spent_text[20];
-      format_duration_ms(s_presence_spent_ms + total_s * 1000, false, spent_text, sizeof(spent_text));
-      char estimate_text[16];
-      format_duration_ms(s_presence_estimate_ms, false, estimate_text, sizeof(estimate_text));
-      snprintf(elapsed_buf, sizeof(elapsed_buf), "%s / %s", spent_text, estimate_text);
-      text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
-    } else {
-      int h = total_s / 3600;
-      int m = (total_s % 3600) / 60;
-      int s = total_s % 60;
-      if (h > 0) {
-        snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d:%02d", h, m, s);
-      } else {
-        snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d", m, s);
-      }
-      text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
-    }
-    text_layer_set_text(s_live_elapsed_layer, elapsed_buf);
-    layer_set_hidden(text_layer_get_layer(s_live_elapsed_layer), false);
+    live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), s_presence_spent_ms, s_presence_estimate_ms,
+                     (int)(time(NULL) - s_presence_elapsed_base));
     if (!s_live_tick_timer) {
       s_live_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, live_tick_callback, NULL);
     }
@@ -5606,12 +5631,20 @@ static void live_window_refresh(void) {
 
 static void live_tick_callback(void *data) {
   s_live_tick_timer = NULL;
-  if (s_presence_state == 1) {
+  if (s_tracking_task_id[0] != '\0' || s_presence_state == 1) {
     live_window_refresh(); // re-arms the timer, or stops if the window closed
   }
 }
 
 static void live_window_select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_tracking_task_id[0] != '\0') {
+    // stop_tracking_and_report() ends with live_window_refresh(), which pops
+    // this screen once nothing is tracking.
+    stop_tracking_and_report();
+    menu_layer_reload_data(s_menu_layer);
+    refresh_scroll_state(true);
+    return;
+  }
   if (s_presence_can_stop && !s_presence_stopping) {
     s_presence_stopping = true;
     send_presence_stop();
@@ -5683,7 +5716,7 @@ static void live_window_unload(Window *window) {
 // Created once, reused (only its layers are rebuilt each visit) - matches
 // push_habits_window / push_notes_window.
 static void push_live_window(void) {
-  if (s_presence_state == 0) {
+  if (s_presence_state == 0 && s_tracking_task_id[0] == '\0') {
     return;
   }
   if (!s_live_window) {
