@@ -1429,6 +1429,35 @@ static int16_t title_natural_width(const char *title) {
   return size.w;
 }
 
+#ifndef PBL_PLATFORM_APLITE
+static int16_t title_natural_width_font(const char *title, GFont font) {
+  GSize size = graphics_text_layout_get_content_size(
+      title, font, GRect(0, 0, 2000, 100),
+      GTextOverflowModeFill, GTextAlignmentLeft);
+  return size.w;
+}
+
+// Draws `text` in `box`: left-aligned with a trailing ellipsis normally, or -
+// when `marquee` is set - as a looping two-copy horizontal scroll offset by
+// s_scroll_offset_px (whose timer refresh_scroll_state owns). Used by the
+// live-tracking presence rows; the task rows have their own inline copy.
+static void draw_marquee_title(GContext *ctx, GRect box, const char *text, GFont font, bool marquee) {
+  if (marquee) {
+    int16_t natural_width = title_natural_width_font(text, font);
+    int16_t period = natural_width + SCROLL_GAP_PX;
+    int16_t x = -(s_scroll_offset_px % period);
+    graphics_draw_text(ctx, text, font,
+                        GRect(box.origin.x + x, box.origin.y, natural_width, box.size.h),
+                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, text, font,
+                        GRect(box.origin.x + x + period, box.origin.y, natural_width, box.size.h),
+                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  } else {
+    graphics_draw_text(ctx, text, font, box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+}
+#endif
+
 // Formats due_min (minutes since local midnight) as "@ 9:41 AM" / "@ 21:41",
 // respecting the watch's 12h/24h setting. The phone already sent local time.
 static void format_due_time(int due_min, char *out, size_t out_len) {
@@ -1493,6 +1522,25 @@ static void scroll_timer_callback(void *data) {
   s_scroll_timer = app_timer_register(SCROLL_INTERVAL_MS, scroll_timer_callback, NULL);
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// Whether the currently selected row is a live-tracking presence title (the
+// dark-blue LIVE strip, or the remote row in the pinned "TRACKING" section) -
+// the two rows that draw s_presence_task and so can also want a marquee.
+static bool selected_row_is_presence_title(void) {
+  if (s_presence_task[0] == '\0') {
+    return false;
+  }
+  MenuIndex sel = menu_layer_get_selected_index(s_menu_layer);
+  if (sel.section == 0 && section0_row_kind((int)sel.row) == SECTION0_ROW_LIVE) {
+    return true;
+  }
+  if (remote_in_pinned_section() && sel.section == 1 && sel.row == 0) {
+    return true;
+  }
+  return false;
+}
+#endif
+
 // Starts/stops the marquee timer to match whether the selected row needs it,
 // optionally resetting the scroll position. Called on selection or list change.
 static void refresh_scroll_state(bool reset_offset) {
@@ -1503,6 +1551,11 @@ static void refresh_scroll_state(bool reset_offset) {
   GRect menu_bounds = layer_get_bounds(menu_layer_get_layer(s_menu_layer));
   int16_t available = menu_bounds.size.w - TITLE_BOX_X * 2;
   bool needs_scroll = selected && title_natural_width(selected->title) > available;
+#ifndef PBL_PLATFORM_APLITE
+  if (!needs_scroll && selected_row_is_presence_title()) {
+    needs_scroll = title_natural_width(s_presence_task) > available;
+  }
+#endif
   if (needs_scroll && !s_scroll_timer) {
     s_scroll_timer = app_timer_register(SCROLL_INTERVAL_MS, scroll_timer_callback, NULL);
   } else if (!needs_scroll) {
@@ -1735,9 +1788,11 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       int16_t live_title_h = live_tracking ? 26 : 22;
       GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, live_title_h, CHROME_STRIP_H),
                                bounds.size.w - TITLE_BOX_X * 2, live_title_h);
-      graphics_draw_text(ctx, s_presence_task[0] != '\0' ? s_presence_task : "Live tracking",
-                          fonts_get_system_font(live_title_font), title_box,
-                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      GFont live_font = fonts_get_system_font(live_title_font);
+      const char *live_title = s_presence_task[0] != '\0' ? s_presence_task : "Live tracking";
+      draw_marquee_title(ctx, title_box, live_title, live_font,
+                          is_selected && s_presence_task[0] != '\0' &&
+                          title_natural_width_font(live_title, live_font) > title_box.size.w);
       GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, live_title_h, CHROME_STRIP_H),
                                   bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
       graphics_draw_text(ctx, presence_state_phrase(), fonts_get_system_font(CHROME_FONT_KEY), subtitle_box,
@@ -1952,9 +2007,11 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_context_set_text_color(ctx, fg);
     GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                              bounds.size.w - TITLE_BOX_X * 2, HEADING_TITLE_H);
-    graphics_draw_text(ctx, s_presence_task[0] != '\0' ? s_presence_task : "Live tracking",
-                        fonts_get_system_font(TITLE_FONT_KEY), title_box,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    GFont pinned_font = fonts_get_system_font(TITLE_FONT_KEY);
+    const char *pinned_title = s_presence_task[0] != '\0' ? s_presence_task : "Live tracking";
+    draw_marquee_title(ctx, title_box, pinned_title, pinned_font,
+                        is_selected && s_presence_task[0] != '\0' &&
+                        title_natural_width_font(pinned_title, pinned_font) > title_box.size.w);
     char sub[52];
     if (s_presence_state == 1) {
       int total_s = (int)(time(NULL) - s_presence_elapsed_base);
