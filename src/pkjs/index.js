@@ -394,6 +394,8 @@ function sendStatus(code, message) {
     AUDIBLE_NOTIFICATIONS: (config.audibleNotifications != null
                               ? config.audibleNotifications
                               : config.overtimeSound) ? 1 : 0,
+    // Ping volume 0-100 (speaker_play_notes). Default 80.
+    AUDIBLE_VOLUME: config.audibleVolume != null ? config.audibleVolume : 80,
     // "Remind me to take a break" - minutes of tracked time on the watch,
     // banked across sessions until a real pause, before it shows a "time for a
     // break" banner. 0 = off. Drives main.c's s_break_reminder_min /
@@ -2518,6 +2520,7 @@ Pebble.addEventListener('showConfiguration', function () {
       overtimeRepeat: !!config.overtimeRepeat,
       audibleNotifications: config.audibleNotifications != null
         ? !!config.audibleNotifications : !!config.overtimeSound,
+      audibleVolume: config.audibleVolume != null ? config.audibleVolume : 80,
       breakReminderMin: config.breakReminderMin || 0,
       dueReminderMin: config.dueReminderMin || 0,
       liveTracking: !!config.liveTracking,
@@ -2595,6 +2598,8 @@ Pebble.addEventListener('webviewclosed', function (e) {
     overtimeNotify: !!result.overtimeNotify,
     overtimeRepeat: !!result.overtimeRepeat,
     audibleNotifications: !!result.audibleNotifications,
+    audibleVolume: isNaN(parseInt(result.audibleVolume, 10))
+      ? 80 : parseInt(result.audibleVolume, 10),
     breakReminderMin: parseInt(result.breakReminderMin, 10) || 0,
     dueReminderMin: parseInt(result.dueReminderMin, 10) || 0,
     liveTracking: !!result.liveTracking,

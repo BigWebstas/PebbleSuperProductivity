@@ -50,6 +50,7 @@
 #define KEY_OVERTIME_NOTIFY_ENABLED MESSAGE_KEY_OVERTIME_NOTIFY_ENABLED
 #define KEY_OVERTIME_REPEAT_ENABLED MESSAGE_KEY_OVERTIME_REPEAT_ENABLED
 #define KEY_AUDIBLE_NOTIFICATIONS MESSAGE_KEY_AUDIBLE_NOTIFICATIONS
+#define KEY_AUDIBLE_VOLUME MESSAGE_KEY_AUDIBLE_VOLUME
 #define KEY_BREAK_REMINDER_MIN MESSAGE_KEY_BREAK_REMINDER_MIN
 #define KEY_DUE_REMINDER_MIN MESSAGE_KEY_DUE_REMINDER_MIN
 #define KEY_PRESENCE_STATE MESSAGE_KEY_PRESENCE_STATE
@@ -682,6 +683,9 @@ static bool s_overtime_repeat_enabled = false;
 // PBL_SPEAKER hardware (Pebble Time 2) can honour it; the call is compiled out
 // everywhere else. Respects the watch's system mute.
 static bool s_audible_notify = false;
+// config.audibleVolume, 0-100 (speaker_play_notes' volume arg). Default matches
+// the pre-slider hardcoded value.
+static int s_audible_volume = 80;
 // Live tracking presence (config.liveTracking, MSG_PRESENCE_*). Opt-in,
 // aplite-excluded. Shows what ANOTHER device is tracking as a "LIVE" row in
 // section 0 plus a detail window; Select in that window asks the phone to stop
@@ -1415,13 +1419,14 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   }
 #ifndef PBL_PLATFORM_APLITE
   // The pinned "TRACKING" header - a thin green strip, quieter than the bold
-  // project headers (TRACKING_FONT_KEY is one step down from HEADING_FONT_KEY).
+  // project headers. CHROME_FONT_KEY (a step below TRACKING_FONT_KEY) so the
+  // longer "TRACKING/FOCUSING" label still fits the strip on a 144px watch.
   if (has_pinned_row() && section_index == 1) {
     GRect hb = layer_get_bounds(cell_layer);
     graphics_context_set_fill_color(ctx, GColorGreen);
     graphics_fill_rect(ctx, hb, 0, GCornerNone);
     graphics_context_set_text_color(ctx, GColorBlack);
-    draw_text(ctx, "TRACKING", TRACKING_FONT_KEY, GRect(TITLE_BOX_X, 0, hb.size.w - TITLE_BOX_X * 2, hb.size.h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+    draw_text(ctx, "TRACKING/FOCUSING", CHROME_FONT_KEY, GRect(TITLE_BOX_X, 0, hb.size.w - TITLE_BOX_X * 2, hb.size.h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     graphics_context_set_stroke_color(ctx, GColorBlack);
     graphics_draw_line(ctx, GPoint(0, hb.size.h - 1), GPoint(hb.size.w, hb.size.h - 1));
     return;
@@ -2425,7 +2430,8 @@ static void banner_ping(void) {
     { .midi_note = 84, .waveform = SpeakerWaveformSine, .duration_ms = 90, .velocity = 0 },
     { .midi_note = 88, .waveform = SpeakerWaveformSine, .duration_ms = 110, .velocity = 0 },
   };
-  speaker_play_notes(notes, ARRAY_LENGTH(notes), 80);
+  speaker_play_notes(notes, ARRAY_LENGTH(notes),
+                     s_audible_volume < 0 ? 0 : (s_audible_volume > 100 ? 100 : s_audible_volume));
 #endif
 }
 
@@ -3765,6 +3771,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         }
       }
       s_audible_notify = tuple_int(iterator, KEY_AUDIBLE_NOTIFICATIONS, s_audible_notify) != 0;
+      s_audible_volume = tuple_int(iterator, KEY_AUDIBLE_VOLUME, s_audible_volume);
 #ifdef BREAK_REMINDER
       // "Remind me to take a break" interval in minutes (0 = off). Re-sent every
       // sync like the flags above; the tally itself lives in persist.

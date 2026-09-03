@@ -36,6 +36,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var overtimeRepeat = !!options.overtimeRepeat;
   var audibleNotifications = options.audibleNotifications != null
     ? !!options.audibleNotifications : !!options.overtimeSound;
+  var audibleVolume = options.audibleVolume != null ? options.audibleVolume : 80;
   var breakReminderMin = options.breakReminderMin || 0;
   var dueReminderMin = options.dueReminderMin || 0;
   var liveTracking = !!options.liveTracking;
@@ -121,7 +122,9 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  .checkbox-row input { width: auto; margin: 0; }\n' +
 '  .checkbox-row label { display: inline; margin: 0; font-weight: normal; }\n' +
 '  .checkbox-row.sub { margin-left: 26px; margin-top: 8px; }\n' +
-'  p.hint.sub { margin-left: 26px; }\n' +
+'  p.hint.sub, label.sub { margin-left: 26px; }\n' +
+'  input[type=range] { padding: 0; border: none; background: none; width: calc(100% - 26px); margin-left: 26px; }\n' +
+'  input:disabled, input[type=range]:disabled { opacity: 0.4; }\n' +
 '  button { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; }\n' +
 '  button.secondary { background: var(--btn-2-bg); color: var(--btn-2-fg); margin-top: 8px; }\n' +
 '  button.danger { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); }\n' +
@@ -246,6 +249,9 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    other watches just vibrate. Respects the watch\'s system mute\n' +
 '    (Settings &rarr; Notifications).\n' +
 '  </p>\n' +
+'\n' +
+'  <label for="audibleVolume" class="sub">Ping volume: <span id="audibleVolumeOut">' + audibleVolume + '</span></label>\n' +
+'  <input class="sub" id="audibleVolume" type="range" min="0" max="100" step="5" value="' + audibleVolume + '"' + (audibleNotifications ? '' : ' disabled') + '>\n' +
 '\n' +
 '  <label for="breakReminderMin">Remind me to take a break</label>\n' +
 '  <select id="breakReminderMin">\n' +
@@ -434,6 +440,16 @@ taskEstimateOptions + '\n' +
 '    sync();\n' +
 '  })();\n' +
 '\n' +
+'  // Live volume readout; the slider only applies while audible notifications\n' +
+'  // are on, so grey it with the checkbox.\n' +
+'  (function () {\n' +
+'    var toggle = document.getElementById(\'audibleNotifications\');\n' +
+'    var slider = document.getElementById(\'audibleVolume\');\n' +
+'    var out = document.getElementById(\'audibleVolumeOut\');\n' +
+'    slider.addEventListener(\'input\', function () { out.textContent = slider.value; });\n' +
+'    toggle.addEventListener(\'change\', function () { slider.disabled = !toggle.checked; });\n' +
+'  })();\n' +
+'\n' +
 '  document.getElementById(\'openLoginBtn\').addEventListener(\'click\', function () {\n' +
 '    var baseUrl = document.getElementById(\'baseUrl\').value.replace(/\\/+$/, \'\');\n' +
 '    // sync.super-productivity.com\'s own root page is the login/"Connect"\n' +
@@ -473,6 +489,7 @@ taskEstimateOptions + '\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +
 '      audibleNotifications: document.getElementById(\'audibleNotifications\').checked,\n' +
+'      audibleVolume: parseInt(document.getElementById(\'audibleVolume\').value, 10),\n' +
 '      breakReminderMin: parseInt(document.getElementById(\'breakReminderMin\').value, 10) || 0,\n' +
 '      dueReminderMin: parseInt(document.getElementById(\'dueReminderMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
