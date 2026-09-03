@@ -5898,8 +5898,8 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
   }
   s_due_notified_min = soonest;
   char at[16];
-  format_due_time(soonest, at, sizeof(at));
-  snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text), "Due at %s", at);
+  format_due_time(soonest, at, sizeof(at)); // "@ 9:41 AM"
+  snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text), "Task due\n%s", at);
   show_top_banner(s_overtime_banner_text);
 }
 #endif
