@@ -35,6 +35,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
   var overtimeRepeat = !!options.overtimeRepeat;
+  var overtimeSound = !!options.overtimeSound;
   var liveTracking = !!options.liveTracking;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
@@ -223,6 +224,16 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    only once. Stops when you stop tracking.\n' +
 '  </p>\n' +
 '\n' +
+'  <div class="checkbox-row sub">\n' +
+'    <input id="overtimeSound" type="checkbox"' + (overtimeSound ? ' checked' : '') + (overtimeNotify ? '' : ' disabled') + '>\n' +
+'    <label for="overtimeSound">Also play a sound</label>\n' +
+'  </div>\n' +
+'  <p class="hint sub">\n' +
+'    Plays a short audible ping along with the banner. Only the Pebble\n' +
+'    Time 2 has a speaker - other watches ignore this. Respects the\n' +
+'    watch\'s system mute (Settings &rarr; Notifications).\n' +
+'  </p>\n' +
+'\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="liveTracking" type="checkbox"' + (liveTracking ? ' checked' : '') + '>\n' +
 '    <label for="liveTracking">Show live tracking from other devices</label>\n' +
@@ -385,15 +396,18 @@ autoSyncIntervalOptions + '\n' +
 '    location.href = \'pebblejs://close#\' + encoded;\n' +
 '  }\n' +
 '\n' +
-'  // "Repeat every 5 minutes" only makes sense while the parent\n' +
-'  // "Notify when a task runs over its estimate" is on - grey it out\n' +
-'  // (and clear it) otherwise. The watch ignores it in that case anyway.\n' +
+'  // The over-estimate sub-options ("Repeat every 5 minutes", "Also play a\n' +
+'  // sound") only make sense while the parent "Notify when a task runs over\n' +
+'  // its estimate" is on - grey them out (and clear them) otherwise. The\n' +
+'  // watch ignores them in that case anyway.\n' +
 '  (function () {\n' +
 '    var parent = document.getElementById(\'overtimeNotify\');\n' +
-'    var sub = document.getElementById(\'overtimeRepeat\');\n' +
+'    var subs = [document.getElementById(\'overtimeRepeat\'), document.getElementById(\'overtimeSound\')];\n' +
 '    function sync() {\n' +
-'      sub.disabled = !parent.checked;\n' +
-'      if (!parent.checked) { sub.checked = false; }\n' +
+'      subs.forEach(function (sub) {\n' +
+'        sub.disabled = !parent.checked;\n' +
+'        if (!parent.checked) { sub.checked = false; }\n' +
+'      });\n' +
 '    }\n' +
 '    parent.addEventListener(\'change\', sync);\n' +
 '    sync();\n' +
@@ -438,6 +452,7 @@ autoSyncIntervalOptions + '\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +
+'      overtimeSound: document.getElementById(\'overtimeSound\').checked,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +
