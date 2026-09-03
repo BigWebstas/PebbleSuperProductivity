@@ -36,6 +36,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var overtimeNotify = !!options.overtimeNotify;
   var overtimeRepeat = !!options.overtimeRepeat;
   var overtimeSound = !!options.overtimeSound;
+  var breakReminderMin = options.breakReminderMin || 0;
   var liveTracking = !!options.liveTracking;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
@@ -73,6 +74,16 @@ function buildPairingPageUrl(baseUrl, email, options) {
     [120, '2 hours'],
   ].map(function (opt) {
     var selected = opt[0] === defaultTaskEstimateMin ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
+  var breakReminderOptions = [
+    [0, 'Off'],
+    [30, 'Every 30 minutes of tracking'],
+    [45, 'Every 45 minutes of tracking'],
+    [60, 'Every hour of tracking'],
+    [90, 'Every 90 minutes of tracking'],
+  ].map(function (opt) {
+    var selected = opt[0] === breakReminderMin ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var backlightOptions = [
@@ -232,6 +243,19 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    Plays a short audible ping along with the banner. Only the Pebble\n' +
 '    Time 2 has a speaker - other watches ignore this. Respects the\n' +
 '    watch\'s system mute (Settings &rarr; Notifications).\n' +
+'  </p>\n' +
+'\n' +
+'  <label for="breakReminderMin">Remind me to take a break</label>\n' +
+'  <select id="breakReminderMin">\n' +
+breakReminderOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">\n' +
+'    Adds up the time you spend tracking tasks on the watch and vibrates\n' +
+'    with a "time for a break" banner once it reaches this much without a\n' +
+'    pause. Stopping the timer for 5 minutes or more counts as a break and\n' +
+'    resets the count; shorter gaps (switching tasks) carry it over. Only\n' +
+'    counts time tracked on the watch, and only fires while the watchapp is\n' +
+'    open. Not available on original Pebble/Pebble Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
@@ -453,6 +477,7 @@ autoSyncIntervalOptions + '\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +
 '      overtimeSound: document.getElementById(\'overtimeSound\').checked,\n' +
+'      breakReminderMin: parseInt(document.getElementById(\'breakReminderMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +

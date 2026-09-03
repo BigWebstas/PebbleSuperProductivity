@@ -402,6 +402,12 @@ function sendStatus(code, message) {
     // sound it - the others silently ignore it, as does aplite. Inert when
     // overtimeNotify itself is off. Always included, same reasoning as above.
     OVERTIME_SOUND_ENABLED: config.overtimeSound ? 1 : 0,
+    // "Remind me to take a break" - minutes of tracked time on the watch,
+    // banked across sessions until a real pause, before it shows a "time for a
+    // break" banner. 0 = off. Drives main.c's s_break_reminder_min /
+    // maybe_notify_break (aplite ignores it). Always included, same
+    // next-sync-cycle self-correction reasoning as the flags above.
+    BREAK_REMINDER_MIN: config.breakReminderMin || 0,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -2541,6 +2547,7 @@ Pebble.addEventListener('showConfiguration', function () {
       overtimeNotify: !!config.overtimeNotify,
       overtimeRepeat: !!config.overtimeRepeat,
       overtimeSound: !!config.overtimeSound,
+      breakReminderMin: config.breakReminderMin || 0,
       liveTracking: !!config.liveTracking,
     }
   );
@@ -2617,6 +2624,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     overtimeNotify: !!result.overtimeNotify,
     overtimeRepeat: !!result.overtimeRepeat,
     overtimeSound: !!result.overtimeSound,
+    breakReminderMin: parseInt(result.breakReminderMin, 10) || 0,
     liveTracking: !!result.liveTracking,
   };
   saveConfig(newConfig);

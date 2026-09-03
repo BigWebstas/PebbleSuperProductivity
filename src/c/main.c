@@ -51,6 +51,7 @@
 #define KEY_OVERTIME_NOTIFY_ENABLED MESSAGE_KEY_OVERTIME_NOTIFY_ENABLED
 #define KEY_OVERTIME_REPEAT_ENABLED MESSAGE_KEY_OVERTIME_REPEAT_ENABLED
 #define KEY_OVERTIME_SOUND_ENABLED MESSAGE_KEY_OVERTIME_SOUND_ENABLED
+#define KEY_BREAK_REMINDER_MIN MESSAGE_KEY_BREAK_REMINDER_MIN
 #define KEY_PRESENCE_STATE MESSAGE_KEY_PRESENCE_STATE
 #define KEY_PRESENCE_TASK_TITLE MESSAGE_KEY_PRESENCE_TASK_TITLE
 #define KEY_PRESENCE_DEVICE MESSAGE_KEY_PRESENCE_DEVICE
@@ -486,6 +487,21 @@ static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
 #endif
 #define OVERTIME_REPEAT_INTERVAL_S (5 * 60)
 
+// "Time for a break" banner - shares the over-estimate banner's layer, timer
+// and auto-dismiss (show_top_banner). Fires the first time the tracked time
+// this watch has banked since the last real break reaches s_break_reminder_min:
+// s_break_accum_s (whole sessions that have ended) plus the running session's
+// elapsed. A gap between a stop and the next start of at least BREAK_RESET_GAP_S
+// counts as a break and zeroes the tally (see start_tracking). Local task
+// tracking only; app-open only, like the over-estimate banner. aplite-excluded.
+static int s_break_reminder_min = 0;         // config.breakReminderMin, 0 = off
+static int s_break_accum_s = 0;              // tracked secs banked since the last break
+static time_t s_break_last_stop_epoch = 0;   // when the last session ended (gap detection)
+// Latched once the banner fires; only re-armed when start_tracking sees a real
+// break, so a quick stop/restart doesn't re-nag.
+static bool s_break_notified = false;
+#define BREAK_RESET_GAP_S (5 * 60)
+
 // Pinned "TRACKING" section - the tracked task (local, or a remote device's
 // via remote_in_pinned_section) shows in its own section below the
 // Resync/Habits/Add Task rows and is hidden from its project group. Always on
@@ -883,6 +899,22 @@ static void load_tracking(void) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
+static const uint32_t PERSIST_KEY_BREAK_ACCUM_S = 112;
+static const uint32_t PERSIST_KEY_BREAK_LAST_STOP = 113;
+
+// Persists the break-reminder tally so it survives the app closing between a
+// stop and the next start. persist_read_int returns 0 for a missing key, which
+// is the right default for both.
+static void save_break_state(void) {
+  persist_write_int(PERSIST_KEY_BREAK_ACCUM_S, s_break_accum_s);
+  persist_write_int(PERSIST_KEY_BREAK_LAST_STOP, (int)s_break_last_stop_epoch);
+}
+
+static void load_break_state(void) {
+  s_break_accum_s = persist_read_int(PERSIST_KEY_BREAK_ACCUM_S);
+  s_break_last_stop_epoch = (time_t)persist_read_int(PERSIST_KEY_BREAK_LAST_STOP);
+}
+
 static const uint32_t PERSIST_KEY_HABIT_TRACKING_ID = 130;
 static const uint32_t PERSIST_KEY_HABIT_TRACKING_START = 131;
 static const uint32_t PERSIST_KEY_HABIT_COUNTDOWN_PAUSED = 132;
@@ -2390,23 +2422,31 @@ static void overtime_ping(void) {
 #endif
 }
 
-static void show_overtime_banner(const char *task_title) {
+// Shows `text` in the top banner strip with a double vibe and (re)arms the
+// auto-dismiss timer. `text` must stay valid until the banner hides -
+// s_overtime_banner_text or a string literal. Shared by the over-estimate and
+// break banners; only one shows at a time (last writer wins).
+static void show_top_banner(const char *text) {
   if (!s_overtime_banner_layer) {
     return;
   }
-  snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
-            "Over estimate\n%s", task_title);
-  text_layer_set_text(s_overtime_banner_layer, s_overtime_banner_text);
+  text_layer_set_text(s_overtime_banner_layer, text);
   layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), false);
   layer_mark_dirty(text_layer_get_layer(s_overtime_banner_layer));
   vibes_double_pulse();
-  if (s_overtime_sound_enabled) {
-    overtime_ping();
-  }
   if (s_overtime_banner_timer) {
     app_timer_cancel(s_overtime_banner_timer);
   }
   s_overtime_banner_timer = app_timer_register(OVERTIME_BANNER_MS, overtime_banner_timeout_callback, NULL);
+}
+
+static void show_overtime_banner(const char *task_title) {
+  snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
+            "Over estimate\n%s", task_title);
+  show_top_banner(s_overtime_banner_text);
+  if (s_overtime_sound_enabled) {
+    overtime_ping();
+  }
 }
 
 // Called once per tracking tick: fires the over-estimate banner the first time
@@ -2470,6 +2510,29 @@ static void maybe_notify_overtime(void) {
   }
 }
 
+// Called once per tracking tick, next to maybe_notify_overtime: fires the
+// "time for a break" banner the first time this watch's banked tracked time
+// since the last break (s_break_accum_s + the running session's elapsed)
+// reaches s_break_reminder_min. Latched via s_break_notified until start_tracking
+// sees a real gap. Local task tracking only.
+static void maybe_notify_break(void) {
+  if (s_break_reminder_min <= 0 || s_tracking_task_id[0] == '\0' || s_break_notified) {
+    return;
+  }
+  int elapsed_s = (int)(time(NULL) - s_tracking_start_epoch);
+  if (elapsed_s < 0) {
+    elapsed_s = 0;
+  }
+  if (s_break_accum_s + elapsed_s < s_break_reminder_min * 60) {
+    return;
+  }
+  if (s_error_overlay_active) {
+    return;
+  }
+  s_break_notified = true;
+  show_top_banner("Time for a break");
+}
+
 // Re-lays-out the task list after the pinned "TRACKING" section appears or
 // disappears - the section and row counts change, so a full reload_data plus a
 // scroll-state refresh.
@@ -2503,6 +2566,7 @@ static void tracking_tick_callback(void *data) {
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
 #ifndef PBL_PLATFORM_APLITE
   maybe_notify_overtime();
+  maybe_notify_break();
 #endif
   s_tracking_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, tracking_tick_callback, NULL);
 }
@@ -2530,6 +2594,15 @@ static void start_tracking(Task *task) {
   s_overtime_notified = false;
   s_overtime_last_notify_epoch = 0;
   hide_overtime_banner();
+  // Break reminder: a long enough pause since the last session counts as a real
+  // break - zero the running tally and re-arm the banner. A shorter gap just
+  // carries the tally forward into this session.
+  if (s_break_last_stop_epoch != 0 &&
+      time(NULL) - s_break_last_stop_epoch >= BREAK_RESET_GAP_S) {
+    s_break_accum_s = 0;
+    s_break_notified = false;
+  }
+  save_break_state();
   // Pin this task to the top (if enabled); cancel any grace timer from a
   // just-stopped task and re-lay-out the list.
   cancel_unpin_timer();
@@ -2587,6 +2660,12 @@ static void stop_tracking_and_report(void) {
   s_overtime_notified = false;
   s_overtime_last_notify_epoch = 0;
   hide_overtime_banner();
+  // Bank this session's tracked time and stamp the stop, so the next start can
+  // tell a real break from a brief pause. s_break_notified is deliberately kept
+  // - a quick stop/restart shouldn't clear an already-shown break banner.
+  s_break_accum_s += elapsed_s > 0 ? (int)elapsed_s : 0;
+  s_break_last_stop_epoch = time(NULL);
+  save_break_state();
   // Keep the just-stopped task pinned for a short grace period so it slides
   // back into its group smoothly. A new start_tracking() cancels this.
   if (s_pinned_task_id[0] != '\0') {
@@ -3715,6 +3794,12 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *overtime_sound_tuple = dict_find(iterator, KEY_OVERTIME_SOUND_ENABLED);
       if (overtime_sound_tuple) {
         s_overtime_sound_enabled = overtime_sound_tuple->value->int32 != 0;
+      }
+      // "Remind me to take a break" interval in minutes (0 = off). Re-sent every
+      // sync like the flags above; the tally itself lives in persist.
+      Tuple *break_reminder_tuple = dict_find(iterator, KEY_BREAK_REMINDER_MIN);
+      if (break_reminder_tuple) {
+        s_break_reminder_min = break_reminder_tuple->value->int32;
       }
 #endif
       // reload_data refreshes the Resync row's status subtitle;
@@ -5922,6 +6007,7 @@ static void init(void) {
   load_tracking();
 #ifndef PBL_PLATFORM_APLITE
   load_habit_tracking();
+  load_break_state();
 #endif
   recompute_groups();
 
