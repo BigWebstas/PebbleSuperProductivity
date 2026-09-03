@@ -33,7 +33,6 @@
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
 #define KEY_BACKLIGHT_MODE MESSAGE_KEY_BACKLIGHT_MODE
-#define KEY_AUTO_SYNC_INTERVAL_MIN MESSAGE_KEY_AUTO_SYNC_INTERVAL_MIN
 #define KEY_NOTE_TEXT MESSAGE_KEY_NOTE_TEXT
 #define KEY_NOTE_TOTAL_LEN MESSAGE_KEY_NOTE_TOTAL_LEN
 #define KEY_NOTE_CHUNK_TEXT MESSAGE_KEY_NOTE_CHUNK_TEXT
@@ -493,13 +492,10 @@ static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
 // s_break_accum_s (whole sessions that have ended) plus the running session's
 // elapsed. A gap between a stop and the next start of at least BREAK_RESET_GAP_S
 // counts as a break and zeroes the tally (see start_tracking). Local task
-// tracking only; app-open only, like the over-estimate banner.
-//
-// aplite-excluded (RAM). Also emery-excluded: the emery build is right against
-// PebbleOS's 64 KB app-size ceiling and this feature doesn't fit there (an -flto
-// build that would have made room produces binaries the watch rejects at
-// install - "Sentinel does not match" - so that route is closed).
-#if !defined(PBL_PLATFORM_APLITE) && !defined(PBL_PLATFORM_EMERY)
+// tracking only; app-open only, like the over-estimate banner. aplite-excluded
+// (RAM) - the BREAK_REMINDER guard also kept it off emery until the background
+// auto-sync-timer feature was dropped, which freed the room.
+#ifndef PBL_PLATFORM_APLITE
 #define BREAK_REMINDER
 #endif
 
@@ -715,25 +711,6 @@ static bool s_touch_nav_enabled = false;
 #define BACKLIGHT_MODE_ALWAYS_ON -1
 static int32_t s_backlight_mode = 0;
 static AppTimer *s_backlight_timer = NULL;
-#endif
-
-// "Sync automatically on a timer" (config.autoSyncIntervalMin). schedule_next_wakeup()
-// uses it to relaunch the app via wakeup_schedule() so a sync can run while the
-// app is closed - PebbleKit JS only runs while this app is open, so a phone-side
-// setInterval alone never fires once the watch moves on. aplite-excluded
-// (overflowed it by 332 bytes) - aplite keeps the old open-only behavior.
-#ifndef PBL_PLATFORM_APLITE
-static int32_t s_auto_sync_interval_min = 0;
-// Set once in init() from launch_reason() - whether this session exists because
-// a wakeup fired. Gates the auto-exit in the MSG_SYNC_STATUS handler: a
-// wakeup-launched session syncs quietly and returns; a manual one stays open.
-static bool s_is_wakeup_launch = false;
-// Guards schedule_next_wakeup() from running on every status push - only on the
-// first confirmed interval this launch, and again if it changes.
-static bool s_wakeup_rescheduled_this_launch = false;
-// Guards window_stack_pop_all() from firing twice if multiple terminal statuses
-// arrive in one wakeup-launched session (e.g. a retried sync after an error).
-static bool s_wakeup_exit_triggered = false;
 #endif
 
 static TaskGroup s_groups[MAX_TASKS]; // worst case: every task its own group
@@ -1684,27 +1661,6 @@ static void apply_backlight_mode(void) {
     return;
   }
   backlight_touch();
-}
-#endif // !PBL_PLATFORM_APLITE
-
-#ifndef PBL_PLATFORM_APLITE
-// (Re)arms the single wakeup this app uses, relative to now - once per launch
-// when s_auto_sync_interval_min is first confirmed, and again when it changes.
-// wakeup_cancel_all() is safe: this is the only wakeup the app schedules.
-// Re-arming on every confirmed sync keeps the next wakeup one full interval past
-// the most recent activity. notify_if_missed is false - it's a quiet resync.
-static void schedule_next_wakeup(void) {
-  wakeup_cancel_all();
-  if (s_auto_sync_interval_min <= 0) {
-    return;
-  }
-  time_t next = time(NULL) + s_auto_sync_interval_min * 60;
-  WakeupId id = wakeup_schedule(next, 0, false);
-  if (id < 0) {
-    APP_LOG(APP_LOG_LEVEL_WARNING, "wakeup_schedule failed: %d", (int)id);
-  } else {
-    APP_LOG(APP_LOG_LEVEL_INFO, "wakeup scheduled for +%ld min (id %d)", (long)s_auto_sync_interval_min, (int)id);
-  }
 }
 #endif // !PBL_PLATFORM_APLITE
 
@@ -3772,17 +3728,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         apply_backlight_mode();
       }
 #endif
-#ifndef PBL_PLATFORM_APLITE
-      // Re-arm the background-wakeup schedule on the first confirmed interval
-      // this launch and whenever it changes - not on every status push.
-      Tuple *auto_sync_interval_tuple = dict_find(iterator, KEY_AUTO_SYNC_INTERVAL_MIN);
-      if (auto_sync_interval_tuple &&
-          (auto_sync_interval_tuple->value->int32 != s_auto_sync_interval_min || !s_wakeup_rescheduled_this_launch)) {
-        s_auto_sync_interval_min = auto_sync_interval_tuple->value->int32;
-        schedule_next_wakeup();
-        s_wakeup_rescheduled_this_launch = true;
-      }
-#endif
 #if defined(PBL_TOUCH)
       // Only acted on when the value changed - a redundant touch_service_(un)subscribe
       // on every routine status push is wasteful.
@@ -3833,21 +3778,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (s_status_code == STATUS_ERROR) {
         show_error_overlay();
       }
-#ifndef PBL_PLATFORM_APLITE
-      // A wakeup-launched session syncs quietly and gets out of the way - once
-      // the sync concludes (OK/ERROR/NOT_PAIRED, not the initial SYNCING), pop
-      // back to whatever was on screen. A manual session never takes this
-      // branch. Guarded against a retried sync's second terminal status.
-      if (s_is_wakeup_launch && !s_wakeup_exit_triggered &&
-          (s_status_code == STATUS_OK || s_status_code == STATUS_ERROR || s_status_code == STATUS_NOT_PAIRED)) {
-        s_wakeup_exit_triggered = true;
-        APP_LOG(APP_LOG_LEVEL_INFO, "wakeup sync done (status %d), exiting", (int)s_status_code);
-        // Marks this a deliberate completed action so exiting lands on the
-        // watchface, not the app launcher menu.
-        exit_reason_set(APP_EXIT_ACTION_PERFORMED_SUCCESSFULLY);
-        window_stack_pop_all(true);
-      }
-#endif
       break;
     }
 #ifndef PBL_PLATFORM_APLITE
@@ -6018,13 +5948,6 @@ static void init(void) {
   // initializer - see s_status_code's comment) so this first "Syncing..."
   // stretch goes through the same chokepoint as every later status.
   set_status_code(STATUS_SYNCING);
-#ifndef PBL_PLATFORM_APLITE
-  // Whether this session exists because a wakeup fired vs the user opening the app.
-  s_is_wakeup_launch = launch_reason() == APP_LAUNCH_WAKEUP;
-  if (s_is_wakeup_launch) {
-    APP_LOG(APP_LOG_LEVEL_INFO, "launched by wakeup event");
-  }
-#endif
   load_tasks();
   load_habits();
   load_tracking();

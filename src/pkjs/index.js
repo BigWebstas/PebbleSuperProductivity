@@ -372,16 +372,6 @@ function sendStatus(code, message) {
     // within the very next sync cycle for free, since this message already
     // fires at both ends of every doSync().
     BACKLIGHT_MODE: config.backlightMode || 0,
-    // Minutes between syncs, 0 = off - same field this pairing setting has
-    // always stored, but now also drives the watch's own
-    // schedule_next_wakeup() (main.c): PebbleKit JS only runs while this
-    // watchapp is the one currently open, so the setInterval in
-    // scheduleAutoSync() below can't fire once the watch has moved on to
-    // the watchface or another app - the watch waking itself back up
-    // periodically (via Pebble's wakeup_schedule API) is what makes this
-    // setting actually work while the app is closed, not just while it's
-    // open. Always included, same reasoning as the two fields above.
-    AUTO_SYNC_INTERVAL_MIN: config.autoSyncIntervalMin || 0,
     // Touch navigation on/off, mirrored to the watch's s_touch_nav_enabled.
     // Off by default (opt-in) - the first-gen Pebble Time 2 touch driver
     // isn't reliable enough yet, see main.c's touch block. Ignored entirely
@@ -749,27 +739,6 @@ function handleStatsRequest() {
 // ---------------- sync engine ----------------
 
 var syncInFlight = false;
-var autoSyncTimerId = null;
-
-// (Re)starts the periodic background sync timer from config.autoSyncIntervalMin
-// (minutes; 0/unset means off - this is an opt-in feature, so an existing
-// user who's never touched this setting shouldn't suddenly start polling
-// the server in the background). Always clears any previously running timer
-// first, since this is called both at startup and after every settings
-// save - a stale timer from a since-changed (or since-disabled) interval
-// would otherwise keep firing alongside, or instead of, the new one.
-function scheduleAutoSync(config) {
-  if (autoSyncTimerId) {
-    clearInterval(autoSyncTimerId);
-    autoSyncTimerId = null;
-  }
-  var minutes = config && config.autoSyncIntervalMin;
-  if (minutes > 0) {
-    autoSyncTimerId = setInterval(function () {
-      doSync();
-    }, minutes * 60 * 1000);
-  }
-}
 
 // Pushes whatever's already in the local cache (loadState()) straight to
 // the watch - no network involved. Shared by doSync()'s own success path
@@ -2375,7 +2344,7 @@ function onPresenceState(view) {
 // (Re)applies config.liveTracking: opens the presence WebSocket when the
 // feature is on and the account is paired, tears it down (and hides the watch
 // UI) otherwise or when the token changed. Called from 'ready' and after every
-// settings save, same as scheduleAutoSync().
+// settings save.
 function applyPresence(config) {
   var wantsPresence = !!(config && config.liveTracking && config.jwt);
   var token = config && config.jwt;
@@ -2430,7 +2399,6 @@ Pebble.addEventListener('ready', function () {
   } else {
     doSync();
   }
-  scheduleAutoSync(config);
   applyPresence(config);
 });
 
@@ -2519,10 +2487,6 @@ Pebble.addEventListener('showConfiguration', function () {
       // Undefined (never configured before) defaults to on - see the
       // matching comment in handleTaskToggle for why.
       autoSyncOnComplete: config.autoSyncOnComplete !== false,
-      // Minutes between background syncs; 0 means off - see
-      // scheduleAutoSync's own comment for why this defaults to off rather
-      // than mirroring autoSyncOnComplete's default-on.
-      autoSyncIntervalMin: config.autoSyncIntervalMin || 0,
       // Lets the pairing page leave the password/token fields blank on a
       // settings-only visit instead of demanding they be re-pasted - see
       // webviewclosed below for the other half of this.
@@ -2618,7 +2582,6 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableProjects: !!result.enableProjects,
     enableStats: !!result.enableStats,
     enableSchedule: !!result.enableSchedule,
-    autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,
     overtimeNotify: !!result.overtimeNotify,
@@ -2628,7 +2591,6 @@ Pebble.addEventListener('webviewclosed', function (e) {
     liveTracking: !!result.liveTracking,
   };
   saveConfig(newConfig);
-  scheduleAutoSync(newConfig);
 
   if (result.password) {
     localStorage.setItem('sp_password', result.password);

@@ -21,7 +21,6 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var hideDoneTasks = !!options.hideDoneTasks;
   var autoMarkParentDone = !!options.autoMarkParentDone;
   var autoSyncOnComplete = !!options.autoSyncOnComplete;
-  var autoSyncIntervalMin = options.autoSyncIntervalMin || 0;
   var hasPassword = !!options.hasPassword;
   var hasToken = !!options.hasToken;
   var defaultProjectId = options.defaultProjectId || '';
@@ -52,16 +51,6 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var projectOptions = projects.map(function (p) {
     var selected = p.id === defaultProjectId ? ' selected' : '';
     return '<option value="' + escapeHtmlAttr(p.id) + '"' + selected + '>' + escapeHtmlAttr(p.title) + '</option>';
-  }).join('\n');
-  var autoSyncIntervalOptions = [
-    [0, 'Off'],
-    [5, 'Every 5 minutes'],
-    [15, 'Every 15 minutes'],
-    [30, 'Every 30 minutes'],
-    [60, 'Every hour'],
-  ].map(function (opt) {
-    var selected = opt[0] === autoSyncIntervalMin ? ' selected' : '';
-    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var taskEstimateOptions = [
     [0, 'None'],
@@ -255,8 +244,7 @@ breakReminderOptions + '\n' +
 '    pause. Stopping the timer for 5 minutes or more counts as a break and\n' +
 '    resets the count; shorter gaps (switching tasks) carry it over. Only\n' +
 '    counts time tracked on the watch, and only fires while the watchapp is\n' +
-'    open. Not available on original Pebble/Pebble Steel (aplite) or Pebble\n' +
-'    Time 2 (emery) - no room left in those builds.\n' +
+'    open. Not available on original Pebble/Pebble Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
@@ -380,20 +368,6 @@ taskEstimateOptions + '\n' +
 '    battery/data per action.\n' +
 '  </p>\n' +
 '\n' +
-'  <label for="autoSyncIntervalMin">Sync automatically on a timer</label>\n' +
-'  <select id="autoSyncIntervalMin">\n' +
-autoSyncIntervalOptions + '\n' +
-'  </select>\n' +
-'  <p class="hint">\n' +
-'    Keeps the watch\'s list fresh on this schedule even when the app isn\'t\n' +
-'    open, in addition to any manual Resync and the "after a watch change"\n' +
-'    option above. While the app IS open, this runs quietly on the phone\n' +
-'    side; while it\'s closed, the watch briefly wakes itself up, syncs,\n' +
-'    and returns you to whatever was on screen before - expect a short\n' +
-'    screen flash each time, not a fully invisible background refresh.\n' +
-'    Uses more battery the more often it\'s set to run.\n' +
-'  </p>\n' +
-'\n' +
 '  <h2>Danger zone</h2>\n' +
 '  <p class="hint">\n' +
 '    Wipes this watch/phone\'s locally cached task list and resync position,\n' +
@@ -466,7 +440,6 @@ autoSyncIntervalOptions + '\n' +
 '      hideDoneTasks: document.getElementById(\'hideDoneTasks\').checked,\n' +
 '      autoMarkParentDone: document.getElementById(\'autoMarkParentDone\').checked,\n' +
 '      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked,\n' +
-'      autoSyncIntervalMin: parseInt(document.getElementById(\'autoSyncIntervalMin\').value, 10) || 0,\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
 '      defaultTaskEstimateMin: parseInt(document.getElementById(\'defaultTaskEstimateMin\').value, 10) || 0,\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
