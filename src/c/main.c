@@ -2,7 +2,7 @@
 
 // Keep in sync by hand with package.json "version" on every bump - no runtime
 // API exposes it to C.
-#define APP_VERSION "0.6.31"
+#define APP_VERSION "0.6.32"
 
 // MESSAGE_KEY_* come from message_keys.auto.h (generated from package.json's
 // "messageKeys"); AppMessage assigns IDs from 10000, so a 0-based enum wouldn't
