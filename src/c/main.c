@@ -843,6 +843,23 @@ static TextLayer *make_text_layer(Layer *parent, GRect frame, const char *font_k
   return tl;
 }
 
+// One section-0 nav row: a solid colour fill, a left title in the heading font
+// (inverting on select), and a right-hand bitmap icon (its white variant on
+// select). Shared by Habits / Projects / Stats / Add Task; `icon_rect` keeps
+// each row's own icon geometry.
+static void draw_nav_row(GContext *ctx, GRect bounds, bool is_selected, GColor bg,
+                         const char *label, GBitmap *icon, GBitmap *icon_white, GRect icon_rect) {
+  graphics_context_set_fill_color(ctx, bg);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
+  draw_text(ctx, label, HEADING_FONT_KEY,
+            GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                  bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H),
+            GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
+  graphics_draw_bitmap_in_rect(ctx, is_selected ? icon_white : icon, icon_rect);
+}
+
 // Read an optional AppMessage tuple, `fb` when the key is absent. The task /
 // habit / project / stats / presence payloads are full of "present it if sent,
 // else a default" fields.
@@ -1885,56 +1902,32 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
     if (kind == SECTION0_ROW_HABITS) {
       // Navigates to the habits (SimpleCounter) page. Icon matches the real
-      // app's "heart_check" icon for this feature.
-      graphics_context_set_fill_color(ctx, GColorVividCerulean);
-      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-      GRect title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
-                               bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      draw_text(ctx, "Habits", HEADING_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-      GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
-                               ROW_ICON_SIZE, ROW_ICON_SIZE);
-      // GCompOpSet (not the GCompOpAssign default) so the bitmap's alpha (its
-      // transparent background) takes effect - a raw graphics_draw_bitmap_in_rect
-      // uses the context's own compositing mode.
-      graphics_context_set_compositing_mode(ctx, GCompOpSet);
-      graphics_draw_bitmap_in_rect(ctx, is_selected ? s_heart_white_bitmap : s_heart_bitmap, icon_rect);
+      // app's "heart_check" icon. GCompOpSet (inside draw_nav_row) lets the
+      // bitmap's transparent background take effect.
+      GRect ic = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
+                       ROW_ICON_SIZE, ROW_ICON_SIZE);
+      draw_nav_row(ctx, bounds, is_selected, GColorVividCerulean, "Habits",
+                   s_heart_bitmap, s_heart_white_bitmap, ic);
       return;
     }
 
 #if PROJECTS_BROWSER
     if (kind == SECTION0_ROW_PROJECTS) {
       // Navigates to the projects browser. Purple - its own colour among the
-      // section-0 nav rows (Habits cerulean, Add Task green). White folder
-      // icon on the right, matching the Habits/Add Task layout (purple is dark
-      // enough that the one white glyph reads in both selection states).
-      graphics_context_set_fill_color(ctx, GColorPurple);
-      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-      GRect title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
-                               bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      draw_text(ctx, "Projects", HEADING_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-      graphics_context_set_compositing_mode(ctx, GCompOpSet);
-      graphics_draw_bitmap_in_rect(ctx, is_selected ? s_project_white_bitmap : s_project_bitmap,
-                                    GRect(bounds.size.w - ROW_ICON_SIZE - 8, (bounds.size.h - 20) / 2, 20, 20));
+      // section-0 nav rows. White folder icon on the right.
+      GRect ic = GRect(bounds.size.w - ROW_ICON_SIZE - 8, (bounds.size.h - 20) / 2, 20, 20);
+      draw_nav_row(ctx, bounds, is_selected, GColorPurple, "Projects",
+                   s_project_bitmap, s_project_white_bitmap, ic);
       return;
     }
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
     if (kind == SECTION0_ROW_STATS) {
-      // Opens the read-only Stats page. Orange - its own colour among the
-      // section-0 nav rows. Bar-chart icon on the right, black normally,
-      // white when selected, matching the Projects folder pair.
-      graphics_context_set_fill_color(ctx, GColorOrange);
-      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-      GRect stats_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
-                                     bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      draw_text(ctx, "Stats", HEADING_FONT_KEY, stats_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-      graphics_context_set_compositing_mode(ctx, GCompOpSet);
-      graphics_draw_bitmap_in_rect(ctx, is_selected ? s_stats_white_bitmap : s_stats_bitmap,
-                                    GRect(bounds.size.w - ROW_ICON_SIZE - 8, (bounds.size.h - 20) / 2, 20, 20));
+      // Opens the read-only Stats page. Orange, bar-chart icon.
+      GRect ic = GRect(bounds.size.w - ROW_ICON_SIZE - 8, (bounds.size.h - 20) / 2, 20, 20);
+      draw_nav_row(ctx, bounds, is_selected, GColorOrange, "Stats",
+                   s_stats_bitmap, s_stats_white_bitmap, ic);
       return;
     }
 #endif
@@ -1965,16 +1958,10 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     if (kind == SECTION0_ROW_ADD_TASK) {
       // Mic platforms with the feature enabled only. Starts dictation via
       // menu_select_click.
-      graphics_context_set_fill_color(ctx, GColorJaegerGreen);
-      graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-      GRect title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
-                               bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      draw_text(ctx, "Add Task", HEADING_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-      GRect icon_rect = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
-                               ROW_ICON_SIZE, ROW_ICON_SIZE);
-      graphics_context_set_compositing_mode(ctx, GCompOpSet);
-      graphics_draw_bitmap_in_rect(ctx, is_selected ? s_mic_white_bitmap : s_mic_bitmap, icon_rect);
+      GRect ic = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
+                       ROW_ICON_SIZE, ROW_ICON_SIZE);
+      draw_nav_row(ctx, bounds, is_selected, GColorJaegerGreen, "Add Task",
+                   s_mic_bitmap, s_mic_white_bitmap, ic);
       return;
     }
 #endif
