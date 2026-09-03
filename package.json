@@ -6,7 +6,7 @@
   "private": true,
   "keywords": ["pebble-app"],
   "scripts": {
-    "test": "node scripts/test-crypto.js && node scripts/test-argon2.js && node scripts/test-supersync-crypto.js && node scripts/test-task-store.js && node scripts/test-presence.js"
+    "test": "node scripts/test-crypto.js && node scripts/test-argon2.js && node scripts/test-supersync-crypto.js && node scripts/test-task-store.js && node scripts/test-presence.js && node scripts/test-stats.js"
   },
   "dependencies": {},
   "pebble": {
@@ -75,6 +75,16 @@
           "type": "png",
           "name": "IMAGE_PROJECT",
           "file": "images/icon-project.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_STATS_WHITE",
+          "file": "images/icon-stats-white.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_STATS",
+          "file": "images/icon-stats.png"
         }
       ]
     },
@@ -118,6 +128,11 @@
       "PROJECT_TOTAL",
       "PROJECT_TASK_BACKLOG",
       "PROJECTS_ENABLED",
+      "STATS_ENABLED",
+      "STATS_EST_REMAINING_MS",
+      "STATS_WORKED_TODAY_MS",
+      "STATS_DONE_TODAY",
+      "STATS_TEXT",
       "TASK_TAGS",
       "TOUCH_NAV_ENABLED",
       "OVERTIME_NOTIFY_ENABLED",

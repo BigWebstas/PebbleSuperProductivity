@@ -20,7 +20,8 @@ Shown at Pebble Time 2 size. The same shots sized for other platforms:
 
 - **Up / Down** — scroll the list
 - **Select** — toggle a task done; on a project header, open that project (see
-  [Projects](#projects)); on an action row, activate it
+  [Projects](#projects)); on an action row, activate it (Resync, Habits,
+  Projects, [Stats](#stats), Add Task)
 - **Long-press Select** — start/stop time tracking; open a project's notes;
   append a note on the notes screen; increment a habit
 - **Double-click Select** — show a task's notes and tags
@@ -47,6 +48,20 @@ tasks — the live list, then its backlog under a divider. Not on `aplite`.
 Scheduling a task that's in the backlog also moves it into the regular list.
 Toggling done and tracking round-trip to the desktop, and a task tracked here
 shows in the today page's TRACKING section too.
+
+### Stats
+
+The **Stats** action row opens a read-only summary, scrollable with Up / Down.
+Not on `aplite`.
+
+- **Estimate remaining** — unfinished estimated time across today's tasks
+- **Worked today** — time tracked today across every task
+- **Current session** — how long the active tracking run has lasted: the
+  watch's own, or a remote device's when the watch isn't tracking (the
+  desktop's "time without a break" is local to the desktop and can't sync,
+  so this is the closest number the watch has)
+- **Completed today** — tasks done among today's list
+- **Projects** — every project with its open-task count
 
 ### Touch (Pebble Time 2)
 

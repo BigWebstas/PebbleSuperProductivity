@@ -65,6 +65,11 @@ var MSG_PROJECT_TASKS_START = 36;   // phone -> watch: PROJECT_ID, TASK_TOTAL
 var MSG_PROJECT_TASKS_ITEM = 37;    // phone -> watch: PROJECT_ID, TASK_INDEX, TASK_*, PROJECT_TASK_BACKLOG
 var MSG_PROJECT_TASKS_END = 38;     // phone -> watch: PROJECT_ID
 var MSG_TASK_PLAN_TODAY = 39;       // watch -> phone: TASK_ID (set the task's dueDay to today)
+// Stats page (config.enableStats, non-aplite). One request, one reply: the
+// two headline durations as ms, plus STATS_TEXT - the project list
+// preformatted as "Title\tcount" lines the watch prints verbatim.
+var MSG_STATS_REQUEST = 40;         // watch -> phone: (no keys)
+var MSG_STATS_DATA = 41;            // phone -> watch: STATS_EST_REMAINING_MS + STATS_WORKED_TODAY_MS + STATS_DONE_TODAY + STATS_TEXT
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -350,6 +355,10 @@ function sendStatus(code, message) {
     // s_projects_enabled / SECTION0_ROW_PROJECTS. Always included, same
     // next-sync-cycle self-correction reasoning as the two flags above.
     PROJECTS_ENABLED: config.enableProjects !== false ? 1 : 0,
+    // Stats page row (default on, like Projects). Drives main.c's
+    // s_stats_enabled / SECTION0_ROW_STATS. Same always-included,
+    // next-sync-cycle self-correction reasoning as the flags above.
+    STATS_ENABLED: config.enableStats !== false ? 1 : 0,
     // 0 = system default, -1 = always on, N>0 = relight-and-hold for N
     // seconds after any button press - see main.c's own s_backlight_mode
     // comment. Always included (not conditionally), same reasoning as the
@@ -684,6 +693,39 @@ function sendProjectTaskAt(idField, rows, index) {
     sendProjectTaskAt(idField, rows, index + 1);
   }, function (e) {
     console.log('[pkjs] giving up on PROJECT_TASKS_ITEM ' + index + ', aborting: ' + JSON.stringify(e));
+  });
+}
+
+// Answers MSG_STATS_REQUEST (the watch's Stats page, non-aplite). One
+// message: the two headline durations in ms, plus STATS_TEXT - the project
+// list preformatted as "Title\tcount" lines the watch prints verbatim under
+// its "PROJECTS" heading. Read-only, no server call - just the replayed
+// op-log state the phone already holds. STATS_TEXT is capped so it fits a
+// single AppMessage.
+function handleStatsRequest() {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (config.enableStats === false) {
+    return;
+  }
+  var stats = store.computeStats(loadState());
+  var lines = stats.projects.map(function (p) {
+    return String(p.title).replace(/[\t\n]/g, ' ').slice(0, 40) + '\t' + p.taskCount;
+  }).join('\n');
+  if (lines.length > 600) {
+    lines = lines.slice(0, 600);
+  }
+  sendWithRetry({
+    MSG_TYPE: MSG_STATS_DATA,
+    STATS_EST_REMAINING_MS: Math.min(stats.estimateRemainingMs, 2e9),
+    STATS_WORKED_TODAY_MS: Math.min(stats.workedTodayMs, 2e9),
+    STATS_DONE_TODAY: stats.completedTodayCount,
+    STATS_TEXT: lines,
+  }, function () {}, function (e) {
+    console.log('[pkjs] giving up on STATS_DATA after retries: ' + JSON.stringify(e));
   });
 }
 
@@ -2293,6 +2335,9 @@ Pebble.addEventListener('appmessage', function (e) {
     case MSG_PROJECT_TASKS_REQUEST:
       handleProjectTasksRequest(payload.PROJECT_ID);
       break;
+    case MSG_STATS_REQUEST:
+      handleStatsRequest();
+      break;
     default:
       break;
   }
@@ -2336,6 +2381,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableHabits: config.enableHabits !== false,
       enableAddTask: config.enableAddTask !== false,
       enableProjects: config.enableProjects !== false,
+      enableStats: config.enableStats !== false,
       backlightMode: config.backlightMode || 0,
       touchNav: !!config.touchNav,
       overtimeNotify: !!config.overtimeNotify,
@@ -2408,6 +2454,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableHabits: !!result.enableHabits,
     enableAddTask: !!result.enableAddTask,
     enableProjects: !!result.enableProjects,
+    enableStats: !!result.enableStats,
     autoSyncIntervalMin: parseInt(result.autoSyncIntervalMin, 10) || 0,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,
