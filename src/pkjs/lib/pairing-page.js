@@ -36,6 +36,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var overtimeRepeat = !!options.overtimeRepeat;
   var overtimeSound = !!options.overtimeSound;
   var breakReminderMin = options.breakReminderMin || 0;
+  var dueReminderMin = options.dueReminderMin || 0;
   var liveTracking = !!options.liveTracking;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
@@ -63,6 +64,16 @@ function buildPairingPageUrl(baseUrl, email, options) {
     [120, '2 hours'],
   ].map(function (opt) {
     var selected = opt[0] === defaultTaskEstimateMin ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
+  var dueReminderOptions = [
+    [0, 'Off'],
+    [5, '5 minutes before'],
+    [10, '10 minutes before'],
+    [15, '15 minutes before'],
+    [30, '30 minutes before'],
+  ].map(function (opt) {
+    var selected = opt[0] === dueReminderMin ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var breakReminderOptions = [
@@ -244,7 +255,20 @@ breakReminderOptions + '\n' +
 '    pause. Stopping the timer for 5 minutes or more counts as a break and\n' +
 '    resets the count; shorter gaps (switching tasks) carry it over. Only\n' +
 '    counts time tracked on the watch, and only fires while the watchapp is\n' +
-'    open. Not available on original Pebble/Pebble Steel (aplite).\n' +
+'    open. It also resets if the watch sees no step-count movement for 10\n' +
+'    minutes while tracking (an idle stretch counts as a break).\n' +
+'    Not available on original Pebble/Pebble Steel (aplite).\n' +
+'  </p>\n' +
+'\n' +
+'  <label for="dueReminderMin">Notify before a task is due</label>\n' +
+'  <select id="dueReminderMin">\n' +
+dueReminderOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">\n' +
+'    Vibrates with a "Due at ..." banner this far ahead of the next task\n' +
+'    that has a time on it. One reminder per task time. Only fires while\n' +
+'    the watchapp is open. Not available on original Pebble/Pebble Steel\n' +
+'    (aplite).\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
@@ -452,6 +476,7 @@ taskEstimateOptions + '\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +
 '      overtimeSound: document.getElementById(\'overtimeSound\').checked,\n' +
 '      breakReminderMin: parseInt(document.getElementById(\'breakReminderMin\').value, 10) || 0,\n' +
+'      dueReminderMin: parseInt(document.getElementById(\'dueReminderMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +

@@ -398,6 +398,10 @@ function sendStatus(code, message) {
     // maybe_notify_break (aplite ignores it). Always included, same
     // next-sync-cycle self-correction reasoning as the flags above.
     BREAK_REMINDER_MIN: config.breakReminderMin || 0,
+    // "Notify before a task is due" - minutes ahead of a task's dueWithTime to
+    // vibrate a banner. 0 = off. Watch-side only (main.c's minute_tick_handler),
+    // app-open only. Always included, same reasoning as above.
+    DUE_REMINDER_MIN: config.dueReminderMin || 0,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -2512,6 +2516,7 @@ Pebble.addEventListener('showConfiguration', function () {
       overtimeRepeat: !!config.overtimeRepeat,
       overtimeSound: !!config.overtimeSound,
       breakReminderMin: config.breakReminderMin || 0,
+      dueReminderMin: config.dueReminderMin || 0,
       liveTracking: !!config.liveTracking,
     }
   );
@@ -2588,6 +2593,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     overtimeRepeat: !!result.overtimeRepeat,
     overtimeSound: !!result.overtimeSound,
     breakReminderMin: parseInt(result.breakReminderMin, 10) || 0,
+    dueReminderMin: parseInt(result.dueReminderMin, 10) || 0,
     liveTracking: !!result.liveTracking,
   };
   saveConfig(newConfig);

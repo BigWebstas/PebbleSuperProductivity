@@ -51,6 +51,7 @@
 #define KEY_OVERTIME_REPEAT_ENABLED MESSAGE_KEY_OVERTIME_REPEAT_ENABLED
 #define KEY_OVERTIME_SOUND_ENABLED MESSAGE_KEY_OVERTIME_SOUND_ENABLED
 #define KEY_BREAK_REMINDER_MIN MESSAGE_KEY_BREAK_REMINDER_MIN
+#define KEY_DUE_REMINDER_MIN MESSAGE_KEY_DUE_REMINDER_MIN
 #define KEY_PRESENCE_STATE MESSAGE_KEY_PRESENCE_STATE
 #define KEY_PRESENCE_TASK_TITLE MESSAGE_KEY_PRESENCE_TASK_TITLE
 #define KEY_PRESENCE_DEVICE MESSAGE_KEY_PRESENCE_DEVICE
@@ -579,6 +580,12 @@ static bool s_projects_enabled = true;
 // view of today's timed tasks - see the schedule-page block far below.
 // aplite-excluded (RAM), same as Stats.
 static bool s_schedule_enabled = true;
+// "Notify before a task is due" (config.dueReminderMin, 0 = off). A MINUTE_UNIT
+// tick finds the soonest not-yet-past dueWithTime in s_tasks; when it's within
+// this many minutes and s_due_notified_min doesn't already hold that time, the
+// banner fires. App-open only; re-arms once that task's time passes.
+static int s_due_reminder_min = 0;
+static int s_due_notified_min = -1;
 // "Stats" page row (config.enableStats, default on) and the last
 // MSG_STATS_DATA payload - kept across visits so a re-open shows the previous
 // numbers immediately while a fresh request is in flight. Declared here (not
@@ -3745,11 +3752,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 #ifdef BREAK_REMINDER
       // "Remind me to take a break" interval in minutes (0 = off). Re-sent every
       // sync like the flags above; the tally itself lives in persist.
-      Tuple *break_reminder_tuple = dict_find(iterator, KEY_BREAK_REMINDER_MIN);
-      if (break_reminder_tuple) {
-        s_break_reminder_min = break_reminder_tuple->value->int32;
-      }
+      s_break_reminder_min = tuple_int(iterator, KEY_BREAK_REMINDER_MIN, s_break_reminder_min);
 #endif
+      // "Notify before a task is due" - minutes ahead, 0 = off.
+      s_due_reminder_min = tuple_int(iterator, KEY_DUE_REMINDER_MIN, s_due_reminder_min);
 #endif
       // reload_data refreshes the Resync row's status subtitle;
       // update_empty_layer() handles the empty screen. Both no-op while the
@@ -5933,6 +5939,32 @@ static void window_unload(Window *window) {
   status_bar_layer_destroy(s_status_bar);
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// MINUTE_UNIT tick: when s_due_reminder_min is set, fires the banner as the
+// soonest upcoming timed task comes within that window. App-open only.
+static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
+  if (s_due_reminder_min <= 0 || s_error_overlay_active) {
+    return;
+  }
+  int now_min = now_tm->tm_hour * 60 + now_tm->tm_min;
+  int soonest = -1;
+  for (int i = 0; i < s_task_count; i++) {
+    int d = s_tasks[i].due_min;
+    if (!s_tasks[i].done && d >= now_min && (soonest < 0 || d < soonest)) {
+      soonest = d;
+    }
+  }
+  if (soonest < 0 || soonest - now_min > s_due_reminder_min || soonest == s_due_notified_min) {
+    return;
+  }
+  s_due_notified_min = soonest;
+  char at[16];
+  format_due_time(soonest, at, sizeof(at));
+  snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text), "Due at %s", at);
+  show_top_banner(s_overtime_banner_text);
+}
+#endif
+
 static void init(void) {
   // Set the starting status through set_status_code() (not its static
   // initializer - see s_status_code's comment) so this first "Syncing..."
@@ -6003,6 +6035,9 @@ static void init(void) {
 #if defined(PBL_TOUCH)
   // Apply the default (off); the first sync turns it on if the phone says so.
   apply_touch_nav();
+#endif
+#ifndef PBL_PLATFORM_APLITE
+  tick_timer_service_subscribe(MINUTE_UNIT, minute_tick_handler);
 #endif
 }
 
