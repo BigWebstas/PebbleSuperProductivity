@@ -85,6 +85,16 @@
           "type": "png",
           "name": "IMAGE_STATS",
           "file": "images/icon-stats.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_INBOX_WHITE",
+          "file": "images/icon-inbox-white.png"
+        },
+        {
+          "type": "png",
+          "name": "IMAGE_INBOX",
+          "file": "images/icon-inbox.png"
         }
       ]
     },
