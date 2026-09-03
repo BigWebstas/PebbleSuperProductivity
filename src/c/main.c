@@ -4934,71 +4934,171 @@ static void push_notes_window(void) {
 // read-only scrollable summary: estimate remaining today, time worked today,
 // the current tracking session, tasks completed today, then every project
 // with its task count. The phone sends the two durations, the done count and
-// a preformatted project block in one MSG_STATS_DATA; the watch composes the
-// visible text and reflows a ScrollLayer/TextLayer, the notes-overlay shape
-// minus the fetch state machine. "Current session" is filled in whenever the
-// text is (re)composed - from the watch's own timer (s_tracking_start_epoch)
-// or, when the watch isn't tracking, from a remote device's live session
-// (s_presence_state / s_presence_elapsed_base).
-#define STATS_BODY_CAP 1200
+// a preformatted "Name - count" project block in one MSG_STATS_DATA. A custom
+// layer inside a ScrollLayer draws each metric as a black label bar (white
+// text) with its value below in black - so the label reads as a heading and
+// the value as data. "Current session" is recomputed on every draw - from the
+// watch's own timer (s_tracking_start_epoch) or, when the watch isn't
+// tracking, a remote device's live session (s_presence_state /
+// s_presence_elapsed_base).
+#ifdef PBL_PLATFORM_EMERY
+#define STATS_LABEL_FONT FONT_KEY_GOTHIC_24_BOLD
+#define STATS_VALUE_FONT FONT_KEY_GOTHIC_28_BOLD
+#define STATS_LINE_FONT  FONT_KEY_GOTHIC_24
+#define STATS_LABEL_H 28
+#define STATS_VALUE_H 34
+#define STATS_LINE_H  30
+#else
+#define STATS_LABEL_FONT FONT_KEY_GOTHIC_18_BOLD
+#define STATS_VALUE_FONT FONT_KEY_GOTHIC_24_BOLD
+#define STATS_LINE_FONT  FONT_KEY_GOTHIC_18
+#define STATS_LABEL_H 22
+#define STATS_VALUE_H 28
+#define STATS_LINE_H  24
+#endif
+#define STATS_GAP 6
+#define STATS_PAD_X 6
 static Window *s_stats_window;
 static StatusBarLayer *s_stats_status_bar;
 static ScrollLayer *s_stats_scroll_layer;
-static TextLayer *s_stats_text_layer;
+static Layer *s_stats_content_layer;
 static GRect s_stats_content_bounds;
-static char *s_stats_body = NULL;        // malloc'd on load, freed on unload
+static char s_stats_est[24] = "";
+static char s_stats_worked[24] = "";
+static char s_stats_session[40] = "";
 
-static void stats_compose_body(void) {
-  if (!s_stats_body) {
-    return;
-  }
-  if (!s_stats_have_data) {
-    strncpy(s_stats_body, "Loading…", STATS_BODY_CAP - 1);
-    s_stats_body[STATS_BODY_CAP - 1] = '\0';
-    return;
-  }
-  char est[24], worked[24], session[40];
-  format_duration_ms(s_stats_est_remaining_ms < 0 ? 0 : s_stats_est_remaining_ms, false, est, sizeof(est));
-  format_duration_ms(s_stats_worked_today_ms < 0 ? 0 : s_stats_worked_today_ms, false, worked, sizeof(worked));
-  char session_dur[24];
+// Recompute the value strings (the durations from the last payload, the
+// session from live tracking state).
+static void stats_compute_values(void) {
+  format_duration_ms(s_stats_est_remaining_ms < 0 ? 0 : s_stats_est_remaining_ms, false,
+                     s_stats_est, sizeof(s_stats_est));
+  format_duration_ms(s_stats_worked_today_ms < 0 ? 0 : s_stats_worked_today_ms, false,
+                     s_stats_worked, sizeof(s_stats_worked));
+  char dur[24];
   if (s_tracking_task_id[0] != '\0') {
-    int elapsed_ms = (int)((time(NULL) - s_tracking_start_epoch) * 1000);
-    format_duration_ms(elapsed_ms < 0 ? 0 : elapsed_ms, false, session_dur, sizeof(session_dur));
-    strncpy(session, session_dur, sizeof(session) - 1);
-    session[sizeof(session) - 1] = '\0';
+    int e = (int)((time(NULL) - s_tracking_start_epoch) * 1000);
+    format_duration_ms(e < 0 ? 0 : e, false, dur, sizeof(dur));
+    strncpy(s_stats_session, dur, sizeof(s_stats_session) - 1);
+    s_stats_session[sizeof(s_stats_session) - 1] = '\0';
   } else if (s_presence_state == 1) {
-    // No watch timer running, but a remote device is - show that session.
-    int elapsed_ms = (int)((time(NULL) - s_presence_elapsed_base) * 1000);
-    format_duration_ms(elapsed_ms < 0 ? 0 : elapsed_ms, false, session_dur, sizeof(session_dur));
-    snprintf(session, sizeof(session), "%s (%s)", session_dur,
+    int e = (int)((time(NULL) - s_presence_elapsed_base) * 1000);
+    format_duration_ms(e < 0 ? 0 : e, false, dur, sizeof(dur));
+    snprintf(s_stats_session, sizeof(s_stats_session), "%s (%s)", dur,
              s_presence_device[0] != '\0' ? s_presence_device : "remote");
   } else {
-    strncpy(session, "Not tracking", sizeof(session) - 1);
-    session[sizeof(session) - 1] = '\0';
+    strncpy(s_stats_session, "Not tracking", sizeof(s_stats_session) - 1);
+    s_stats_session[sizeof(s_stats_session) - 1] = '\0';
   }
-  snprintf(s_stats_body, STATS_BODY_CAP,
-           "Estimate remaining\n%s\n\nWorked today\n%s\n\nCurrent session\n%s\n\nCompleted today\n%d\n\nPROJECTS\n%s",
-           est, worked, session, s_stats_done_today,
-           s_stats_projects[0] != '\0' ? s_stats_projects : "None");
+}
+
+// Draws one label bar (black, white text) with its value below (black text).
+static int16_t stats_draw_metric(GContext *ctx, int16_t y, int16_t w,
+                                  const char *label, const char *value) {
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, GRect(0, y, w, STATS_LABEL_H), 0, GCornerNone);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_draw_text(ctx, label, fonts_get_system_font(STATS_LABEL_FONT),
+                      GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  y += STATS_LABEL_H;
+  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_draw_text(ctx, value, fonts_get_system_font(STATS_VALUE_FONT),
+                      GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_VALUE_H),
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  return y + STATS_VALUE_H + STATS_GAP;
+}
+
+static int stats_project_line_count(void) {
+  if (s_stats_projects[0] == '\0') {
+    return 1; // the "None" line
+  }
+  int n = 1;
+  for (const char *p = s_stats_projects; *p; p++) {
+    if (*p == '\n') {
+      n++;
+    }
+  }
+  return n;
+}
+
+static int16_t stats_content_height(void) {
+  return (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 4  // the four metrics
+       + STATS_LABEL_H + 2                                 // PROJECTS bar
+       + stats_project_line_count() * STATS_LINE_H
+       + 8;
+}
+
+static void stats_content_update_proc(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  int16_t w = b.size.w;
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, b, 0, GCornerNone);
+
+  if (!s_stats_have_data) {
+    graphics_context_set_text_color(ctx, GColorBlack);
+    graphics_draw_text(ctx, "Loading…", fonts_get_system_font(STATS_LINE_FONT),
+                        GRect(STATS_PAD_X, 8, w - STATS_PAD_X * 2, STATS_LINE_H),
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    return;
+  }
+
+  char done_buf[12];
+  snprintf(done_buf, sizeof(done_buf), "%d", s_stats_done_today);
+  int16_t y = 0;
+  y = stats_draw_metric(ctx, y, w, "Estimate remaining", s_stats_est);
+  y = stats_draw_metric(ctx, y, w, "Worked today", s_stats_worked);
+  y = stats_draw_metric(ctx, y, w, "Current session", s_stats_session);
+  y = stats_draw_metric(ctx, y, w, "Completed today", done_buf);
+
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, GRect(0, y, w, STATS_LABEL_H), 0, GCornerNone);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_draw_text(ctx, "PROJECTS", fonts_get_system_font(STATS_LABEL_FONT),
+                      GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  y += STATS_LABEL_H + 2;
+
+  graphics_context_set_text_color(ctx, GColorBlack);
+  GFont line_font = fonts_get_system_font(STATS_LINE_FONT);
+  if (s_stats_projects[0] == '\0') {
+    graphics_draw_text(ctx, "None", line_font,
+                        GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LINE_H),
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    return;
+  }
+  const char *p = s_stats_projects;
+  char line[80];
+  while (*p) {
+    const char *nl = strchr(p, '\n');
+    size_t len = nl ? (size_t)(nl - p) : strlen(p);
+    if (len >= sizeof(line)) {
+      len = sizeof(line) - 1;
+    }
+    memcpy(line, p, len);
+    line[len] = '\0';
+    graphics_draw_text(ctx, line, line_font,
+                        GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LINE_H),
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    y += STATS_LINE_H;
+    if (!nl) {
+      break;
+    }
+    p = nl + 1;
+  }
 }
 
 static void stats_render(void) {
-  if (!s_stats_text_layer) {
+  if (!s_stats_content_layer) {
     return;
   }
-  stats_compose_body();
-  text_layer_set_text(s_stats_text_layer, s_stats_body);
-  int16_t w = s_stats_content_bounds.size.w - NOTES_TAGS_PADDING_X * 2;
-  int16_t h = measure_notes_text_height(w, s_stats_body);
+  stats_compute_values();
+  int16_t h = s_stats_have_data ? stats_content_height() : s_stats_content_bounds.size.h;
   if (h < s_stats_content_bounds.size.h) {
     h = s_stats_content_bounds.size.h;
   }
-  GRect tf = layer_get_frame(text_layer_get_layer(s_stats_text_layer));
-  tf.origin.y = 0;
-  tf.size.h = h;
-  layer_set_frame(text_layer_get_layer(s_stats_text_layer), tf);
+  layer_set_frame(s_stats_content_layer, GRect(0, 0, s_stats_content_bounds.size.w, h));
   scroll_layer_set_content_size(s_stats_scroll_layer, GSize(s_stats_content_bounds.size.w, h));
-  scroll_layer_set_content_offset(s_stats_scroll_layer, GPointZero, false);
+  layer_mark_dirty(s_stats_content_layer);
 }
 
 static void request_stats(void) {
@@ -5021,32 +5121,22 @@ static void stats_window_load(Window *window) {
   scroll_layer_set_content_size(s_stats_scroll_layer, s_stats_content_bounds.size);
   scroll_layer_set_click_config_onto_window(s_stats_scroll_layer, window);
 
-  s_stats_text_layer = text_layer_create(GRect(NOTES_TAGS_PADDING_X, 0,
-                                               s_stats_content_bounds.size.w - NOTES_TAGS_PADDING_X * 2,
-                                               s_stats_content_bounds.size.h));
-  text_layer_set_text_alignment(s_stats_text_layer, GTextAlignmentLeft);
-  text_layer_set_font(s_stats_text_layer, fonts_get_system_font(NOTES_BODY_FONT_KEY));
-  text_layer_set_background_color(s_stats_text_layer, GColorWhite);
-  text_layer_set_text_color(s_stats_text_layer, GColorBlack);
-  text_layer_set_overflow_mode(s_stats_text_layer, GTextOverflowModeWordWrap);
-  scroll_layer_add_child(s_stats_scroll_layer, text_layer_get_layer(s_stats_text_layer));
+  s_stats_content_layer = layer_create(GRect(0, 0, s_stats_content_bounds.size.w,
+                                             s_stats_content_bounds.size.h));
+  layer_set_update_proc(s_stats_content_layer, stats_content_update_proc);
+  scroll_layer_add_child(s_stats_scroll_layer, s_stats_content_layer);
   layer_add_child(window_layer, scroll_layer_get_layer(s_stats_scroll_layer));
 
-  if (!s_stats_body) {
-    s_stats_body = malloc(STATS_BODY_CAP);
-  }
   stats_render();
 }
 
 static void stats_window_unload(Window *window) {
-  text_layer_destroy(s_stats_text_layer);
-  s_stats_text_layer = NULL;
+  layer_destroy(s_stats_content_layer);
+  s_stats_content_layer = NULL;
   scroll_layer_destroy(s_stats_scroll_layer);
   s_stats_scroll_layer = NULL;
   status_bar_layer_destroy(s_stats_status_bar);
   s_stats_status_bar = NULL;
-  free(s_stats_body);
-  s_stats_body = NULL;
 }
 
 // Created once and reused, like push_notes_window. Keeps whatever data the
