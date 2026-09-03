@@ -6,7 +6,7 @@
   "private": true,
   "keywords": ["pebble-app"],
   "scripts": {
-    "test": "node scripts/test-crypto.js && node scripts/test-argon2.js && node scripts/test-supersync-crypto.js && node scripts/test-task-store.js && node scripts/test-presence.js && node scripts/test-stats.js"
+    "test": "node scripts/test-crypto.js && node scripts/test-argon2.js && node scripts/test-supersync-crypto.js && node scripts/test-task-store.js && node scripts/test-presence.js && node scripts/test-stats.js && node scripts/test-op-queue.js"
   },
   "dependencies": {},
   "pebble": {

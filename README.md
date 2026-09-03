@@ -94,7 +94,10 @@ touch is opt-in until a firmware fix lands.
 - **Only some actions round-trip** — completion, scheduling, backlog/project
   moves, subtask promote/demote, time tracking, habits. Anything else (deadlines,
   tags) is a no-op on replay.
-- **No offline queue** — a failed upload waits for the next full sync.
+- **Offline changes are queued, conflicts are not** — a change made while
+  the phone is offline is held locally and re-sent, in order, on the next
+  sync. One the server actively rejects (a conflict with a newer edit made
+  elsewhere) is dropped rather than retried.
 - **No delete from the watch** — creation and completion round-trip; deleting a
   task or habit still needs the desktop/mobile app.
 - **`aplite` (original Pebble / Steel)** is RAM-limited: Finish Day, StopWatch
