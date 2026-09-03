@@ -21,6 +21,15 @@ def configure(ctx):
 def build(ctx):
     ctx.load('pebble_sdk')
 
+    # Link-time optimisation. The SDK already builds at -Os; adding -flto on top
+    # cross-module inlines and dead-strips ~2.3 KB off each aggregate binary.
+    # This matters because the emery build sits within ~60 bytes of PebbleOS's
+    # hard 64 KB app virtual-size ceiling (PebbleProcessInfo.virtual_size is a
+    # uint16_t) - without this, no further non-aplite C feature fits on emery.
+    for e in ctx.all_envs.values():
+        e.append_value('CFLAGS', ['-flto'])
+        e.append_value('LINKFLAGS', ['-flto', '-Os'])
+
     build_worker = os.path.exists('worker_src')
     binaries = []
 
