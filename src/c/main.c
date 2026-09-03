@@ -800,6 +800,18 @@ static void str_copy(char *dst, const char *src, size_t cap) {
   dst[cap - 1] = '\0';
 }
 
+// Read an optional AppMessage tuple, `fb` when the key is absent. The task /
+// habit / project / stats / presence payloads are full of "present it if sent,
+// else a default" fields.
+static int32_t tuple_int(DictionaryIterator *it, uint32_t key, int32_t fb) {
+  Tuple *t = dict_find(it, key);
+  return t ? t->value->int32 : fb;
+}
+static const char *tuple_str(DictionaryIterator *it, uint32_t key, const char *fb) {
+  Tuple *t = dict_find(it, key);
+  return t ? t->value->cstring : fb;
+}
+
 static void recompute_groups(void) {
   s_group_count = 0;
   int i = 0;
@@ -3381,8 +3393,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 
   switch (type_tuple->value->int32) {
     case MSG_TASK_SYNC_START: {
-      Tuple *total_tuple = dict_find(iterator, KEY_TASK_TOTAL);
-      s_incoming_total = total_tuple ? total_tuple->value->int32 : 0;
+      s_incoming_total = tuple_int(iterator, KEY_TASK_TOTAL, 0);
       if (s_incoming_total > MAX_TASKS) {
         s_incoming_total = MAX_TASKS;
       }
@@ -3393,11 +3404,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *idx_tuple = dict_find(iterator, KEY_TASK_INDEX);
       Tuple *id_tuple = dict_find(iterator, KEY_TASK_ID);
       Tuple *title_tuple = dict_find(iterator, KEY_TASK_TITLE);
-      Tuple *done_tuple = dict_find(iterator, KEY_TASK_DONE);
-      Tuple *project_tuple = dict_find(iterator, KEY_TASK_PROJECT);
-      Tuple *due_min_tuple = dict_find(iterator, KEY_TASK_DUE_MIN);
-      Tuple *time_spent_tuple = dict_find(iterator, KEY_TASK_TIME_SPENT_MS);
-      Tuple *time_estimate_tuple = dict_find(iterator, KEY_TASK_TIME_ESTIMATE_MS);
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -3407,25 +3413,20 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       str_copy(s_incoming[idx].id, id_tuple->value->cstring, MAX_ID_LEN);
       str_copy(s_incoming[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN);
-      str_copy(s_incoming[idx].project, project_tuple ? project_tuple->value->cstring : "", MAX_PROJECT_LEN);
+      str_copy(s_incoming[idx].project, tuple_str(iterator, KEY_TASK_PROJECT, ""), MAX_PROJECT_LEN);
 #ifndef PBL_PLATFORM_APLITE
-      {
-        Tuple *project_id_tuple = dict_find(iterator, KEY_TASK_PROJECT_ID);
-        str_copy(s_incoming[idx].project_id, project_id_tuple ? project_id_tuple->value->cstring : "", MAX_PROJECT_ID_LEN);
-        Tuple *tags_tuple = dict_find(iterator, KEY_TASK_TAGS);
-        str_copy(s_incoming[idx].tags, tags_tuple ? tags_tuple->value->cstring : "", MAX_TASK_TAGS_LEN);
+      str_copy(s_incoming[idx].project_id, tuple_str(iterator, KEY_TASK_PROJECT_ID, ""), MAX_PROJECT_ID_LEN);
+      str_copy(s_incoming[idx].tags, tuple_str(iterator, KEY_TASK_TAGS, ""), MAX_TASK_TAGS_LEN);
 #if TODAY_PROJECT_SWATCH
-        Tuple *pcolor_tuple = dict_find(iterator, KEY_TASK_PROJECT_COLOR);
-        s_incoming[idx].project_color = pcolor_tuple ? (uint8_t)pcolor_tuple->value->int32 : 0;
+      s_incoming[idx].project_color = (uint8_t)tuple_int(iterator, KEY_TASK_PROJECT_COLOR, 0);
 #endif
-      }
 #endif
-      s_incoming[idx].done = done_tuple && done_tuple->value->int32 != 0;
+      s_incoming[idx].done = tuple_int(iterator, KEY_TASK_DONE, 0) != 0;
       // Key absent (not 0, a valid 12:00am) means "no dueWithTime" - the phone
       // only sends it when the task has one. Same for the two below.
-      s_incoming[idx].due_min = due_min_tuple ? due_min_tuple->value->int32 : -1;
-      s_incoming[idx].time_spent_ms = time_spent_tuple ? time_spent_tuple->value->int32 : 0;
-      s_incoming[idx].time_estimate_ms = time_estimate_tuple ? time_estimate_tuple->value->int32 : 0;
+      s_incoming[idx].due_min = tuple_int(iterator, KEY_TASK_DUE_MIN, -1);
+      s_incoming[idx].time_spent_ms = tuple_int(iterator, KEY_TASK_TIME_SPENT_MS, 0);
+      s_incoming[idx].time_estimate_ms = tuple_int(iterator, KEY_TASK_TIME_ESTIMATE_MS, 0);
       break;
     }
     case MSG_TASK_SYNC_END: {
@@ -3472,8 +3473,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       break;
     }
     case MSG_HABIT_SYNC_START: {
-      Tuple *total_tuple = dict_find(iterator, KEY_HABIT_TOTAL);
-      s_habit_incoming_total = total_tuple ? total_tuple->value->int32 : 0;
+      s_habit_incoming_total = tuple_int(iterator, KEY_HABIT_TOTAL, 0);
       if (s_habit_incoming_total > MAX_HABITS) {
         s_habit_incoming_total = MAX_HABITS;
       }
@@ -3483,10 +3483,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Tuple *idx_tuple = dict_find(iterator, KEY_HABIT_INDEX);
       Tuple *id_tuple = dict_find(iterator, KEY_HABIT_ID);
       Tuple *title_tuple = dict_find(iterator, KEY_HABIT_TITLE);
-      Tuple *done_tuple = dict_find(iterator, KEY_HABIT_DONE);
-      Tuple *value_tuple = dict_find(iterator, KEY_HABIT_VALUE);
-      Tuple *goal_tuple = dict_find(iterator, KEY_HABIT_GOAL);
-      Tuple *type_tuple = dict_find(iterator, KEY_HABIT_TYPE);
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
@@ -3498,21 +3494,20 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       // the Habit struct comment).
       str_copy(s_habits[idx].id, id_tuple->value->cstring, MAX_HABIT_ID_LEN);
       str_copy(s_habits[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN);
-      s_habits[idx].done = done_tuple && done_tuple->value->int32 != 0;
-      s_habits[idx].value = value_tuple ? value_tuple->value->int32 : 0;
-      s_habits[idx].goal = goal_tuple ? goal_tuple->value->int32 : 0;
+      s_habits[idx].done = tuple_int(iterator, KEY_HABIT_DONE, 0) != 0;
+      s_habits[idx].value = tuple_int(iterator, KEY_HABIT_VALUE, 0);
+      s_habits[idx].goal = tuple_int(iterator, KEY_HABIT_GOAL, 0);
       // habit type: 0 = ClickCounter, 1 = StopWatch, 2 = RepeatedCountdownReminder.
+      int habit_type = tuple_int(iterator, KEY_HABIT_TYPE, 0);
 #ifdef PBL_PLATFORM_APLITE
       // aplite has no code budget for the countdown path, and both timer types
       // are excluded from its visible list identically, so collapse both into
       // is_stopwatch (is_countdown is never read there).
-      s_habits[idx].is_stopwatch = type_tuple && type_tuple->value->int32 != 0;
+      s_habits[idx].is_stopwatch = habit_type != 0;
 #else
-      int habit_type = type_tuple ? type_tuple->value->int32 : 0;
       s_habits[idx].is_stopwatch = habit_type == 1;
       s_habits[idx].is_countdown = habit_type == 2;
-      Tuple *countdown_tuple = dict_find(iterator, KEY_HABIT_COUNTDOWN_MS);
-      s_habits[idx].countdown_ms = countdown_tuple ? countdown_tuple->value->int32 : 0;
+      s_habits[idx].countdown_ms = tuple_int(iterator, KEY_HABIT_COUNTDOWN_MS, 0);
 #endif
       break;
     }
@@ -3532,8 +3527,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (!s_browse_projects) {
         break;
       }
-      Tuple *total_tuple = dict_find(iterator, KEY_PROJECT_TOTAL);
-      s_browse_project_incoming = total_tuple ? total_tuple->value->int32 : 0;
+      s_browse_project_incoming = tuple_int(iterator, KEY_PROJECT_TOTAL, 0);
       if (s_browse_project_incoming > MAX_BROWSE_PROJECTS) {
         s_browse_project_incoming = MAX_BROWSE_PROJECTS;
       }
@@ -3555,8 +3549,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       str_copy(s_browse_projects[idx].id, id_tuple->value->cstring, MAX_PROJECT_ID_LEN);
       str_copy(s_browse_projects[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN);
-      Tuple *color_tuple = dict_find(iterator, KEY_PROJECT_COLOR);
-      s_browse_projects[idx].color = color_tuple ? color_tuple->value->int32 : 0;
+      s_browse_projects[idx].color = tuple_int(iterator, KEY_PROJECT_COLOR, 0);
       break;
     }
     case MSG_PROJECT_LIST_END: {
@@ -3581,8 +3574,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
           strncmp(pid_tuple->value->cstring, s_browse_project_id, MAX_PROJECT_ID_LEN) != 0) {
         break;
       }
-      Tuple *total_tuple = dict_find(iterator, KEY_TASK_TOTAL);
-      s_browse_task_incoming = total_tuple ? total_tuple->value->int32 : 0;
+      s_browse_task_incoming = tuple_int(iterator, KEY_TASK_TOTAL, 0);
       if (s_browse_task_incoming > MAX_BROWSE_TASKS) {
         s_browse_task_incoming = MAX_BROWSE_TASKS;
       }
@@ -3613,16 +3605,11 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       str_copy(bt->id, id_tuple->value->cstring, MAX_ID_LEN);
       str_copy(bt->title, title_tuple->value->cstring, MAX_TITLE_LEN);
       bt->project[0] = '\0';
-      Tuple *done_tuple = dict_find(iterator, KEY_TASK_DONE);
-      bt->done = done_tuple && done_tuple->value->int32 != 0;
-      Tuple *due_tuple = dict_find(iterator, KEY_TASK_DUE_MIN);
-      bt->due_min = due_tuple ? due_tuple->value->int32 : -1;
-      Tuple *spent_tuple = dict_find(iterator, KEY_TASK_TIME_SPENT_MS);
-      bt->time_spent_ms = spent_tuple ? spent_tuple->value->int32 : 0;
-      Tuple *estimate_tuple = dict_find(iterator, KEY_TASK_TIME_ESTIMATE_MS);
-      bt->time_estimate_ms = estimate_tuple ? estimate_tuple->value->int32 : 0;
-      Tuple *backlog_tuple = dict_find(iterator, KEY_PROJECT_TASK_BACKLOG);
-      if (backlog_tuple && backlog_tuple->value->int32 != 0 && idx < s_browse_backlog_start) {
+      bt->done = tuple_int(iterator, KEY_TASK_DONE, 0) != 0;
+      bt->due_min = tuple_int(iterator, KEY_TASK_DUE_MIN, -1);
+      bt->time_spent_ms = tuple_int(iterator, KEY_TASK_TIME_SPENT_MS, 0);
+      bt->time_estimate_ms = tuple_int(iterator, KEY_TASK_TIME_ESTIMATE_MS, 0);
+      if (tuple_int(iterator, KEY_PROJECT_TASK_BACKLOG, 0) != 0 && idx < s_browse_backlog_start) {
         s_browse_backlog_start = idx;
       }
       break;
@@ -3647,18 +3634,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 #endif
 #ifndef PBL_PLATFORM_APLITE
     case MSG_STATS_DATA: {
-      Tuple *est_tuple = dict_find(iterator, KEY_STATS_EST_REMAINING_MS);
-      Tuple *worked_tuple = dict_find(iterator, KEY_STATS_WORKED_TODAY_MS);
-      Tuple *done_tuple = dict_find(iterator, KEY_STATS_DONE_TODAY);
-      Tuple *text_tuple = dict_find(iterator, KEY_STATS_TEXT);
-      s_stats_est_remaining_ms = est_tuple ? est_tuple->value->int32 : 0;
-      s_stats_worked_today_ms = worked_tuple ? worked_tuple->value->int32 : 0;
-      s_stats_done_today = done_tuple ? done_tuple->value->int32 : 0;
-      if (text_tuple) {
-        str_copy(s_stats_projects, text_tuple->value->cstring, sizeof(s_stats_projects));
-      } else {
-        s_stats_projects[0] = '\0';
-      }
+      s_stats_est_remaining_ms = tuple_int(iterator, KEY_STATS_EST_REMAINING_MS, 0);
+      s_stats_worked_today_ms = tuple_int(iterator, KEY_STATS_WORKED_TODAY_MS, 0);
+      s_stats_done_today = tuple_int(iterator, KEY_STATS_DONE_TODAY, 0);
+      str_copy(s_stats_projects, tuple_str(iterator, KEY_STATS_TEXT, ""), sizeof(s_stats_projects));
       s_stats_have_data = true;
       stats_render(); // no-op if the window was closed before the reply landed
       break;
@@ -3669,12 +3648,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (status_tuple) {
         set_status_code(status_tuple->value->int32);
       }
-      Tuple *msg_tuple = dict_find(iterator, KEY_STATUS_MSG);
-      if (msg_tuple) {
-        str_copy(s_status_msg, msg_tuple->value->cstring, MAX_STATUS_MSG_LEN);
-      } else {
-        s_status_msg[0] = '\0';
-      }
+      str_copy(s_status_msg, tuple_str(iterator, KEY_STATUS_MSG, ""), MAX_STATUS_MSG_LEN);
       // Feature toggles from the phone's pairing settings - optional fields,
       // absent-means-unchanged so a version mismatch can't reset a flag. Read
       // before reload_data so a change shows in the same redraw.
@@ -3764,27 +3738,19 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     }
 #ifndef PBL_PLATFORM_APLITE
     case MSG_PRESENCE_UPDATE: {
-      Tuple *state_tuple = dict_find(iterator, KEY_PRESENCE_STATE);
-      int new_state = state_tuple ? state_tuple->value->int32 : 0;
-      s_presence_state = new_state;
-      if (new_state == 0) {
+      s_presence_state = tuple_int(iterator, KEY_PRESENCE_STATE, 0);
+      if (s_presence_state == 0) {
         s_presence_task[0] = '\0';
         s_presence_device[0] = '\0';
         s_presence_can_stop = false;
         s_presence_stopping = false;
       } else {
-        Tuple *title_tuple = dict_find(iterator, KEY_PRESENCE_TASK_TITLE);
-        str_copy(s_presence_task, title_tuple ? title_tuple->value->cstring : "", sizeof(s_presence_task));
-        Tuple *device_tuple = dict_find(iterator, KEY_PRESENCE_DEVICE);
-        str_copy(s_presence_device, device_tuple ? device_tuple->value->cstring : "", sizeof(s_presence_device));
-        Tuple *elapsed_tuple = dict_find(iterator, KEY_PRESENCE_ELAPSED_S);
-        s_presence_elapsed_base = time(NULL) - (time_t)(elapsed_tuple ? elapsed_tuple->value->int32 : 0);
-        Tuple *can_stop_tuple = dict_find(iterator, KEY_PRESENCE_CAN_STOP);
-        s_presence_can_stop = can_stop_tuple && can_stop_tuple->value->int32 != 0;
-        Tuple *spent_tuple = dict_find(iterator, KEY_PRESENCE_SPENT_MS);
-        s_presence_spent_ms = spent_tuple ? spent_tuple->value->int32 : 0;
-        Tuple *estimate_tuple = dict_find(iterator, KEY_PRESENCE_ESTIMATE_MS);
-        s_presence_estimate_ms = estimate_tuple ? estimate_tuple->value->int32 : 0;
+        str_copy(s_presence_task, tuple_str(iterator, KEY_PRESENCE_TASK_TITLE, ""), sizeof(s_presence_task));
+        str_copy(s_presence_device, tuple_str(iterator, KEY_PRESENCE_DEVICE, ""), sizeof(s_presence_device));
+        s_presence_elapsed_base = time(NULL) - (time_t)tuple_int(iterator, KEY_PRESENCE_ELAPSED_S, 0);
+        s_presence_can_stop = tuple_int(iterator, KEY_PRESENCE_CAN_STOP, 0) != 0;
+        s_presence_spent_ms = tuple_int(iterator, KEY_PRESENCE_SPENT_MS, 0);
+        s_presence_estimate_ms = tuple_int(iterator, KEY_PRESENCE_ESTIMATE_MS, 0);
         // The phone confirms a stop by clearing (state 0), never by another
         // still-live update - so any fresh state drops the "Stopping..." latch.
         s_presence_stopping = false;
@@ -3794,9 +3760,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       // up. The phone flags this (PRESENCE_NEW_SESSION, a new sessionId); a
       // same-session heartbeat clears it so the repeat interval isn't reset
       // every 60s. Skipped while tracking locally - that session owns the latch.
-      Tuple *new_session_tuple = dict_find(iterator, KEY_PRESENCE_NEW_SESSION);
-      if (s_tracking_task_id[0] == '\0' && new_session_tuple &&
-          new_session_tuple->value->int32 != 0) {
+      if (s_tracking_task_id[0] == '\0' && tuple_int(iterator, KEY_PRESENCE_NEW_SESSION, 0) != 0) {
         s_overtime_notified = false;
         s_overtime_last_notify_epoch = 0;
         hide_overtime_banner();
