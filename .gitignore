@@ -8,3 +8,4 @@ CLAUDE.md
 
 # Claude Code local settings (per-machine permissions, not shared)
 .claude/settings.local.json
+pebble_screenshot_*.png
