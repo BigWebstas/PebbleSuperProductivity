@@ -825,6 +825,24 @@ static void draw_text(GContext *ctx, const char *text, const char *font_key,
   graphics_draw_text(ctx, text, fonts_get_system_font(font_key), box, overflow, align, NULL);
 }
 
+// The create + add-to-parent pair every window_load repeats.
+static StatusBarLayer *add_status_bar(Layer *parent) {
+  StatusBarLayer *sb = status_bar_layer_create();
+  layer_add_child(parent, status_bar_layer_get_layer(sb));
+  return sb;
+}
+
+// A text layer with the system font, an alignment, and parented - the common
+// case in the sub-window loads. Callers add any extra text_layer_set_* after.
+static TextLayer *make_text_layer(Layer *parent, GRect frame, const char *font_key,
+                                  GTextAlignment align) {
+  TextLayer *tl = text_layer_create(frame);
+  text_layer_set_font(tl, fonts_get_system_font(font_key));
+  text_layer_set_text_alignment(tl, align);
+  layer_add_child(parent, text_layer_get_layer(tl));
+  return tl;
+}
+
 // Read an optional AppMessage tuple, `fb` when the key is absent. The task /
 // habit / project / stats / presence payloads are full of "present it if sent,
 // else a default" fields.
@@ -4336,8 +4354,7 @@ static void habits_window_load(Window *window) {
   backlight_touch();
 
   const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_habits_status_bar = status_bar_layer_create();
-  layer_add_child(window_layer, status_bar_layer_get_layer(s_habits_status_bar));
+  s_habits_status_bar = add_status_bar(window_layer);
 
   GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
                                 bounds.size.w, bounds.size.h - status_bar_height);
@@ -4356,11 +4373,9 @@ static void habits_window_load(Window *window) {
   menu_layer_set_click_config_onto_window(s_habits_menu_layer, window);
   layer_add_child(window_layer, menu_layer_get_layer(s_habits_menu_layer));
 
-  s_habits_empty_layer = text_layer_create(content_bounds);
-  text_layer_set_text_alignment(s_habits_empty_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_habits_empty_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
+  s_habits_empty_layer = make_text_layer(window_layer, content_bounds,
+                                         EMPTY_MSG_FONT_KEY, GTextAlignmentCenter);
   text_layer_set_text(s_habits_empty_layer, "No habits synced.");
-  layer_add_child(window_layer, text_layer_get_layer(s_habits_empty_layer));
 
   update_habits_empty_layer();
 
@@ -4705,8 +4720,7 @@ static void browse_window_load(Window *window) {
   GRect bounds = layer_get_bounds(window_layer);
   backlight_touch();
 
-  s_browse_status_bar = status_bar_layer_create();
-  layer_add_child(window_layer, status_bar_layer_get_layer(s_browse_status_bar));
+  s_browse_status_bar = add_status_bar(window_layer);
 
   GRect content = GRect(bounds.origin.x, bounds.origin.y + STATUS_BAR_LAYER_HEIGHT,
                          bounds.size.w, bounds.size.h - STATUS_BAR_LAYER_HEIGHT);
@@ -4727,10 +4741,7 @@ static void browse_window_load(Window *window) {
                                                 window_get_click_config_context(window));
   layer_add_child(window_layer, menu_layer_get_layer(s_browse_menu));
 
-  s_browse_empty = text_layer_create(content);
-  text_layer_set_text_alignment(s_browse_empty, GTextAlignmentCenter);
-  text_layer_set_font(s_browse_empty, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
-  layer_add_child(window_layer, text_layer_get_layer(s_browse_empty));
+  s_browse_empty = make_text_layer(window_layer, content, EMPTY_MSG_FONT_KEY, GTextAlignmentCenter);
 
   browse_update_empty();
 }
@@ -5036,8 +5047,7 @@ static void notes_window_load(Window *window) {
   backlight_touch();
 
   const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_notes_status_bar = status_bar_layer_create();
-  layer_add_child(window_layer, status_bar_layer_get_layer(s_notes_status_bar));
+  s_notes_status_bar = add_status_bar(window_layer);
 
   GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
                                 bounds.size.w, bounds.size.h - status_bar_height);
@@ -5290,8 +5300,7 @@ static void stats_window_load(Window *window) {
   backlight_touch();
 
   const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_stats_status_bar = status_bar_layer_create();
-  layer_add_child(window_layer, status_bar_layer_get_layer(s_stats_status_bar));
+  s_stats_status_bar = add_status_bar(window_layer);
 
   s_stats_content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
                                   bounds.size.w, bounds.size.h - status_bar_height);
@@ -5461,8 +5470,7 @@ static void schedule_window_load(Window *window) {
   backlight_touch();
 
   const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_schedule_status_bar = status_bar_layer_create();
-  layer_add_child(window_layer, status_bar_layer_get_layer(s_schedule_status_bar));
+  s_schedule_status_bar = add_status_bar(window_layer);
 
   GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
                                 bounds.size.w, bounds.size.h - status_bar_height);
@@ -5481,11 +5489,9 @@ static void schedule_window_load(Window *window) {
   menu_layer_set_click_config_onto_window(s_schedule_menu_layer, window);
   layer_add_child(window_layer, menu_layer_get_layer(s_schedule_menu_layer));
 
-  s_schedule_empty_layer = text_layer_create(content_bounds);
-  text_layer_set_text_alignment(s_schedule_empty_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_schedule_empty_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
+  s_schedule_empty_layer = make_text_layer(window_layer, content_bounds,
+                                           EMPTY_MSG_FONT_KEY, GTextAlignmentCenter);
   text_layer_set_text(s_schedule_empty_layer, "Nothing scheduled for today.");
-  layer_add_child(window_layer, text_layer_get_layer(s_schedule_empty_layer));
 
   schedule_update_empty_layer();
 }
@@ -5642,38 +5648,29 @@ static void live_window_load(Window *window) {
   backlight_touch();
 
   const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_live_status_bar = status_bar_layer_create();
-  layer_add_child(window_layer, status_bar_layer_get_layer(s_live_status_bar));
+  s_live_status_bar = add_status_bar(window_layer);
 
   int16_t x = bounds.origin.x + 6;
   int16_t w = bounds.size.w - 12;
   int16_t y = bounds.origin.y + status_bar_height + 6;
 
   // Task name first (what the user asked to see), wrapping to two lines.
-  s_live_task_layer = text_layer_create(GRect(x, y, w, 50));
-  text_layer_set_font(s_live_task_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
-  text_layer_set_text_alignment(s_live_task_layer, GTextAlignmentCenter);
+  s_live_task_layer = make_text_layer(window_layer, GRect(x, y, w, 50),
+                                      FONT_KEY_GOTHIC_24_BOLD, GTextAlignmentCenter);
   text_layer_set_overflow_mode(s_live_task_layer, GTextOverflowModeWordWrap);
-  layer_add_child(window_layer, text_layer_get_layer(s_live_task_layer));
   y += 54;
 
   // Then the state line ("Tracking on Desktop" / "Stopped on Desktop"), smaller.
-  s_live_state_layer = text_layer_create(GRect(x, y, w, 22));
-  text_layer_set_font(s_live_state_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
-  text_layer_set_text_alignment(s_live_state_layer, GTextAlignmentCenter);
-  layer_add_child(window_layer, text_layer_get_layer(s_live_state_layer));
+  s_live_state_layer = make_text_layer(window_layer, GRect(x, y, w, 22),
+                                       FONT_KEY_GOTHIC_18, GTextAlignmentCenter);
   y += 26;
 
-  s_live_elapsed_layer = text_layer_create(GRect(x, y, w, 30));
-  text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
-  text_layer_set_text_alignment(s_live_elapsed_layer, GTextAlignmentCenter);
-  layer_add_child(window_layer, text_layer_get_layer(s_live_elapsed_layer));
+  s_live_elapsed_layer = make_text_layer(window_layer, GRect(x, y, w, 30),
+                                         FONT_KEY_GOTHIC_28_BOLD, GTextAlignmentCenter);
 
-  s_live_hint_layer = text_layer_create(GRect(x, bounds.size.h - 20, w, 18));
-  text_layer_set_font(s_live_hint_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-  text_layer_set_text_alignment(s_live_hint_layer, GTextAlignmentCenter);
+  s_live_hint_layer = make_text_layer(window_layer, GRect(x, bounds.size.h - 20, w, 18),
+                                      FONT_KEY_GOTHIC_14, GTextAlignmentCenter);
   text_layer_set_text_color(s_live_hint_layer, GColorDarkGray);
-  layer_add_child(window_layer, text_layer_get_layer(s_live_hint_layer));
 
   window_set_click_config_provider(window, live_window_click_config_provider);
   live_window_refresh();
@@ -5747,8 +5744,7 @@ static void window_load(Window *window) {
   backlight_touch();
 
   const int16_t status_bar_height = STATUS_BAR_LAYER_HEIGHT;
-  s_status_bar = status_bar_layer_create();
-  layer_add_child(window_layer, status_bar_layer_get_layer(s_status_bar));
+  s_status_bar = add_status_bar(window_layer);
 
   GRect content_bounds = GRect(bounds.origin.x, bounds.origin.y + status_bar_height,
                                 bounds.size.w, bounds.size.h - status_bar_height);
@@ -5783,10 +5779,8 @@ static void window_load(Window *window) {
   #define LOGO_STRIP_HEIGHT 58
   GRect empty_text_bounds = GRect(content_bounds.origin.x, content_bounds.origin.y,
                                    content_bounds.size.w, content_bounds.size.h - LOGO_STRIP_HEIGHT);
-  s_empty_layer = text_layer_create(empty_text_bounds);
-  text_layer_set_text_alignment(s_empty_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_empty_layer, fonts_get_system_font(EMPTY_MSG_FONT_KEY));
-  layer_add_child(window_layer, text_layer_get_layer(s_empty_layer));
+  s_empty_layer = make_text_layer(window_layer, empty_text_bounds,
+                                  EMPTY_MSG_FONT_KEY, GTextAlignmentCenter);
 
 #ifndef PBL_PLATFORM_APLITE
   // Bottom slice of the text area for s_sync_progress_layer, sized off
@@ -5799,11 +5793,9 @@ static void window_load(Window *window) {
   GRect sync_progress_bounds = GRect(empty_text_bounds.origin.x,
                                       empty_text_bounds.origin.y + empty_text_bounds.size.h - SYNC_PROGRESS_HEIGHT,
                                       empty_text_bounds.size.w, SYNC_PROGRESS_HEIGHT);
-  s_sync_progress_layer = text_layer_create(sync_progress_bounds);
-  text_layer_set_text_alignment(s_sync_progress_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_sync_progress_layer, fonts_get_system_font(CHROME_FONT_KEY));
+  s_sync_progress_layer = make_text_layer(window_layer, sync_progress_bounds,
+                                          CHROME_FONT_KEY, GTextAlignmentCenter);
   layer_set_hidden(text_layer_get_layer(s_sync_progress_layer), true);
-  layer_add_child(window_layer, text_layer_get_layer(s_sync_progress_layer));
 #endif
 
   GRect logo_bounds = GRect(content_bounds.origin.x + (content_bounds.size.w - LOGO_SIZE) / 2,
@@ -5840,16 +5832,13 @@ static void window_load(Window *window) {
 
   // Full content_bounds, added last so it draws on top of every other layer.
   // Hidden by default; only show_error_overlay() reveals it.
-  s_error_layer = text_layer_create(content_bounds);
-  text_layer_set_text_alignment(s_error_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_error_layer, fonts_get_system_font(TITLE_FONT_KEY));
+  s_error_layer = make_text_layer(window_layer, content_bounds, TITLE_FONT_KEY, GTextAlignmentCenter);
   text_layer_set_background_color(s_error_layer, GColorRed);
   // White, not black - better contrast on red, and on aplite GColorRed may
   // reduce to black, which would make black text invisible.
   text_layer_set_text_color(s_error_layer, GColorWhite);
   text_layer_set_overflow_mode(s_error_layer, GTextOverflowModeWordWrap);
   layer_set_hidden(text_layer_get_layer(s_error_layer), true);
-  layer_add_child(window_layer, text_layer_get_layer(s_error_layer));
 
 #ifndef PBL_PLATFORM_APLITE
   // Over-estimate banner - a red strip across the top of the list, same
@@ -5857,14 +5846,12 @@ static void window_load(Window *window) {
   // crosses its estimate.
   GRect overtime_bounds = GRect(content_bounds.origin.x, content_bounds.origin.y,
                                  content_bounds.size.w, OVERTIME_BANNER_HEIGHT);
-  s_overtime_banner_layer = text_layer_create(overtime_bounds);
-  text_layer_set_text_alignment(s_overtime_banner_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_overtime_banner_layer, fonts_get_system_font(TITLE_FONT_KEY));
+  s_overtime_banner_layer = make_text_layer(window_layer, overtime_bounds,
+                                            TITLE_FONT_KEY, GTextAlignmentCenter);
   text_layer_set_background_color(s_overtime_banner_layer, GColorRed);
   text_layer_set_text_color(s_overtime_banner_layer, GColorWhite);
   text_layer_set_overflow_mode(s_overtime_banner_layer, GTextOverflowModeTrailingEllipsis);
   layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), true);
-  layer_add_child(window_layer, text_layer_get_layer(s_overtime_banner_layer));
 #endif
 
   update_empty_layer();
