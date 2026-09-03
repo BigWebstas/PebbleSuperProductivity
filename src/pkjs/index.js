@@ -2181,6 +2181,13 @@ var presenceBroadcasting = null; // { taskId, sinceTs }
 // (producer closed its app without a final "stopped").
 var PRESENCE_STALE_CHECK_MS = 20 * 1000;
 
+// While a background "the tracked task isn't in our synced state yet" catch-up
+// sync sequence is running: { taskId, tries }. Bounded so a task that never
+// arrives (deleted again, permission change) can't loop forever.
+var presenceCatchUp = null;
+var PRESENCE_CATCH_UP_MAX_TRIES = 3;
+var PRESENCE_CATCH_UP_RETRY_MS = 5 * 1000;
+
 function stopPresenceStaleTimer() {
   if (presenceStaleTimer) {
     clearInterval(presenceStaleTimer);
@@ -2188,8 +2195,59 @@ function stopPresenceStaleTimer() {
   }
 }
 
+// A task the desktop just created and immediately started tracking can reach
+// the watch as presence (over the WS) before this phone has pulled the op that
+// creates it - so pushPresenceToWatch can't resolve a title and the watch
+// shows "a recently started task". Pull it in with a background sync, then
+// re-push the presence view so the real name lands. Bailed the moment the task
+// shows up, the session changes, or the try budget runs out.
+function catchUpTrackedTask(view) {
+  if (view.opaque || view.state !== 'tracking' || !view.taskId) {
+    return;
+  }
+  if (loadState().task[view.taskId]) {
+    return; // already synced - nothing to chase
+  }
+  if (presenceCatchUp && presenceCatchUp.taskId === view.taskId) {
+    return; // already chasing this one
+  }
+  presenceCatchUp = { taskId: view.taskId, tries: 0 };
+  var step = function () {
+    if (!presenceCatchUp || presenceCatchUp.taskId !== view.taskId ||
+        presenceLastSessionId !== view.sessionId) {
+      presenceCatchUp = null;
+      return;
+    }
+    presenceCatchUp.tries++;
+    var syncPromise = doSync();
+    var afterSync = function () {
+      if (!presenceCatchUp || presenceLastSessionId !== view.sessionId) {
+        presenceCatchUp = null;
+        return;
+      }
+      if (loadState().task[view.taskId]) {
+        presenceCatchUp = null;
+        pushPresenceToWatch(view, false);
+        return;
+      }
+      if (presenceCatchUp.tries >= PRESENCE_CATCH_UP_MAX_TRIES) {
+        presenceCatchUp = null;
+        return;
+      }
+      setTimeout(step, PRESENCE_CATCH_UP_RETRY_MS);
+    };
+    if (syncPromise && typeof syncPromise.then === 'function') {
+      syncPromise.then(afterSync);
+    } else {
+      setTimeout(afterSync, PRESENCE_CATCH_UP_RETRY_MS);
+    }
+  };
+  step();
+}
+
 function sendPresenceClear() {
   presenceLastSessionId = null;
+  presenceCatchUp = null;
   stopPresenceStaleTimer();
   sendWithRetry({ MSG_TYPE: MSG_PRESENCE_UPDATE, PRESENCE_STATE: 0 }, function () {}, function (e) {
     console.log('[pkjs] giving up on PRESENCE_UPDATE(clear): ' + JSON.stringify(e));
@@ -2276,6 +2334,7 @@ function onPresenceState(view) {
   }
 
   pushPresenceToWatch(view, false);
+  catchUpTrackedTask(view);
 
   stopPresenceStaleTimer();
   if (!view.opaque && view.state === 'tracking') {
