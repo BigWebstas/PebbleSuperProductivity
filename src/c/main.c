@@ -793,6 +793,13 @@ static int s_scroll_offset_px = 0;
 static AppTimer *s_syncing_timer = NULL;
 static int s_syncing_dots = 0;
 
+// strncpy that always NUL-terminates - the copy-into-fixed-buffer pattern used
+// throughout. `cap` is the full buffer size (a sizeof or a MAX_* constant).
+static void str_copy(char *dst, const char *src, size_t cap) {
+  strncpy(dst, src, cap - 1);
+  dst[cap - 1] = '\0';
+}
+
 static void recompute_groups(void) {
   s_group_count = 0;
   int i = 0;
@@ -801,11 +808,9 @@ static void recompute_groups(void) {
     while (j < s_task_count && strncmp(s_tasks[j].project, s_tasks[i].project, MAX_PROJECT_LEN) == 0) {
       j++;
     }
-    strncpy(s_groups[s_group_count].name, s_tasks[i].project, MAX_PROJECT_LEN - 1);
-    s_groups[s_group_count].name[MAX_PROJECT_LEN - 1] = '\0';
+    str_copy(s_groups[s_group_count].name, s_tasks[i].project, MAX_PROJECT_LEN);
 #ifndef PBL_PLATFORM_APLITE
-    strncpy(s_groups[s_group_count].project_id, s_tasks[i].project_id, MAX_PROJECT_ID_LEN - 1);
-    s_groups[s_group_count].project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+    str_copy(s_groups[s_group_count].project_id, s_tasks[i].project_id, MAX_PROJECT_ID_LEN);
 #endif
     s_groups[s_group_count].start = i;
     s_groups[s_group_count].count = j - i;
@@ -1749,16 +1754,14 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
       format_duration_ms(task->time_estimate_ms, false, estimate_text, sizeof(estimate_text));
       char combined[48];
       snprintf(combined, sizeof(combined), "%s / %s", time_text, estimate_text);
-      strncpy(time_text, combined, sizeof(time_text) - 1);
-      time_text[sizeof(time_text) - 1] = '\0';
+      str_copy(time_text, combined, sizeof(time_text));
     }
     size_t existing_len = strlen(subtitle);
     if (existing_len > 0) {
       const char *separator = is_tracking_this ? "  " : " - ";
       snprintf(subtitle + existing_len, sizeof(subtitle) - existing_len, "%s%s", separator, time_text);
     } else {
-      strncpy(subtitle, time_text, sizeof(subtitle) - 1);
-      subtitle[sizeof(subtitle) - 1] = '\0';
+      str_copy(subtitle, time_text, sizeof(subtitle));
     }
   }
 
@@ -2217,14 +2220,12 @@ static void begin_send(int msg_type, const char *str_val, const char *str_val2, 
   }
   s_retry_msg_type = msg_type;
   if (str_val) {
-    strncpy(s_retry_str, str_val, sizeof(s_retry_str) - 1);
-    s_retry_str[sizeof(s_retry_str) - 1] = '\0';
+    str_copy(s_retry_str, str_val, sizeof(s_retry_str));
   } else {
     s_retry_str[0] = '\0';
   }
   if (str_val2) {
-    strncpy(s_retry_str2, str_val2, sizeof(s_retry_str2) - 1);
-    s_retry_str2[sizeof(s_retry_str2) - 1] = '\0';
+    str_copy(s_retry_str2, str_val2, sizeof(s_retry_str2));
   } else {
     s_retry_str2[0] = '\0';
   }
@@ -2558,8 +2559,7 @@ static void stop_tracking_tick(void) {
 }
 
 static void start_tracking(Task *task) {
-  strncpy(s_tracking_task_id, task->id, MAX_ID_LEN - 1);
-  s_tracking_task_id[MAX_ID_LEN - 1] = '\0';
+  str_copy(s_tracking_task_id, task->id, MAX_ID_LEN);
   s_tracking_start_epoch = time(NULL);
   save_tracking();
 #ifndef PBL_PLATFORM_APLITE
@@ -2581,8 +2581,7 @@ static void start_tracking(Task *task) {
   // Pin this task to the top (if enabled); cancel any grace timer from a
   // just-stopped task and re-lay-out the list.
   cancel_unpin_timer();
-  strncpy(s_pinned_task_id, task->id, MAX_ID_LEN - 1);
-  s_pinned_task_id[MAX_ID_LEN - 1] = '\0';
+  str_copy(s_pinned_task_id, task->id, MAX_ID_LEN);
 #endif
   start_tracking_tick();
 #ifndef PBL_PLATFORM_APLITE
@@ -2759,8 +2758,7 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     app_timer_cancel(s_pending_toggle_timer);
     pending_toggle_timer_callback(NULL);
   }
-  strncpy(s_pending_toggle_task_id, task->id, MAX_ID_LEN - 1);
-  s_pending_toggle_task_id[MAX_ID_LEN - 1] = '\0';
+  str_copy(s_pending_toggle_task_id, task->id, MAX_ID_LEN);
   s_pending_toggle_timer = app_timer_register(DOUBLE_CLICK_WINDOW_MS, pending_toggle_timer_callback, NULL);
 #else
   task->done = !task->done;
@@ -3098,8 +3096,7 @@ static void request_notes_full(const char *id, bool is_project) {
 static void show_notes_overlay_for(const char *id, bool is_project) {
   s_notes_overlay_active = true;
   s_notes_overlay_is_project = is_project;
-  strncpy(s_notes_overlay_subject_id, id, MAX_ID_LEN - 1);
-  s_notes_overlay_subject_id[MAX_ID_LEN - 1] = '\0';
+  str_copy(s_notes_overlay_subject_id, id, MAX_ID_LEN);
   reset_notes_full_buffer();
   s_notes_display_text = NOTES_LOADING_TEXT;
   s_notes_is_loading = true;
@@ -3115,8 +3112,7 @@ static void show_notes_overlay_for(const char *id, bool is_project) {
 // synchronously (tags are sent with every task) so it stays visible above the
 // notes whatever the fetch resolves to.
 static void show_notes_overlay(Task *task) {
-  strncpy(s_notes_tags_line, task->tags, sizeof(s_notes_tags_line) - 1);
-  s_notes_tags_line[sizeof(s_notes_tags_line) - 1] = '\0';
+  str_copy(s_notes_tags_line, task->tags, sizeof(s_notes_tags_line));
   show_notes_overlay_for(task->id, false);
 }
 
@@ -3210,8 +3206,7 @@ static void begin_pending_reschedule(RescheduleKind kind) {
     Task *bt = resolve_browse_task_at(menu_layer_get_selected_index(s_browse_menu));
     if (bt) {
       task_id = bt->id;
-      strncpy(s_pending_reschedule_project_id, s_browse_project_id, MAX_PROJECT_ID_LEN - 1);
-      s_pending_reschedule_project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+      str_copy(s_pending_reschedule_project_id, s_browse_project_id, MAX_PROJECT_ID_LEN);
     }
   } else
 #endif
@@ -3237,8 +3232,7 @@ static void begin_pending_reschedule(RescheduleKind kind) {
   if (s_pending_reschedule_timer) {
     app_timer_cancel(s_pending_reschedule_timer);
   }
-  strncpy(s_pending_reschedule_task_id, task_id, MAX_ID_LEN - 1);
-  s_pending_reschedule_task_id[MAX_ID_LEN - 1] = '\0';
+  str_copy(s_pending_reschedule_task_id, task_id, MAX_ID_LEN);
   s_pending_reschedule_kind = kind;
   s_pending_reschedule_timer =
       app_timer_register(RESCHEDULE_WINDOW_MS, pending_reschedule_timer_callback, NULL);
@@ -3409,21 +3403,15 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (idx < 0 || idx >= MAX_TASKS) {
         break;
       }
-      strncpy(s_incoming[idx].id, id_tuple->value->cstring, MAX_ID_LEN - 1);
-      s_incoming[idx].id[MAX_ID_LEN - 1] = '\0';
-      strncpy(s_incoming[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
-      s_incoming[idx].title[MAX_TITLE_LEN - 1] = '\0';
-      strncpy(s_incoming[idx].project, project_tuple ? project_tuple->value->cstring : "", MAX_PROJECT_LEN - 1);
-      s_incoming[idx].project[MAX_PROJECT_LEN - 1] = '\0';
+      str_copy(s_incoming[idx].id, id_tuple->value->cstring, MAX_ID_LEN);
+      str_copy(s_incoming[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN);
+      str_copy(s_incoming[idx].project, project_tuple ? project_tuple->value->cstring : "", MAX_PROJECT_LEN);
 #ifndef PBL_PLATFORM_APLITE
       {
         Tuple *project_id_tuple = dict_find(iterator, KEY_TASK_PROJECT_ID);
-        strncpy(s_incoming[idx].project_id, project_id_tuple ? project_id_tuple->value->cstring : "",
-                MAX_PROJECT_ID_LEN - 1);
-        s_incoming[idx].project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+        str_copy(s_incoming[idx].project_id, project_id_tuple ? project_id_tuple->value->cstring : "", MAX_PROJECT_ID_LEN);
         Tuple *tags_tuple = dict_find(iterator, KEY_TASK_TAGS);
-        strncpy(s_incoming[idx].tags, tags_tuple ? tags_tuple->value->cstring : "", MAX_TASK_TAGS_LEN - 1);
-        s_incoming[idx].tags[MAX_TASK_TAGS_LEN - 1] = '\0';
+        str_copy(s_incoming[idx].tags, tags_tuple ? tags_tuple->value->cstring : "", MAX_TASK_TAGS_LEN);
 #if TODAY_PROJECT_SWATCH
         Tuple *pcolor_tuple = dict_find(iterator, KEY_TASK_PROJECT_COLOR);
         s_incoming[idx].project_color = pcolor_tuple ? (uint8_t)pcolor_tuple->value->int32 : 0;
@@ -3506,10 +3494,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       // Written directly into s_habits (no separate incoming buffer - safe, see
       // the Habit struct comment).
-      strncpy(s_habits[idx].id, id_tuple->value->cstring, MAX_HABIT_ID_LEN - 1);
-      s_habits[idx].id[MAX_HABIT_ID_LEN - 1] = '\0';
-      strncpy(s_habits[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
-      s_habits[idx].title[MAX_TITLE_LEN - 1] = '\0';
+      str_copy(s_habits[idx].id, id_tuple->value->cstring, MAX_HABIT_ID_LEN);
+      str_copy(s_habits[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN);
       s_habits[idx].done = done_tuple && done_tuple->value->int32 != 0;
       s_habits[idx].value = value_tuple ? value_tuple->value->int32 : 0;
       s_habits[idx].goal = goal_tuple ? goal_tuple->value->int32 : 0;
@@ -3565,10 +3551,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (idx < 0 || idx >= MAX_BROWSE_PROJECTS) {
         break;
       }
-      strncpy(s_browse_projects[idx].id, id_tuple->value->cstring, MAX_PROJECT_ID_LEN - 1);
-      s_browse_projects[idx].id[MAX_PROJECT_ID_LEN - 1] = '\0';
-      strncpy(s_browse_projects[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
-      s_browse_projects[idx].title[MAX_TITLE_LEN - 1] = '\0';
+      str_copy(s_browse_projects[idx].id, id_tuple->value->cstring, MAX_PROJECT_ID_LEN);
+      str_copy(s_browse_projects[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN);
       Tuple *color_tuple = dict_find(iterator, KEY_PROJECT_COLOR);
       s_browse_projects[idx].color = color_tuple ? color_tuple->value->int32 : 0;
       break;
@@ -3624,10 +3608,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       Task *bt = &s_browse_tasks[idx];
       memset(bt, 0, sizeof(Task));
-      strncpy(bt->id, id_tuple->value->cstring, MAX_ID_LEN - 1);
-      bt->id[MAX_ID_LEN - 1] = '\0';
-      strncpy(bt->title, title_tuple->value->cstring, MAX_TITLE_LEN - 1);
-      bt->title[MAX_TITLE_LEN - 1] = '\0';
+      str_copy(bt->id, id_tuple->value->cstring, MAX_ID_LEN);
+      str_copy(bt->title, title_tuple->value->cstring, MAX_TITLE_LEN);
       bt->project[0] = '\0';
       Tuple *done_tuple = dict_find(iterator, KEY_TASK_DONE);
       bt->done = done_tuple && done_tuple->value->int32 != 0;
@@ -3671,8 +3653,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_stats_worked_today_ms = worked_tuple ? worked_tuple->value->int32 : 0;
       s_stats_done_today = done_tuple ? done_tuple->value->int32 : 0;
       if (text_tuple) {
-        strncpy(s_stats_projects, text_tuple->value->cstring, sizeof(s_stats_projects) - 1);
-        s_stats_projects[sizeof(s_stats_projects) - 1] = '\0';
+        str_copy(s_stats_projects, text_tuple->value->cstring, sizeof(s_stats_projects));
       } else {
         s_stats_projects[0] = '\0';
       }
@@ -3688,8 +3669,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       Tuple *msg_tuple = dict_find(iterator, KEY_STATUS_MSG);
       if (msg_tuple) {
-        strncpy(s_status_msg, msg_tuple->value->cstring, MAX_STATUS_MSG_LEN - 1);
-        s_status_msg[MAX_STATUS_MSG_LEN - 1] = '\0';
+        str_copy(s_status_msg, msg_tuple->value->cstring, MAX_STATUS_MSG_LEN);
       } else {
         s_status_msg[0] = '\0';
       }
@@ -3792,11 +3772,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         s_presence_stopping = false;
       } else {
         Tuple *title_tuple = dict_find(iterator, KEY_PRESENCE_TASK_TITLE);
-        strncpy(s_presence_task, title_tuple ? title_tuple->value->cstring : "", sizeof(s_presence_task) - 1);
-        s_presence_task[sizeof(s_presence_task) - 1] = '\0';
+        str_copy(s_presence_task, title_tuple ? title_tuple->value->cstring : "", sizeof(s_presence_task));
         Tuple *device_tuple = dict_find(iterator, KEY_PRESENCE_DEVICE);
-        strncpy(s_presence_device, device_tuple ? device_tuple->value->cstring : "", sizeof(s_presence_device) - 1);
-        s_presence_device[sizeof(s_presence_device) - 1] = '\0';
+        str_copy(s_presence_device, device_tuple ? device_tuple->value->cstring : "", sizeof(s_presence_device));
         Tuple *elapsed_tuple = dict_find(iterator, KEY_PRESENCE_ELAPSED_S);
         s_presence_elapsed_base = time(NULL) - (time_t)(elapsed_tuple ? elapsed_tuple->value->int32 : 0);
         Tuple *can_stop_tuple = dict_find(iterator, KEY_PRESENCE_CAN_STOP);
@@ -3965,8 +3943,7 @@ static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult
   // sync error so every send failure is visible, not silently swallowed.
   // Reached immediately on aplite (no retry) or once the retries above run out.
   set_status_code(STATUS_ERROR);
-  strncpy(s_status_msg, "Couldn't reach phone app", MAX_STATUS_MSG_LEN - 1);
-  s_status_msg[MAX_STATUS_MSG_LEN - 1] = '\0';
+  str_copy(s_status_msg, "Couldn't reach phone app", MAX_STATUS_MSG_LEN);
   show_error_overlay();
 }
 
@@ -4089,8 +4066,7 @@ static void start_habit_tracking_tick(void) {
 }
 
 static void start_habit_tracking(Habit *habit) {
-  strncpy(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN - 1);
-  s_tracking_habit_id[MAX_HABIT_ID_LEN - 1] = '\0';
+  str_copy(s_tracking_habit_id, habit->id, MAX_HABIT_ID_LEN);
   s_tracking_habit_start_epoch = time(NULL);
   // A fresh round always starts running - clear any leftover pause state.
   s_habit_countdown_paused = false;
@@ -4577,8 +4553,7 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
 // project-row Select in the browser, by push_browse_window's jump-straight-to
 // path, and by the today view's project row (via push_browse_window).
 static void browse_descend(const char *project_id) {
-  strncpy(s_browse_project_id, project_id, MAX_PROJECT_ID_LEN - 1);
-  s_browse_project_id[MAX_PROJECT_ID_LEN - 1] = '\0';
+  str_copy(s_browse_project_id, project_id, MAX_PROJECT_ID_LEN);
   if (!s_browse_tasks) {
     s_browse_tasks = malloc(sizeof(Task) * MAX_BROWSE_TASKS);
   }
@@ -5193,16 +5168,14 @@ static void stats_compute_values(void) {
   if (s_tracking_task_id[0] != '\0') {
     int e = (int)((time(NULL) - s_tracking_start_epoch) * 1000);
     format_duration_ms(e < 0 ? 0 : e, false, dur, sizeof(dur));
-    strncpy(s_stats_session, dur, sizeof(s_stats_session) - 1);
-    s_stats_session[sizeof(s_stats_session) - 1] = '\0';
+    str_copy(s_stats_session, dur, sizeof(s_stats_session));
   } else if (s_presence_state == 1) {
     int e = (int)((time(NULL) - s_presence_elapsed_base) * 1000);
     format_duration_ms(e < 0 ? 0 : e, false, dur, sizeof(dur));
     snprintf(s_stats_session, sizeof(s_stats_session), "%s (%s)", dur,
              s_presence_device[0] != '\0' ? s_presence_device : "remote");
   } else {
-    strncpy(s_stats_session, "Not tracking", sizeof(s_stats_session) - 1);
-    s_stats_session[sizeof(s_stats_session) - 1] = '\0';
+    str_copy(s_stats_session, "Not tracking", sizeof(s_stats_session));
   }
 
   // "Without a break" - the break reminder's tally: watch-tracked time banked
@@ -5974,8 +5947,7 @@ static void init(void) {
   // first sync; the section appears then). A stopped-but-in-grace task is NOT
   // re-pinned - the grace period isn't persisted state.
   if (s_tracking_task_id[0] != '\0') {
-    strncpy(s_pinned_task_id, s_tracking_task_id, MAX_ID_LEN - 1);
-    s_pinned_task_id[MAX_ID_LEN - 1] = '\0';
+    str_copy(s_pinned_task_id, s_tracking_task_id, MAX_ID_LEN);
   }
 #endif
 
