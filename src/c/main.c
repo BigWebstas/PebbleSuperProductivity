@@ -52,6 +52,7 @@
 #define KEY_AUDIBLE_NOTIFICATIONS MESSAGE_KEY_AUDIBLE_NOTIFICATIONS
 #define KEY_AUDIBLE_VOLUME MESSAGE_KEY_AUDIBLE_VOLUME
 #define KEY_BREAK_REMINDER_MIN MESSAGE_KEY_BREAK_REMINDER_MIN
+#define KEY_IDLE_REMINDER_MIN MESSAGE_KEY_IDLE_REMINDER_MIN
 #define KEY_DUE_REMINDER_MIN MESSAGE_KEY_DUE_REMINDER_MIN
 #define KEY_PRESENCE_STATE MESSAGE_KEY_PRESENCE_STATE
 #define KEY_PRESENCE_TASK_TITLE MESSAGE_KEY_PRESENCE_TASK_TITLE
@@ -510,16 +511,16 @@ static time_t s_break_last_stop_epoch = 0;   // when the last session ended (gap
 static bool s_break_notified = false;
 #define BREAK_RESET_GAP_S (5 * 60)
 
-// Idle detection while tracking (a sub-behaviour of the break reminder - only
-// runs when s_break_reminder_min > 0). No step count change for IDLE_GAP_S is
-// treated as a break: the "Time for a break" banner fires and the tally zeroes,
-// same as if the user had stopped tracking. s_idle_steps is the last step-count
-// seen; s_idle_since the epoch it last changed. Re-armed when steps resume or
-// on start_tracking.
+// Idle detection while tracking - its own settable interval, independent of
+// the break reminder above. No step count change for s_idle_reminder_min
+// minutes is treated as a break: the "Idle - break counted" banner fires and
+// the tally zeroes, same as if the user had stopped tracking. s_idle_steps is
+// the last step-count seen; s_idle_since the epoch it last changed. Re-armed
+// when steps resume or on start_tracking.
+static int s_idle_reminder_min = 0;          // config.idleReminderMin, 0 = off
 static int s_idle_steps = -1;
 static time_t s_idle_since = 0;
 static bool s_idle_notified = false;
-#define IDLE_GAP_S (10 * 60)
 #endif
 
 // Pinned "TRACKING" section - the tracked task (local, or a remote device's
@@ -2525,28 +2526,31 @@ static void maybe_notify_overtime(void) {
 // reaches s_break_reminder_min. Latched via s_break_notified until start_tracking
 // sees a real gap. Local task tracking only.
 static void maybe_notify_break(void) {
-  if (s_break_reminder_min <= 0 || s_tracking_task_id[0] == '\0') {
+  if (s_tracking_task_id[0] == '\0') {
     return;
   }
 
-  // Idle: no step-count movement for IDLE_GAP_S while tracking counts as a break
-  // (peek is a fast cached read - fine to call each tick).
-  int steps = (int)health_service_peek_current_value(HealthMetricStepCount);
-  if (steps != s_idle_steps) {
-    s_idle_steps = steps;
-    s_idle_since = time(NULL);
-    s_idle_notified = false;
-  } else if (!s_idle_notified && s_idle_since != 0 &&
-             time(NULL) - s_idle_since >= IDLE_GAP_S && !s_error_overlay_active) {
-    s_idle_notified = true;
-    s_break_notified = true;
-    s_break_accum_s = 0;
-    s_break_last_stop_epoch = time(NULL);
-    show_top_banner("Idle - break counted");
-    return;
+  // Idle: no step-count movement for s_idle_reminder_min minutes while
+  // tracking counts as a break (peek is a fast cached read - fine to call
+  // each tick). Independent of the break-reminder interval below.
+  if (s_idle_reminder_min > 0) {
+    int steps = (int)health_service_peek_current_value(HealthMetricStepCount);
+    if (steps != s_idle_steps) {
+      s_idle_steps = steps;
+      s_idle_since = time(NULL);
+      s_idle_notified = false;
+    } else if (!s_idle_notified && s_idle_since != 0 &&
+               time(NULL) - s_idle_since >= s_idle_reminder_min * 60 && !s_error_overlay_active) {
+      s_idle_notified = true;
+      s_break_notified = true;
+      s_break_accum_s = 0;
+      s_break_last_stop_epoch = time(NULL);
+      show_top_banner("Idle - break counted");
+      return;
+    }
   }
 
-  if (s_break_notified) {
+  if (s_break_reminder_min <= 0 || s_break_notified) {
     return;
   }
   int elapsed_s = (int)(time(NULL) - s_tracking_start_epoch);
@@ -3770,6 +3774,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       // "Remind me to take a break" interval in minutes (0 = off). Re-sent every
       // sync like the flags above; the tally itself lives in persist.
       s_break_reminder_min = tuple_int(iterator, KEY_BREAK_REMINDER_MIN, s_break_reminder_min);
+      s_idle_reminder_min = tuple_int(iterator, KEY_IDLE_REMINDER_MIN, s_idle_reminder_min);
 #endif
       // "Notify before a task is due" - minutes ahead, 0 = off.
       s_due_reminder_min = tuple_int(iterator, KEY_DUE_REMINDER_MIN, s_due_reminder_min);

@@ -38,6 +38,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
     ? !!options.audibleNotifications : !!options.overtimeSound;
   var audibleVolume = options.audibleVolume != null ? options.audibleVolume : 80;
   var breakReminderMin = options.breakReminderMin || 0;
+  var idleReminderMin = options.idleReminderMin || 0;
   var dueReminderMin = options.dueReminderMin || 0;
   var liveTracking = !!options.liveTracking;
   var backlightMode = options.backlightMode || 0;
@@ -86,6 +87,16 @@ function buildPairingPageUrl(baseUrl, email, options) {
     [90, 'Every 90 minutes of tracking'],
   ].map(function (opt) {
     var selected = opt[0] === breakReminderMin ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
+  var idleReminderOptions = [
+    [0, 'Off'],
+    [30, 'After 30 minutes without movement'],
+    [45, 'After 45 minutes without movement'],
+    [60, 'After 60 minutes without movement'],
+    [90, 'After 90 minutes without movement'],
+  ].map(function (opt) {
+    var selected = opt[0] === idleReminderMin ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var backlightOptions = [
@@ -263,9 +274,18 @@ breakReminderOptions + '\n' +
 '    pause. Stopping the timer for 5 minutes or more counts as a break and\n' +
 '    resets the count; shorter gaps (switching tasks) carry it over. Only\n' +
 '    counts time tracked on the watch, and only fires while the watchapp is\n' +
-'    open. It also resets if the watch sees no step-count movement for 10\n' +
-'    minutes while tracking (an idle stretch counts as a break).\n' +
-'    Not available on original Pebble/Pebble Steel (aplite).\n' +
+'    open. Not available on original Pebble/Pebble Steel (aplite).\n' +
+'  </p>\n' +
+'\n' +
+'  <label for="idleReminderMin">Remind me when idle</label>\n' +
+'  <select id="idleReminderMin">\n' +
+idleReminderOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">\n' +
+'    While tracking, if the watch sees no step-count movement for this long\n' +
+'    it counts as a break on its own - the "time for a break" tally resets,\n' +
+'    independent of the interval above. Needs the watch\'s step tracking on;\n' +
+'    not available on original Pebble/Pebble Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="dueReminderMin">Notify before a task is due</label>\n' +
@@ -491,6 +511,7 @@ taskEstimateOptions + '\n' +
 '      audibleNotifications: document.getElementById(\'audibleNotifications\').checked,\n' +
 '      audibleVolume: parseInt(document.getElementById(\'audibleVolume\').value, 10),\n' +
 '      breakReminderMin: parseInt(document.getElementById(\'breakReminderMin\').value, 10) || 0,\n' +
+'      idleReminderMin: parseInt(document.getElementById(\'idleReminderMin\').value, 10) || 0,\n' +
 '      dueReminderMin: parseInt(document.getElementById(\'dueReminderMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +

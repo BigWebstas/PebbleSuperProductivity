@@ -402,6 +402,10 @@ function sendStatus(code, message) {
     // maybe_notify_break (aplite ignores it). Always included, same
     // next-sync-cycle self-correction reasoning as the flags above.
     BREAK_REMINDER_MIN: config.breakReminderMin || 0,
+    // "Remind me when idle" - minutes of no wrist movement (step count) while
+    // tracking before it counts as a break, independent of the interval
+    // above. 0 = off. Drives main.c's s_idle_reminder_min / maybe_notify_break.
+    IDLE_REMINDER_MIN: config.idleReminderMin || 0,
     // "Notify before a task is due" - minutes ahead of a task's dueWithTime to
     // vibrate a banner. 0 = off. Watch-side only (main.c's minute_tick_handler),
     // app-open only. Always included, same reasoning as above.
@@ -2522,6 +2526,7 @@ Pebble.addEventListener('showConfiguration', function () {
         ? !!config.audibleNotifications : !!config.overtimeSound,
       audibleVolume: config.audibleVolume != null ? config.audibleVolume : 80,
       breakReminderMin: config.breakReminderMin || 0,
+      idleReminderMin: config.idleReminderMin || 0,
       dueReminderMin: config.dueReminderMin || 0,
       liveTracking: !!config.liveTracking,
     }
@@ -2601,6 +2606,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     audibleVolume: isNaN(parseInt(result.audibleVolume, 10))
       ? 80 : parseInt(result.audibleVolume, 10),
     breakReminderMin: parseInt(result.breakReminderMin, 10) || 0,
+    idleReminderMin: parseInt(result.idleReminderMin, 10) || 0,
     dueReminderMin: parseInt(result.dueReminderMin, 10) || 0,
     liveTracking: !!result.liveTracking,
   };
