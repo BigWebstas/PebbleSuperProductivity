@@ -511,16 +511,21 @@ static time_t s_break_last_stop_epoch = 0;   // when the last session ended (gap
 static bool s_break_notified = false;
 #define BREAK_RESET_GAP_S (5 * 60)
 
-// Idle detection while tracking - its own settable interval, independent of
-// the break reminder above. No step count change for s_idle_reminder_min
-// minutes is treated as a break: the "Idle - break counted" banner fires and
-// the tally zeroes, same as if the user had stopped tracking. s_idle_steps is
-// the last step-count seen; s_idle_since the epoch it last changed. Re-armed
-// when steps resume or on start_tracking.
+// Idle detection - one settable interval, two shapes depending on whether a
+// task is being tracked. While tracking: no step-count change for
+// s_idle_reminder_min minutes is treated as a break, same as the break
+// reminder above. s_idle_steps is the last step-count seen; s_idle_since the
+// epoch it last changed; re-armed when steps resume or on start_tracking.
+// Not tracking: purely time-based (no step count involved) - counts minutes
+// since the last stop (s_break_last_stop_epoch) and repeats the "not
+// tracking" banner every s_idle_reminder_min minutes until tracking resumes;
+// s_untracked_notify_count is how many of those have fired since the last
+// stop, reset by start_tracking.
 static int s_idle_reminder_min = 0;          // config.idleReminderMin, 0 = off
 static int s_idle_steps = -1;
 static time_t s_idle_since = 0;
 static bool s_idle_notified = false;
+static int s_untracked_notify_count = 0;
 #endif
 
 // Pinned "TRACKING" section - the tracked task (local, or a remote device's
@@ -2620,6 +2625,7 @@ static void start_tracking(Task *task) {
   s_idle_steps = -1;
   s_idle_since = time(NULL);
   s_idle_notified = false;
+  s_untracked_notify_count = 0;
 #endif
   // Pin this task to the top (if enabled); cancel any grace timer from a
   // just-stopped task and re-lay-out the list.
@@ -5863,28 +5869,40 @@ static void maybe_notify_idle(void) {
   if (s_idle_reminder_min <= 0 || s_error_overlay_active) {
     return;
   }
-  int steps = (int)health_service_peek_current_value(HealthMetricStepCount);
-  if (steps != s_idle_steps) {
-    s_idle_steps = steps;
-    s_idle_since = time(NULL);
-    s_idle_notified = false;
-    return;
-  }
-  if (s_idle_notified || s_idle_since == 0 ||
-      time(NULL) - s_idle_since < s_idle_reminder_min * 60) {
-    return;
-  }
-  s_idle_notified = true;
   if (s_tracking_task_id[0] != '\0') {
+    // Tracking: movement-based, one-shot per session.
+    int steps = (int)health_service_peek_current_value(HealthMetricStepCount);
+    if (steps != s_idle_steps) {
+      s_idle_steps = steps;
+      s_idle_since = time(NULL);
+      s_idle_notified = false;
+      return;
+    }
+    if (s_idle_notified || s_idle_since == 0 ||
+        time(NULL) - s_idle_since < s_idle_reminder_min * 60) {
+      return;
+    }
+    s_idle_notified = true;
     s_break_notified = true;
     s_break_accum_s = 0;
     s_break_last_stop_epoch = time(NULL);
     show_top_banner("Idle - break counted");
-  } else {
-    snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
-             "Idle %d min\nwithout tracking", s_idle_reminder_min);
-    show_top_banner(s_overtime_banner_text);
+    return;
   }
+  // Not tracking: purely time-based off the last stop, repeating every
+  // s_idle_reminder_min minutes until tracking resumes (start_tracking
+  // resets the count).
+  if (s_break_last_stop_epoch == 0) {
+    return;
+  }
+  int elapsed_min = (int)((time(NULL) - s_break_last_stop_epoch) / 60);
+  if (elapsed_min < s_idle_reminder_min * (s_untracked_notify_count + 1)) {
+    return;
+  }
+  s_untracked_notify_count++;
+  snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
+           "Not tracking\n%d min", elapsed_min);
+  show_top_banner(s_overtime_banner_text);
 }
 #endif
 
