@@ -282,9 +282,11 @@ breakReminderOptions + '\n' +
 idleReminderOptions + '\n' +
 '  </select>\n' +
 '  <p class="hint">\n' +
-'    While tracking, if the watch sees no step-count movement for this long\n' +
-'    it counts as a break on its own - the "time for a break" tally resets,\n' +
-'    independent of the interval above. Needs the watch\'s step tracking on;\n' +
+'    If the watch sees no step-count movement for this long with the app\n' +
+'    open, it vibrates. While tracking, that also counts as a break on its\n' +
+'    own - the "time for a break" tally resets, independent of the interval\n' +
+'    above; otherwise it\'s just a nudge that no time is being tracked. Needs\n' +
+'    the watch\'s step tracking on;\n' +
 '    not available on original Pebble/Pebble Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +

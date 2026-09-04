@@ -2526,31 +2526,7 @@ static void maybe_notify_overtime(void) {
 // reaches s_break_reminder_min. Latched via s_break_notified until start_tracking
 // sees a real gap. Local task tracking only.
 static void maybe_notify_break(void) {
-  if (s_tracking_task_id[0] == '\0') {
-    return;
-  }
-
-  // Idle: no step-count movement for s_idle_reminder_min minutes while
-  // tracking counts as a break (peek is a fast cached read - fine to call
-  // each tick). Independent of the break-reminder interval below.
-  if (s_idle_reminder_min > 0) {
-    int steps = (int)health_service_peek_current_value(HealthMetricStepCount);
-    if (steps != s_idle_steps) {
-      s_idle_steps = steps;
-      s_idle_since = time(NULL);
-      s_idle_notified = false;
-    } else if (!s_idle_notified && s_idle_since != 0 &&
-               time(NULL) - s_idle_since >= s_idle_reminder_min * 60 && !s_error_overlay_active) {
-      s_idle_notified = true;
-      s_break_notified = true;
-      s_break_accum_s = 0;
-      s_break_last_stop_epoch = time(NULL);
-      show_top_banner("Idle - break counted");
-      return;
-    }
-  }
-
-  if (s_break_reminder_min <= 0 || s_break_notified) {
+  if (s_tracking_task_id[0] == '\0' || s_break_reminder_min <= 0 || s_break_notified) {
     return;
   }
   int elapsed_s = (int)(time(NULL) - s_tracking_start_epoch);
@@ -5877,10 +5853,49 @@ static void window_unload(Window *window) {
   status_bar_layer_destroy(s_status_bar);
 }
 
+#ifdef BREAK_REMINDER
+// Idle: no step-count movement for s_idle_reminder_min minutes, checked once
+// a minute regardless of tracking state (peek is a fast cached read). While
+// tracking, it counts as a break, same as stopping - the tally zeroes and
+// re-arms via start_tracking's real-gap check. Otherwise it's just a nudge
+// that no time is being tracked. Re-armed when steps resume.
+static void maybe_notify_idle(void) {
+  if (s_idle_reminder_min <= 0 || s_error_overlay_active) {
+    return;
+  }
+  int steps = (int)health_service_peek_current_value(HealthMetricStepCount);
+  if (steps != s_idle_steps) {
+    s_idle_steps = steps;
+    s_idle_since = time(NULL);
+    s_idle_notified = false;
+    return;
+  }
+  if (s_idle_notified || s_idle_since == 0 ||
+      time(NULL) - s_idle_since < s_idle_reminder_min * 60) {
+    return;
+  }
+  s_idle_notified = true;
+  if (s_tracking_task_id[0] != '\0') {
+    s_break_notified = true;
+    s_break_accum_s = 0;
+    s_break_last_stop_epoch = time(NULL);
+    show_top_banner("Idle - break counted");
+  } else {
+    snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
+             "Idle %d min\nwithout tracking", s_idle_reminder_min);
+    show_top_banner(s_overtime_banner_text);
+  }
+}
+#endif
+
 #ifndef PBL_PLATFORM_APLITE
 // MINUTE_UNIT tick: when s_due_reminder_min is set, fires the banner as the
-// soonest upcoming timed task comes within that window. App-open only.
+// soonest upcoming timed task comes within that window; also drives the idle
+// check above. App-open only.
 static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
+#ifdef BREAK_REMINDER
+  maybe_notify_idle();
+#endif
   if (s_due_reminder_min <= 0 || s_error_overlay_active) {
     return;
   }
