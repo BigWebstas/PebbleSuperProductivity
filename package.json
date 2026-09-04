@@ -26,8 +26,7 @@
     },
     "projectType": "native",
     "capabilities": [
-      "configurable",
-      "health"
+      "configurable"
     ],
     "resources": {
       "media": [

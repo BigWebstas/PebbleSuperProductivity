@@ -91,10 +91,10 @@ function buildPairingPageUrl(baseUrl, email, options) {
   }).join('\n');
   var idleReminderOptions = [
     [0, 'Off'],
-    [30, 'After 30 minutes without movement'],
-    [45, 'After 45 minutes without movement'],
-    [60, 'After 60 minutes without movement'],
-    [90, 'After 90 minutes without movement'],
+    [10, 'Every 10 minutes not tracking'],
+    [20, 'Every 20 minutes not tracking'],
+    [30, 'Every 30 minutes not tracking'],
+    [60, 'Every 60 minutes not tracking'],
   ].map(function (opt) {
     var selected = opt[0] === idleReminderMin ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
@@ -282,13 +282,11 @@ breakReminderOptions + '\n' +
 idleReminderOptions + '\n' +
 '  </select>\n' +
 '  <p class="hint">\n' +
-'    While tracking: no step-count movement for this long counts as a break\n' +
-'    on its own - the "time for a break" tally resets, independent of the\n' +
-'    interval above (needs the watch\'s step tracking on). Not tracking:\n' +
-'    purely time-based - once this long passes with nothing tracked it\n' +
-'    vibrates "not tracking Y min", then repeats every interval after that\n' +
-'    until you start tracking again. Not available on original Pebble/Pebble\n' +
-'    Steel (aplite).\n' +
+'    Purely time-based, no step count. Once this long passes with nothing\n' +
+'    tracked, it vibrates "not tracking Y min", then repeats every interval\n' +
+'    after that until you start tracking again. Independent of "Remind me to\n' +
+'    take a break" above. Not available on original Pebble/Pebble Steel\n' +
+'    (aplite).\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="dueReminderMin">Notify before a task is due</label>\n' +

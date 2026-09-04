@@ -511,20 +511,11 @@ static time_t s_break_last_stop_epoch = 0;   // when the last session ended (gap
 static bool s_break_notified = false;
 #define BREAK_RESET_GAP_S (5 * 60)
 
-// Idle detection - one settable interval, two shapes depending on whether a
-// task is being tracked. While tracking: no step-count change for
-// s_idle_reminder_min minutes is treated as a break, same as the break
-// reminder above. s_idle_steps is the last step-count seen; s_idle_since the
-// epoch it last changed; re-armed when steps resume or on start_tracking.
-// Not tracking: purely time-based (no step count involved) - counts minutes
-// since the last stop (s_break_last_stop_epoch) and repeats the "not
-// tracking" banner every s_idle_reminder_min minutes until tracking resumes;
-// s_untracked_notify_count is how many of those have fired since the last
-// stop, reset by start_tracking.
+// "Not tracking" nudge - purely time-based, no step count. Counts minutes
+// since the last stop (s_break_last_stop_epoch) and repeats a banner every
+// s_idle_reminder_min minutes until tracking resumes; s_untracked_notify_count
+// is how many of those have fired since the last stop, reset by start_tracking.
 static int s_idle_reminder_min = 0;          // config.idleReminderMin, 0 = off
-static int s_idle_steps = -1;
-static time_t s_idle_since = 0;
-static bool s_idle_notified = false;
 static int s_untracked_notify_count = 0;
 #endif
 
@@ -2621,10 +2612,7 @@ static void start_tracking(Task *task) {
     s_break_notified = false;
   }
   save_break_state();
-  // Fresh idle window for this session.
-  s_idle_steps = -1;
-  s_idle_since = time(NULL);
-  s_idle_notified = false;
+  // Fresh "not tracking" window for the next gap.
   s_untracked_notify_count = 0;
 #endif
   // Pin this task to the top (if enabled); cancel any grace timer from a
@@ -5860,39 +5848,15 @@ static void window_unload(Window *window) {
 }
 
 #ifdef BREAK_REMINDER
-// Idle: no step-count movement for s_idle_reminder_min minutes, checked once
-// a minute regardless of tracking state (peek is a fast cached read). While
-// tracking, it counts as a break, same as stopping - the tally zeroes and
-// re-arms via start_tracking's real-gap check. Otherwise it's just a nudge
-// that no time is being tracked. Re-armed when steps resume.
+// "Not tracking" nudge - purely time-based (no step count), checked once a
+// minute while the app is open and nothing is tracked. Counts minutes since
+// the last stop and repeats every s_idle_reminder_min minutes until tracking
+// resumes (start_tracking resets the count). Idle-while-tracking has no
+// separate behaviour of its own - the break reminder already covers that off
+// accumulated tracked time.
 static void maybe_notify_idle(void) {
-  if (s_idle_reminder_min <= 0 || s_error_overlay_active) {
-    return;
-  }
-  if (s_tracking_task_id[0] != '\0') {
-    // Tracking: movement-based, one-shot per session.
-    int steps = (int)health_service_peek_current_value(HealthMetricStepCount);
-    if (steps != s_idle_steps) {
-      s_idle_steps = steps;
-      s_idle_since = time(NULL);
-      s_idle_notified = false;
-      return;
-    }
-    if (s_idle_notified || s_idle_since == 0 ||
-        time(NULL) - s_idle_since < s_idle_reminder_min * 60) {
-      return;
-    }
-    s_idle_notified = true;
-    s_break_notified = true;
-    s_break_accum_s = 0;
-    s_break_last_stop_epoch = time(NULL);
-    show_top_banner("Idle - break counted");
-    return;
-  }
-  // Not tracking: purely time-based off the last stop, repeating every
-  // s_idle_reminder_min minutes until tracking resumes (start_tracking
-  // resets the count).
-  if (s_break_last_stop_epoch == 0) {
+  if (s_idle_reminder_min <= 0 || s_error_overlay_active ||
+      s_tracking_task_id[0] != '\0' || s_break_last_stop_epoch == 0) {
     return;
   }
   int elapsed_min = (int)((time(NULL) - s_break_last_stop_epoch) / 60);
