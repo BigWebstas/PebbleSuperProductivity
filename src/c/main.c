@@ -5976,7 +5976,73 @@ static void init(void) {
 #endif
 }
 
+#ifndef PBL_PLATFORM_APLITE
+// Launcher App Glance: one line under the app name in the launcher. The
+// tracked task wins ("Now: <title>"); otherwise the soonest still-upcoming
+// timed task today ("@ 9:41 AM  <title>"), same pick as minute_tick_handler.
+// Set from deinit as the app closes - there's no background worker, so it
+// reflects state at the last app close. aplite has no App Glance support.
+static void glance_reload_cb(AppGlanceReloadSession *session, size_t limit,
+                             void *context) {
+  if (limit < 1) {
+    return;
+  }
+  char subtitle[96];
+  subtitle[0] = '\0';
+
+  if (s_tracking_task_id[0] != '\0') {
+    Task *t = find_task_by_id(s_tracking_task_id);
+    if (t) {
+      snprintf(subtitle, sizeof(subtitle), "Now: %s", t->title);
+    }
+  }
+
+  if (subtitle[0] == '\0') {
+    time_t now = time(NULL);
+    struct tm *lt = localtime(&now);
+    int now_min = lt->tm_hour * 60 + lt->tm_min;
+    int soonest = -1, soonest_idx = -1;
+    for (int i = 0; i < s_task_count; i++) {
+      int d = s_tasks[i].due_min;
+      if (!s_tasks[i].done && d >= now_min && (soonest < 0 || d < soonest)) {
+        soonest = d;
+        soonest_idx = i;
+      }
+    }
+    if (soonest_idx >= 0) {
+      char at[16];
+      format_due_time(soonest, at, sizeof(at)); // "@ 9:41 AM"
+      snprintf(subtitle, sizeof(subtitle), "%s  %s", at,
+               s_tasks[soonest_idx].title);
+    }
+  }
+
+  if (subtitle[0] == '\0') {
+    return; // nothing to show - app_glance_reload already cleared old slices
+  }
+
+  // '{' / '}' get parsed as template-string tokens by the launcher and would
+  // blank the line; task titles rarely contain them, but strip to be safe.
+  for (char *p = subtitle; *p; p++) {
+    if (*p == '{' || *p == '}') {
+      *p = ' ';
+    }
+  }
+
+  app_glance_add_slice(session, (AppGlanceSlice) {
+    .layout = {
+      .icon = APP_GLANCE_SLICE_DEFAULT_ICON,
+      .subtitle_template_string = subtitle,
+    },
+    .expiration_time = APP_GLANCE_SLICE_NO_EXPIRATION,
+  });
+}
+#endif
+
 static void deinit(void) {
+#ifndef PBL_PLATFORM_APLITE
+  app_glance_reload(glance_reload_cb, NULL);
+#endif
 #if defined(PBL_TOUCH)
   s_touch_nav_enabled = false;
   apply_touch_nav();  // unsubscribe + cancel the long-press timer
