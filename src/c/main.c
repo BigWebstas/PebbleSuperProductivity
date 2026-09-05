@@ -905,22 +905,15 @@ static void recompute_groups(void) {
 // within a few hundred bytes of the heap) and its list never persisted anyway
 // (see below), so nothing is lost. Everywhere else the cached list is what an
 // offline open shows instead of the sync-error screen.
-#ifdef PBL_PLATFORM_APLITE
-static void save_tasks(void) {}
-static void load_tasks(void) {}
-#else
-static const uint32_t PERSIST_KEY_TASKS = 100;       // legacy single-blob key (deleted on save)
-static const uint32_t PERSIST_KEY_TASK_COUNT = 101;  // committed task count
-static const uint32_t PERSIST_KEY_TASK_STRIDE = 102; // sizeof(Task) when written - layout guard
-static const uint32_t PERSIST_KEY_TASK_CHUNKS = 200; // 200..200+N: the Task array, 256 B per key
-
 // persist_write_data / persist_read_data silently cap each key at
 // PERSIST_DATA_MAX_LENGTH (256 B) - PebbleOS applib/persist.c does
-// MIN(buffer_size, PERSIST_DATA_MAX_LENGTH). The old code wrote the whole
-// Task array (many KB) to one key, so it was truncated to 256 B on write and
-// the length check failed on read - the list never actually cached. Splitting
-// it across consecutive keys fixes that. Returns true only if every chunk
-// round-tripped its full length.
+// MIN(buffer_size, PERSIST_DATA_MAX_LENGTH). The old caches wrote a whole
+// record array (many KB) to one key, so it was truncated to 256 B on write
+// and the exact-length check failed on read - the list never cached at all.
+// These helpers split the array across consecutive keys instead.
+#ifndef PBL_PLATFORM_APLITE
+// Copies `total` bytes between `buf` and keys `base_key`, `base_key+1`, ... in
+// 256 B slices. Returns true only if every slice round-tripped its full length.
 static bool persist_blob_rw(bool writing, uint32_t base_key, uint8_t *buf, size_t total) {
   size_t off = 0;
   uint32_t key = base_key;
@@ -940,54 +933,71 @@ static bool persist_blob_rw(bool writing, uint32_t base_key, uint8_t *buf, size_
   return true;
 }
 
-// Number of 256 B chunks a full MAX_TASKS array spans - the wipe range.
-#define TASK_CHUNK_SPAN \
-  (((size_t)MAX_TASKS * sizeof(Task) + PERSIST_DATA_MAX_LENGTH - 1) / PERSIST_DATA_MAX_LENGTH)
-
-static void save_tasks(void) {
-  persist_delete(PERSIST_KEY_TASKS); // drop the old (broken, truncated) single blob
-  for (size_t i = 0; i < TASK_CHUNK_SPAN; i++) {
-    persist_delete(PERSIST_KEY_TASK_CHUNKS + i);
+// A cache of up to `max_count` fixed-size records (`stride` bytes each):
+// `count_key` holds the live count, `count_key+1` a stride guard (so a struct
+// layout change discards a stale cache), and `chunk_base..` the raw bytes.
+// `max_bytes` (>= max_count*stride) bounds the delete sweep.
+static void save_blob_cache(uint32_t count_key, uint32_t chunk_base, uint8_t *buf,
+                            int count, size_t stride, size_t max_bytes) {
+  for (size_t i = 0; i <= max_bytes / PERSIST_DATA_MAX_LENGTH; i++) {
+    persist_delete(chunk_base + i);
   }
-  if (s_task_count <= 0) {
-    persist_delete(PERSIST_KEY_TASK_COUNT);
-    persist_delete(PERSIST_KEY_TASK_STRIDE);
+  if (count <= 0) {
+    persist_delete(count_key);
+    persist_delete(count_key + 1);
     return;
   }
-  size_t total = (size_t)s_task_count * sizeof(Task);
-  if (persist_blob_rw(true, PERSIST_KEY_TASK_CHUNKS, (uint8_t *)s_tasks, total)) {
-    persist_write_int(PERSIST_KEY_TASK_STRIDE, (int32_t)sizeof(Task));
-    persist_write_int(PERSIST_KEY_TASK_COUNT, s_task_count);
+  if (persist_blob_rw(true, chunk_base, buf, (size_t)count * stride)) {
+    persist_write_int(count_key + 1, (int32_t)stride);
+    persist_write_int(count_key, count);
   } else {
-    // Partial write - clear it all so load_tasks can't pick up half a list.
-    for (size_t i = 0; i < TASK_CHUNK_SPAN; i++) {
-      persist_delete(PERSIST_KEY_TASK_CHUNKS + i);
-    }
-    persist_delete(PERSIST_KEY_TASK_COUNT);
-    persist_delete(PERSIST_KEY_TASK_STRIDE);
+    persist_delete(count_key);
+    persist_delete(count_key + 1);
   }
 }
 
+// Returns the loaded record count (0 if absent, stale-layout, or incomplete).
+static int load_blob_cache(uint32_t count_key, uint32_t chunk_base, uint8_t *buf,
+                           int max_count, size_t stride) {
+  if (!persist_exists(count_key) || !persist_exists(count_key + 1) ||
+      persist_read_int(count_key + 1) != (int32_t)stride) {
+    return 0;
+  }
+  int count = persist_read_int(count_key);
+  if (count <= 0 || count > max_count) {
+    return 0;
+  }
+  return persist_blob_rw(false, chunk_base, buf, (size_t)count * stride) ? count : 0;
+}
+#endif // !PBL_PLATFORM_APLITE
+
+// ---------- persistence (so the list survives a watchapp relaunch) ----------
+
+// Task caching is aplite-excluded: its ~24 KB RAM has no margin (the app runs
+// within a few hundred bytes of the heap) and its list never persisted anyway,
+// so nothing is lost. Everywhere else the cached list is what an offline open
+// shows instead of the sync-error screen.
+#ifdef PBL_PLATFORM_APLITE
+static void save_tasks(void) {}
+static void load_tasks(void) {}
+#else
+static void save_tasks(void) {
+  persist_delete(100); // legacy single-blob key (pre-chunk builds)
+  save_blob_cache(101, 200, (uint8_t *)s_tasks, s_task_count, sizeof(Task),
+                  (size_t)MAX_TASKS * sizeof(Task));
+}
+
 static void load_tasks(void) {
-  if (!persist_exists(PERSIST_KEY_TASK_COUNT) || !persist_exists(PERSIST_KEY_TASK_STRIDE)) {
-    return;
-  }
-  if (persist_read_int(PERSIST_KEY_TASK_STRIDE) != (int32_t)sizeof(Task)) {
-    return; // Task layout changed since this was written - ignore the stale cache
-  }
-  int count = persist_read_int(PERSIST_KEY_TASK_COUNT);
-  if (count <= 0 || count > MAX_TASKS) {
-    return;
-  }
-  size_t total = (size_t)count * sizeof(Task);
-  if (persist_blob_rw(false, PERSIST_KEY_TASK_CHUNKS, (uint8_t *)s_tasks, total)) {
-    s_task_count = count;
-  }
+  s_task_count = load_blob_cache(101, 200, (uint8_t *)s_tasks, MAX_TASKS, sizeof(Task));
 }
 #endif
 
 static const uint32_t PERSIST_KEY_HABITS = 120;
 
+// aplite fits its 2-habit array in one 256 B key, so it keeps the plain
+// single-blob form; everywhere else MAX_HABITS * sizeof(Habit) overflows a
+// key and has to be chunked (see save_tasks / save_blob_cache).
+#ifdef PBL_PLATFORM_APLITE
 static void save_habits(void) {
   if (s_habit_count > 0) {
     persist_write_data(PERSIST_KEY_HABITS, s_habits, sizeof(Habit) * (size_t)s_habit_count);
@@ -1009,6 +1019,17 @@ static void load_habits(void) {
     }
   }
 }
+#else
+static void save_habits(void) {
+  persist_delete(PERSIST_KEY_HABITS); // legacy single-blob key (pre-chunk builds)
+  save_blob_cache(121, 260, (uint8_t *)s_habits, s_habit_count, sizeof(Habit),
+                  (size_t)MAX_HABITS * sizeof(Habit));
+}
+
+static void load_habits(void) {
+  s_habit_count = load_blob_cache(121, 260, (uint8_t *)s_habits, MAX_HABITS, sizeof(Habit));
+}
+#endif
 
 static const uint32_t PERSIST_KEY_TRACKING_ID = 110;
 static const uint32_t PERSIST_KEY_TRACKING_START = 111;
@@ -4468,27 +4489,26 @@ static BrowseProject *resolve_browse_project_at(MenuIndex index) {
 }
 
 #if PROJECTS_CACHE
-// Persist the project list (same one-blob shape as save_tasks) so it renders
+// Persist the project list (chunked, like save_tasks - MAX_BROWSE_PROJECTS *
+// sizeof(BrowseProject) overflows a single 256 B persist key) so it renders
 // immediately on the next open and stays viewable with the phone away.
 static void save_browse_projects(void) {
-  if (s_browse_projects && s_browse_project_count > 0) {
-    persist_write_data(PERSIST_KEY_BROWSE_PROJECTS, s_browse_projects,
-                       sizeof(BrowseProject) * (size_t)s_browse_project_count);
-    persist_write_int(PERSIST_KEY_BROWSE_PROJECTS + 1, s_browse_project_count);
+  if (!s_browse_projects) {
+    return;
   }
+  persist_delete(PERSIST_KEY_BROWSE_PROJECTS); // legacy single-blob key (pre-chunk builds)
+  save_blob_cache(PERSIST_KEY_BROWSE_PROJECTS + 1, 280, (uint8_t *)s_browse_projects,
+                  s_browse_project_count, sizeof(BrowseProject),
+                  (size_t)MAX_BROWSE_PROJECTS * sizeof(BrowseProject));
 }
 
 static void load_browse_projects(void) {
-  if (!s_browse_projects || !persist_exists(PERSIST_KEY_BROWSE_PROJECTS + 1)) {
+  if (!s_browse_projects) {
     return;
   }
-  int count = persist_read_int(PERSIST_KEY_BROWSE_PROJECTS + 1);
-  if (count > 0 && count <= MAX_BROWSE_PROJECTS) {
-    int want = (int)(sizeof(BrowseProject) * (size_t)count);
-    if (persist_read_data(PERSIST_KEY_BROWSE_PROJECTS, s_browse_projects, want) == want) {
-      s_browse_project_count = count;
-    }
-  }
+  s_browse_project_count = load_blob_cache(PERSIST_KEY_BROWSE_PROJECTS + 1, 280,
+                                           (uint8_t *)s_browse_projects,
+                                           MAX_BROWSE_PROJECTS, sizeof(BrowseProject));
 }
 #endif // PROJECTS_CACHE
 
