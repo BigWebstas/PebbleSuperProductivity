@@ -899,31 +899,92 @@ static void recompute_groups(void) {
   }
 }
 
-static const uint32_t PERSIST_KEY_TASKS = 100;
-
 // ---------- persistence (so the list survives a watchapp relaunch) ----------
 
+// Task caching is aplite-excluded: its ~24 KB RAM has no margin (the app runs
+// within a few hundred bytes of the heap) and its list never persisted anyway
+// (see below), so nothing is lost. Everywhere else the cached list is what an
+// offline open shows instead of the sync-error screen.
+#ifdef PBL_PLATFORM_APLITE
+static void save_tasks(void) {}
+static void load_tasks(void) {}
+#else
+static const uint32_t PERSIST_KEY_TASKS = 100;       // legacy single-blob key (deleted on save)
+static const uint32_t PERSIST_KEY_TASK_COUNT = 101;  // committed task count
+static const uint32_t PERSIST_KEY_TASK_STRIDE = 102; // sizeof(Task) when written - layout guard
+static const uint32_t PERSIST_KEY_TASK_CHUNKS = 200; // 200..200+N: the Task array, 256 B per key
+
+// persist_write_data / persist_read_data silently cap each key at
+// PERSIST_DATA_MAX_LENGTH (256 B) - PebbleOS applib/persist.c does
+// MIN(buffer_size, PERSIST_DATA_MAX_LENGTH). The old code wrote the whole
+// Task array (many KB) to one key, so it was truncated to 256 B on write and
+// the length check failed on read - the list never actually cached. Splitting
+// it across consecutive keys fixes that. Returns true only if every chunk
+// round-tripped its full length.
+static bool persist_blob_rw(bool writing, uint32_t base_key, uint8_t *buf, size_t total) {
+  size_t off = 0;
+  uint32_t key = base_key;
+  while (off < total) {
+    size_t len = total - off;
+    if (len > PERSIST_DATA_MAX_LENGTH) {
+      len = PERSIST_DATA_MAX_LENGTH;
+    }
+    int n = writing ? persist_write_data(key, buf + off, len)
+                    : persist_read_data(key, buf + off, len);
+    if (n != (int)len) {
+      return false;
+    }
+    off += len;
+    key++;
+  }
+  return true;
+}
+
+// Number of 256 B chunks a full MAX_TASKS array spans - the wipe range.
+#define TASK_CHUNK_SPAN \
+  (((size_t)MAX_TASKS * sizeof(Task) + PERSIST_DATA_MAX_LENGTH - 1) / PERSIST_DATA_MAX_LENGTH)
+
 static void save_tasks(void) {
-  if (s_task_count > 0) {
-    persist_write_data(PERSIST_KEY_TASKS, s_tasks, sizeof(Task) * (size_t)s_task_count);
-    persist_write_int(PERSIST_KEY_TASKS + 1, s_task_count);
+  persist_delete(PERSIST_KEY_TASKS); // drop the old (broken, truncated) single blob
+  for (size_t i = 0; i < TASK_CHUNK_SPAN; i++) {
+    persist_delete(PERSIST_KEY_TASK_CHUNKS + i);
+  }
+  if (s_task_count <= 0) {
+    persist_delete(PERSIST_KEY_TASK_COUNT);
+    persist_delete(PERSIST_KEY_TASK_STRIDE);
+    return;
+  }
+  size_t total = (size_t)s_task_count * sizeof(Task);
+  if (persist_blob_rw(true, PERSIST_KEY_TASK_CHUNKS, (uint8_t *)s_tasks, total)) {
+    persist_write_int(PERSIST_KEY_TASK_STRIDE, (int32_t)sizeof(Task));
+    persist_write_int(PERSIST_KEY_TASK_COUNT, s_task_count);
   } else {
-    persist_delete(PERSIST_KEY_TASKS);
-    persist_delete(PERSIST_KEY_TASKS + 1);
+    // Partial write - clear it all so load_tasks can't pick up half a list.
+    for (size_t i = 0; i < TASK_CHUNK_SPAN; i++) {
+      persist_delete(PERSIST_KEY_TASK_CHUNKS + i);
+    }
+    persist_delete(PERSIST_KEY_TASK_COUNT);
+    persist_delete(PERSIST_KEY_TASK_STRIDE);
   }
 }
 
 static void load_tasks(void) {
-  if (persist_exists(PERSIST_KEY_TASKS + 1)) {
-    int count = persist_read_int(PERSIST_KEY_TASKS + 1);
-    if (count > 0 && count <= MAX_TASKS) {
-      int bytes = persist_read_data(PERSIST_KEY_TASKS, s_tasks, sizeof(Task) * (size_t)count);
-      if (bytes == (int)(sizeof(Task) * (size_t)count)) {
-        s_task_count = count;
-      }
-    }
+  if (!persist_exists(PERSIST_KEY_TASK_COUNT) || !persist_exists(PERSIST_KEY_TASK_STRIDE)) {
+    return;
+  }
+  if (persist_read_int(PERSIST_KEY_TASK_STRIDE) != (int32_t)sizeof(Task)) {
+    return; // Task layout changed since this was written - ignore the stale cache
+  }
+  int count = persist_read_int(PERSIST_KEY_TASK_COUNT);
+  if (count <= 0 || count > MAX_TASKS) {
+    return;
+  }
+  size_t total = (size_t)count * sizeof(Task);
+  if (persist_blob_rw(false, PERSIST_KEY_TASK_CHUNKS, (uint8_t *)s_tasks, total)) {
+    s_task_count = count;
   }
 }
+#endif
 
 static const uint32_t PERSIST_KEY_HABITS = 120;
 
@@ -1026,6 +1087,7 @@ static void load_habit_tracking(void) {
 
 static void request_sync(void);
 static void hide_error_overlay(void);
+static void update_empty_layer(void);
 static void push_habits_window(void);
 static void update_habits_empty_layer(void);
 static Task *find_task_by_id(const char *id);
@@ -2923,8 +2985,21 @@ static void start_syncing_animation(void) {
 }
 
 // Shows (or re-affirms) the fullscreen error overlay, hiding the menu and
-// empty-state layers under it. Safe regardless of s_task_count.
+// empty-state layers under it.
+//
+// With a cached list to fall back on, a sync failure doesn't blank the
+// screen: the tasks stay visible and the red Resync row ("Sync failed" /
+// "Failed: ...", Select on it to retry) carries the error - see
+// update_empty_layer's own "resync with a populated list" path. The
+// fullscreen overlay is only for when there's nothing else to show.
 static void show_error_overlay(void) {
+  if (s_task_count > 0) {
+    s_error_overlay_active = false;
+    layer_set_hidden(text_layer_get_layer(s_error_layer), true);
+    menu_layer_reload_data(s_menu_layer); // refresh the Resync row subtitle
+    update_empty_layer();
+    return;
+  }
   s_error_overlay_active = true;
   static char s_error_overlay_text[MAX_STATUS_MSG_LEN + 48];
   if (s_status_msg[0] != '\0') {
