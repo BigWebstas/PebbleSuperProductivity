@@ -5955,10 +5955,16 @@ static void maybe_notify_idle(void) {
     return;
   }
   int elapsed_min = (int)((time(NULL) - s_break_last_stop_epoch) / 60);
-  if (elapsed_min < s_idle_reminder_min * (s_untracked_notify_count + 1)) {
-    return;
+  int intervals = elapsed_min / s_idle_reminder_min;
+  if (intervals <= s_untracked_notify_count) {
+    return; // already nudged for the current interval
   }
-  s_untracked_notify_count++;
+  // Jump straight to the current interval instead of incrementing by one:
+  // s_untracked_notify_count starts at 0 every app open, so if the app was
+  // last open (or tracking last stopped) several intervals ago, a plain ++
+  // fired the banner every single tick until the count caught up. Now it
+  // fires at most once per tick, on a real interval boundary.
+  s_untracked_notify_count = intervals;
   snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
            "Not tracking\n%d min", elapsed_min);
   show_top_banner(s_overtime_banner_text);
