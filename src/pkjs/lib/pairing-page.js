@@ -433,7 +433,7 @@ taskEstimateOptions + '\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="yesterdayStats" type="checkbox"' + (yesterdayStats ? ' checked' : '') + '>\n' +
-'    <label for="yesterdayStats">Yesterday toggle on the Stats page</label>\n' +
+'    <label for="yesterdayStats">Yesterdays tasks on Stats page</label>\n' +
 '  </div>\n' +
 '  <p class="hint">\n' +
 '    On the Stats page, hold Up or Down to flip between today and yesterday.\n' +

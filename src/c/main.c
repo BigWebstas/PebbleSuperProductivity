@@ -2,7 +2,7 @@
 
 // Keep in sync by hand with package.json "version" on every bump - no runtime
 // API exposes it to C.
-#define APP_VERSION "0.6.47"
+#define APP_VERSION "0.6.48"
 
 // MESSAGE_KEY_* come from message_keys.auto.h (generated from package.json's
 // "messageKeys"); AppMessage assigns IDs from 10000, so a 0-based enum wouldn't
@@ -5428,8 +5428,9 @@ static int stats_project_line_count(void) {
 }
 
 static int16_t stats_content_height(void) {
-  return (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 7  // the seven metrics
-       + STATS_LABEL_H + 2                                 // PROJECTS bar
+  return (s_yesterday_stats_enabled ? STATS_LABEL_H + 2 : 0)  // Today/Yesterday bar
+       + (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 7       // the seven metrics
+       + STATS_LABEL_H + 2                                     // PROJECTS bar
        + stats_project_line_count() * STATS_LINE_H
        + 8;
 }
@@ -5471,6 +5472,15 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   }
 
   int16_t y = 0;
+  // When the yesterday toggle is on, a centred bar names which day is shown.
+  if (s_yesterday_stats_enabled) {
+    fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
+    graphics_context_set_text_color(ctx, GColorWhite);
+    draw_text(ctx, yd ? "Yesterday" : "Today", STATS_LABEL_FONT,
+              GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
+              GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+    y += STATS_LABEL_H + 2;
+  }
   y = stats_draw_metric(ctx, y, w, "Estimate remaining", yd ? "-" : s_stats_est);
   y = stats_draw_metric(ctx, y, w, yd ? "Worked yesterday" : "Worked today", yd ? worked_y : s_stats_worked);
   y = stats_draw_metric(ctx, y, w, "Without a break", yd ? "-" : s_stats_nobreak);
