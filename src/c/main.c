@@ -709,9 +709,10 @@ static AppTimer *s_live_tick_timer = NULL;
 
 // A remote presence session shows in the pinned "TRACKING" section (the same
 // slot local tracking uses) whenever nothing is tracked locally - keeps
-// "something is being tracked" looking the same everywhere. The dark-blue
-// section-0 LIVE row only remains for the rare overlap: a remote paused/stopped
-// state arriving while this watch is itself tracking (see LIVE_ROW_ACTIVE).
+// "something is being tracked" looking the same everywhere. If this watch is
+// itself tracking, the pinned slot shows the local task and the remote
+// session is not surfaced separately (there used to be a dark-blue section-0
+// "LIVE" row for that overlap; it was removed as redundant).
 static bool remote_in_pinned_section(void) {
   return s_presence_state != 0 && s_tracking_task_id[0] == '\0';
 }
@@ -1201,7 +1202,6 @@ typedef enum {
   SECTION0_ROW_STATS,    // stats page, between Projects and Add Task (non-aplite)
   SECTION0_ROW_SCHEDULE, // schedule page, between Stats and Add Task (non-aplite)
   SECTION0_ROW_ADD_TASK,
-  SECTION0_ROW_LIVE, // live tracking presence, row 0 when active (non-aplite)
 } Section0RowKind;
 
 // Whether the STATUS_OK/zero-tasks empty state shows section 0's normal
@@ -1237,22 +1237,16 @@ typedef enum {
 #define SCHEDULE_ROW_ACTIVE() (s_schedule_enabled)
 #endif
 
-// Whether the dark-blue "LIVE" row sits at the top of section 0. Now always
-// false: a remote presence session shows in the pinned "TRACKING" section
-// (remote_in_pinned_section) whenever nothing is tracked locally, and the
-// separate blue row on top of that just duplicated the same task. In the
-// rare overlap - this watch tracking its own task while another device also
-// tracks - the pinned slot shows the local task and the remote session is
-// not surfaced separately. The SECTION0_ROW_LIVE enum and its render /
-// selection branches are left in place but unreachable; safe to delete in a
-// later cleanup pass.
-#define LIVE_ROW_ACTIVE() false
+// A remote presence session shows in the pinned "TRACKING" section
+// (remote_in_pinned_section) whenever nothing is tracked locally. There used
+// to be a separate dark-blue "LIVE" row at the top of section 0 as well; it
+// only duplicated the same task and was removed. In the rare overlap - this
+// watch tracking its own task while another device also tracks - the pinned
+// slot shows the local task and the remote session is not surfaced
+// separately.
 
 static int section0_row_count(void) {
   int count = 1; // Resync always present.
-  if (LIVE_ROW_ACTIVE()) {
-    count++;
-  }
   if (s_habits_enabled) {
     count++;
   }
@@ -1275,12 +1269,6 @@ static int section0_row_count(void) {
 // Task fill in after it, matching section0_row_count()'s order.
 static Section0RowKind section0_row_kind(int row) {
   int next = 0;
-  if (LIVE_ROW_ACTIVE()) {
-    if (row == 0) {
-      return SECTION0_ROW_LIVE;
-    }
-    next = 1;
-  }
   if (row == next) {
     return SECTION0_ROW_RESYNC;
   }
@@ -1750,21 +1738,15 @@ static void scroll_timer_callback(void *data) {
 }
 
 #ifndef PBL_PLATFORM_APLITE
-// Whether the currently selected row is a live-tracking presence title (the
-// dark-blue LIVE strip, or the remote row in the pinned "TRACKING" section) -
-// the two rows that draw s_presence_task and so can also want a marquee.
+// Whether the currently selected row is the remote row in the pinned
+// "TRACKING" section - it draws s_presence_task and so can also want a
+// marquee when the name overflows.
 static bool selected_row_is_presence_title(void) {
   if (s_presence_task[0] == '\0') {
     return false;
   }
   MenuIndex sel = menu_layer_get_selected_index(s_menu_layer);
-  if (sel.section == 0 && section0_row_kind((int)sel.row) == SECTION0_ROW_LIVE) {
-    return true;
-  }
-  if (remote_in_pinned_section() && sel.section == 1 && sel.row == 0) {
-    return true;
-  }
-  return false;
+  return remote_in_pinned_section() && sel.section == 1 && sel.row == 0;
 }
 #endif
 
@@ -1970,34 +1952,6 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                         menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
     GRect bounds = layer_get_bounds(cell_layer);
     Section0RowKind kind = section0_row_kind((int)cell_index->row);
-
-#ifndef PBL_PLATFORM_APLITE
-    if (kind == SECTION0_ROW_LIVE) {
-      // Dark blue - a distinct "this is another device" strip (the pinned
-      // local-tracking header is green, Habits cerulean). Constant background,
-      // text inverts on selection - same treatment as the Resync row.
-      fill_bg(ctx, bounds, GColorDukeBlue);
-      graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-      // Title one size bigger (GOTHIC_24_BOLD) while a timer is actively
-      // running, GOTHIC_18 otherwise - the paused / stopped / was-tracking
-      // states pair with the long "a recently started task" fallback, which
-      // needs the room.
-      bool live_tracking = s_presence_state == 1;
-      const char *live_title_font = live_tracking ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_18;
-      int16_t live_title_h = live_tracking ? 26 : 22;
-      GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, live_title_h, CHROME_STRIP_H),
-                               bounds.size.w - TITLE_BOX_X * 2, live_title_h);
-      GFont live_font = fonts_get_system_font(live_title_font);
-      const char *live_title = s_presence_task[0] != '\0' ? s_presence_task : "Live tracking";
-      draw_marquee_title(ctx, title_box, live_title, live_font,
-                          is_selected && s_presence_task[0] != '\0' &&
-                          title_natural_width_font(live_title, live_font) > title_box.size.w);
-      GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, live_title_h, CHROME_STRIP_H),
-                                  bounds.size.w - TITLE_BOX_X * 2, CHROME_STRIP_H);
-      draw_text(ctx, presence_state_phrase(), CHROME_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-      return;
-    }
-#endif
 
     if (kind == SECTION0_ROW_HABITS) {
       // Navigates to the habits (SimpleCounter) page. Icon matches the real
@@ -2834,8 +2788,6 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
       push_schedule_window();
     } else if (kind == SECTION0_ROW_ADD_TASK) {
       start_add_task_dictation();
-    } else if (kind == SECTION0_ROW_LIVE) {
-      push_live_window();
 #endif
     } else {
       request_sync(); // the "Resync" row
