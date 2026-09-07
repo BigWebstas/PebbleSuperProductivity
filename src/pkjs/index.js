@@ -77,6 +77,10 @@ var MSG_STATS_DATA = 41;            // phone -> watch: STATS_EST_REMAINING_MS + 
 // header before each day's tasks.
 var MSG_UPCOMING_REQUEST = 42;      // watch -> phone: (no keys)
 var MSG_UPCOMING_DATA = 43;         // phone -> watch: UPCOMING_TEXT
+// Projects browser: long-Select on a task row toggles its backlog membership.
+// PROJECT_TASK_BACKLOG 1 = move into the backlog, 0 = move back to the regular
+// list. The watch picks the direction from the row's section.
+var MSG_TASK_SET_BACKLOG = 44;      // watch -> phone: TASK_ID + PROJECT_ID + PROJECT_TASK_BACKLOG
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -1422,6 +1426,33 @@ function buildBacklogToRegularOp(projectId, taskId, clientId) {
   };
 }
 
+// "[Project] Move Task from regular to backlog" - the mirror of
+// buildBacklogToRegularOp above, same payload shape. task-store's replay only
+// reads actionPayload.taskId for either direction; afterTaskId null drops it at
+// the top of the backlog.
+function buildRegularToBacklogOp(projectId, taskId, clientId) {
+  var crypto = getCrypto();
+  var payload = {
+    actionPayload: { taskId: taskId, afterTaskId: null, workContextId: projectId },
+    entityChanges: [],
+  };
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  return {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[Project] Move Task from regular to backlog',
+    entityType: 'TASK',
+    entityId: taskId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+}
+
 // Builds (and applies the matching local optimistic update for) the
 // parent's own updateTask op if taskId's just-applied completion left
 // every sibling subtask done too - see handleTaskToggle's own call site
@@ -1600,6 +1631,51 @@ function handleTaskReschedule(taskId, when, projectId) {
     .catch(function (err) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload task reschedule: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, failureMsg);
+    });
+}
+
+// Projects browser: long-Select toggled a task's backlog membership.
+// toBacklog picks the direction. Only touches membership - not dueDay - so it
+// stays in step with task-store's replay of the same actions.
+function handleTaskSetBacklog(taskId, projectId, toBacklog) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (!projectId || projectId === store.NO_PROJECT_ID) {
+    return; // No backlog for the "No Project" bucket.
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task) {
+    return; // Deleted between the list push and the gesture.
+  }
+  if (!!task.__inBacklog === !!toBacklog) {
+    return; // Already where the gesture wants it.
+  }
+
+  state.task[taskId] = Object.assign({}, task, { __inBacklog: !!toBacklog });
+  saveState(state);
+
+  var clientId = getOrCreateClientId();
+  var op = toBacklog
+    ? buildRegularToBacklogOp(String(projectId), taskId, clientId)
+    : buildBacklogToRegularOp(String(projectId), taskId, clientId);
+
+  // Re-push this project's list right away so the row jumps sections without
+  // waiting for the follow-up sync (same approach as handleTaskReschedule).
+  sendProjectTasks(String(projectId), state, config);
+
+  var failureMsg = null;
+  uploadOps([op], config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload backlog move: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
     })
     .then(function () {
@@ -2709,6 +2785,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_UNSCHEDULE:
       handleTaskReschedule(payload.TASK_ID, 'unschedule', payload.PROJECT_ID);
+      break;
+    case MSG_TASK_SET_BACKLOG:
+      handleTaskSetBacklog(payload.TASK_ID, payload.PROJECT_ID, payload.PROJECT_TASK_BACKLOG === 1);
       break;
     case MSG_PRESENCE_STOP:
       if (presenceClient && presenceLastSessionId) {

@@ -143,6 +143,11 @@ enum {
   // UPCOMING_TEXT - preformatted lines, each day's tasks under a "\x02" header.
   MSG_UPCOMING_REQUEST = 42,        // watch -> phone: (no keys)
   MSG_UPCOMING_DATA = 43,           // phone -> watch: UPCOMING_TEXT
+  // Projects browser: long-Select on a task row moves it between that
+  // project's regular list and its backlog. PROJECT_TASK_BACKLOG 1 = into
+  // the backlog, 0 = back to the regular list. Direction is chosen watch-
+  // side from which section the row is in.
+  MSG_TASK_SET_BACKLOG = 44,        // watch -> phone: TASK_ID + PROJECT_ID + PROJECT_TASK_BACKLOG
 };
 
 // STATUS_CODE values sent from the phone.
@@ -185,6 +190,9 @@ enum {
 #define MAX_PROJECT_LEN 32
 // Project ids are a plain nanoid() - no calendar-id format, so 32 is enough.
 #define MAX_PROJECT_ID_LEN 32
+// The phone's synthetic id for the "No Project" bucket (task-store.js
+// NO_PROJECT_ID). It has no backlog, so the move-to-backlog gesture skips it.
+#define NO_PROJECT_ID_STR "__NO_PROJECT__"
 // Notes can be many paragraphs, too big to carry on every Task in the
 // double-buffered s_tasks/s_incoming arrays. Fetched on demand instead
 // (MSG_NOTE_*, see s_notes_full_text), malloc'd to the size the phone reports -
@@ -459,7 +467,15 @@ static char s_pending_toggle_task_id[MAX_ID_LEN] = "";
 // Below the SDK's 500ms default so a deliberate hold commits before UP/DOWN's
 // repeat-scroll walks the selection too far off the intended row.
 #define RESCHEDULE_LONGPRESS_MS 400
-typedef enum { RESCHEDULE_NONE, RESCHEDULE_TODAY, RESCHEDULE_TOMORROW, RESCHEDULE_UNSCHEDULE } RescheduleKind;
+typedef enum {
+  RESCHEDULE_NONE,
+  RESCHEDULE_TODAY,
+  RESCHEDULE_TOMORROW,
+  RESCHEDULE_UNSCHEDULE,
+  // Projects-browser only: move the task into / out of its project's backlog.
+  RESCHEDULE_TO_BACKLOG,
+  RESCHEDULE_FROM_BACKLOG,
+} RescheduleKind;
 static AppTimer *s_pending_reschedule_timer = NULL;
 static char s_pending_reschedule_task_id[MAX_ID_LEN] = "";
 static RescheduleKind s_pending_reschedule_kind = RESCHEDULE_NONE;
@@ -2068,6 +2084,8 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
       strncmp(s_pending_reschedule_task_id, task->id, MAX_ID_LEN) == 0) {
     const char *pending_msg = s_pending_reschedule_kind == RESCHEDULE_TOMORROW ? "Moving to tomorrow..."
                               : s_pending_reschedule_kind == RESCHEDULE_TODAY ? "Scheduling for today..."
+                              : s_pending_reschedule_kind == RESCHEDULE_TO_BACKLOG ? "Moving to backlog..."
+                              : s_pending_reschedule_kind == RESCHEDULE_FROM_BACKLOG ? "Moving to list..."
                               : "Un-Scheduling...";
     draw_text(ctx, pending_msg, SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
     return;
@@ -2480,6 +2498,13 @@ static void send_pending_retry(void) {
         dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2);
       }
       break;
+    case MSG_TASK_SET_BACKLOG:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      if (s_retry_str2[0] != '\0') {
+        dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2);
+      }
+      dict_write_int32(iter, KEY_PROJECT_TASK_BACKLOG, s_retry_int);
+      break;
     case MSG_PROJECT_NOTE_APPEND:
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
       dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str2);
@@ -2573,10 +2598,16 @@ static void send_track_time_start(const char *task_id, int32_t elapsed_ms) {
 // turns this into an updateTask op and pushes a fresh list back - the task may
 // leave or join a Today-only view. aplite-excluded with the gesture.
 static void send_task_reschedule(const char *task_id, RescheduleKind kind, const char *project_id) {
+  const char *pid = (project_id && project_id[0] != '\0') ? project_id : NULL;
+  if (kind == RESCHEDULE_TO_BACKLOG || kind == RESCHEDULE_FROM_BACKLOG) {
+    // int_val carries the direction (1 = into the backlog); see send_pending_retry.
+    begin_send(MSG_TASK_SET_BACKLOG, task_id, pid, kind == RESCHEDULE_TO_BACKLOG ? 1 : 0);
+    return;
+  }
   int msg_type = kind == RESCHEDULE_TODAY ? MSG_TASK_PLAN_TODAY
                  : kind == RESCHEDULE_TOMORROW ? MSG_TASK_PLAN_TOMORROW
                  : MSG_TASK_UNSCHEDULE;
-  begin_send(msg_type, task_id, (project_id && project_id[0] != '\0') ? project_id : NULL, 0);
+  begin_send(msg_type, task_id, pid, 0);
 }
 #endif
 
@@ -4880,8 +4911,10 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
 }
 
 // Level 0: long-Select opens the selected project's notes (a project has no
-// tags, hence the cleared tags line). Level 1: long-Select starts / stops
-// tracking the task, same as a long-Select on the today list.
+// tags, hence the cleared tags line). Level 1: long-Select moves the task
+// between the regular list and the backlog - the direction is set by which
+// section the row is in (a regular row -> backlog, a backlog row -> regular),
+// through the same 3s-cancel pending window as the Up/Down reschedule.
 static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
   if (s_browse_level == 0) {
@@ -4893,26 +4926,16 @@ static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell
     show_notes_overlay_for(p->id, true);
     return;
   }
-  Task *bt = resolve_browse_task_at(*cell_index);
-  if (!bt) {
+  // The "No Project" bucket has no backlog - nothing to toggle.
+  if (s_browse_project_id[0] == '\0' ||
+      strncmp(s_browse_project_id, NO_PROJECT_ID_STR, MAX_PROJECT_ID_LEN) == 0) {
     return;
   }
-  bool already_tracking_this = s_tracking_task_id[0] != '\0' &&
-                                strncmp(s_tracking_task_id, bt->id, MAX_ID_LEN) == 0;
-  stop_tracking_and_report();
-  if (!already_tracking_this) {
-    // Prefer the real today-list Task so the over-estimate latch sees the right
-    // estimate; the browsed struct works too (start_tracking only reads ->id).
-    Task *real = find_task_by_id(bt->id);
-    start_tracking(real ? real : bt);
-    // start_tracking's MSG_TRACK_TIME_START tells the phone the id; the phone
-    // then re-pushes the task list with this task force-included (see
-    // handleTrackStart in index.js) so the today page's pinned "TRACKING"
-    // section picks it up. A sync request from here would just collide with
-    // that MSG_TRACK_TIME_START on the single outbox slot and be dropped.
+  if (!resolve_browse_task_at(*cell_index)) {
+    return;
   }
-  menu_layer_reload_data(s_browse_menu);
-  vibes_short_pulse();
+  bool in_backlog = pt_section_is_backlog((int)cell_index->section);
+  begin_pending_reschedule(in_backlog ? RESCHEDULE_FROM_BACKLOG : RESCHEDULE_TO_BACKLOG);
 }
 
 static void browse_update_empty(void) {
