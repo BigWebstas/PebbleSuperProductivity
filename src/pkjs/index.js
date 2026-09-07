@@ -414,6 +414,8 @@ function sendStatus(code, message) {
     // Focus-mode session length in minutes (watch-local pomodoro on the
     // full-screen tracking page - main.c's s_focus_len_min). Default 25.
     FOCUS_LEN_MIN: config.focusLenMin || 25,
+    // "Stop tracking at midnight" - watch-side (main.c's maybe_stop_at_midnight).
+    STOP_AT_MIDNIGHT: config.stopAtMidnight ? 1 : 0,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -2682,6 +2684,7 @@ Pebble.addEventListener('showConfiguration', function () {
       liveTracking: !!config.liveTracking,
       enableTimeline: !!config.enableTimeline,
       focusLenMin: config.focusLenMin || 25,
+      stopAtMidnight: !!config.stopAtMidnight,
     }
   );
   Pebble.openURL(url);
@@ -2764,6 +2767,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     liveTracking: !!result.liveTracking,
     enableTimeline: !!result.enableTimeline,
     focusLenMin: parseInt(result.focusLenMin, 10) || 25,
+    stopAtMidnight: !!result.stopAtMidnight,
   };
   saveConfig(newConfig);
 

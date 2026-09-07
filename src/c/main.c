@@ -55,6 +55,7 @@
 #define KEY_IDLE_REMINDER_MIN MESSAGE_KEY_IDLE_REMINDER_MIN
 #define KEY_DUE_REMINDER_MIN MESSAGE_KEY_DUE_REMINDER_MIN
 #define KEY_FOCUS_LEN_MIN MESSAGE_KEY_FOCUS_LEN_MIN
+#define KEY_STOP_AT_MIDNIGHT MESSAGE_KEY_STOP_AT_MIDNIGHT
 #define KEY_PRESENCE_STATE MESSAGE_KEY_PRESENCE_STATE
 #define KEY_PRESENCE_TASK_TITLE MESSAGE_KEY_PRESENCE_TASK_TITLE
 #define KEY_PRESENCE_DEVICE MESSAGE_KEY_PRESENCE_DEVICE
@@ -587,6 +588,12 @@ static bool s_schedule_enabled = true;
 // banner fires. App-open only; re-arms once that task's time passes.
 static int s_due_reminder_min = 0;
 static int s_due_notified_min = -1;
+// "Stop tracking at midnight" (config.stopAtMidnight, default off). The
+// MINUTE_UNIT tick (app-open only) stops a local session that started before
+// the current local day, logging only the time up to 00:00; a remote session
+// gets a plain stop request. Catches a timer left running overnight the next
+// time the app is opened, not just at the stroke of midnight.
+static bool s_stop_at_midnight = false;
 // "Stats" page row (config.enableStats, default on) and the last
 // MSG_STATS_DATA payload - kept across visits so a re-open shows the previous
 // numbers immediately while a fresh request is in flight. Declared here (not
@@ -2766,12 +2773,14 @@ static void start_tracking(Task *task) {
 }
 
 // Stops whatever's being tracked (a no-op if nothing is) and reports the
-// elapsed session for upload (handleTrackTimeStop in index.js).
-static void stop_tracking_and_report(void) {
+// session up to `end_epoch` for upload (handleTrackTimeStop in index.js).
+// stop_tracking_and_report() passes now; the midnight auto-stop passes the
+// day boundary so the overnight run isn't logged.
+static void stop_tracking_at(time_t end_epoch) {
   if (s_tracking_task_id[0] == '\0') {
     return;
   }
-  time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
+  time_t elapsed_s = end_epoch - s_tracking_start_epoch;
 #ifndef PBL_PLATFORM_APLITE
   // Always sent (even a 0ms session) so the phone can end the "Tracking on
   // Pebble" presence broadcast; the phone ignores a 0 delta for the op upload.
@@ -2827,6 +2836,10 @@ static void stop_tracking_and_report(void) {
   live_window_refresh(); // pop the detail screen if it was open on this session
 #endif
   stop_tracking_tick();
+}
+
+static void stop_tracking_and_report(void) {
+  stop_tracking_at(time(NULL));
 }
 
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
@@ -3890,6 +3903,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       // Focus-mode session length in minutes. Only the NEXT session picks up a
       // change; a running one keeps its already-computed end time.
       s_focus_len_min = tuple_int(iterator, KEY_FOCUS_LEN_MIN, s_focus_len_min);
+      // "Stop tracking at midnight" - absent-means-unchanged.
+      s_stop_at_midnight = tuple_int(iterator, KEY_STOP_AT_MIDNIGHT, s_stop_at_midnight) != 0;
 #endif
       // reload_data refreshes the Resync row's status subtitle;
       // update_empty_layer() handles the empty screen. Both no-op while the
@@ -6141,10 +6156,38 @@ static void maybe_notify_idle(void) {
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
+// config.stopAtMidnight: close out a session still running past the local
+// midnight. A local timer is stopped and its time logged only up to 00:00
+// (stop_tracking_at); a remote session gets a stop request - the producing
+// device owns how its time splits across the day. Runs on the minute tick,
+// so a timer left going overnight is caught the next time the app is opened,
+// not only if the app happens to be foregrounded at midnight.
+static void maybe_stop_at_midnight(struct tm *now_tm) {
+  if (!s_stop_at_midnight) {
+    return;
+  }
+  time_t now = time(NULL);
+  time_t today_start = now - (now_tm->tm_hour * 3600 + now_tm->tm_min * 60 + now_tm->tm_sec);
+
+  if (s_tracking_task_id[0] != '\0' && s_tracking_start_epoch < today_start) {
+    stop_tracking_at(today_start);
+    menu_layer_reload_data(s_menu_layer);
+    refresh_scroll_state(true);
+    return;
+  }
+  if (s_presence_state == 1 && s_presence_can_stop && !s_presence_stopping &&
+      s_presence_elapsed_base != 0 && s_presence_elapsed_base < today_start) {
+    s_presence_stopping = true;
+    send_presence_stop();
+    live_window_refresh();
+  }
+}
+
 // MINUTE_UNIT tick: when s_due_reminder_min is set, fires the banner as the
 // soonest upcoming timed task comes within that window; also drives the idle
 // check above. App-open only.
 static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
+  maybe_stop_at_midnight(now_tm);
 #ifdef BREAK_REMINDER
   maybe_notify_idle();
 #endif

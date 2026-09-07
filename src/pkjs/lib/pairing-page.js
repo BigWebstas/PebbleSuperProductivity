@@ -41,6 +41,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var idleReminderMin = options.idleReminderMin || 0;
   var dueReminderMin = options.dueReminderMin || 0;
   var liveTracking = !!options.liveTracking;
+  var stopAtMidnight = !!options.stopAtMidnight;
   var enableTimeline = !!options.enableTimeline;
   var focusLenMin = options.focusLenMin || 25;
   var backlightMode = options.backlightMode || 0;
@@ -329,6 +330,17 @@ dueReminderOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="stopAtMidnight" type="checkbox"' + (stopAtMidnight ? ' checked' : '') + '>\n' +
+'    <label for="stopAtMidnight">Stop tracking at midnight</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    If a task is still being tracked when the local day rolls over - on this\n' +
+'    watch or on another device - stop it. A watch timer logs only the time\n' +
+'    up to midnight. Runs while the watchapp is open, so a timer left going\n' +
+'    overnight is closed out the next time you open the app.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="liveTracking" type="checkbox"' + (liveTracking ? ' checked' : '') + '>\n' +
 '    <label for="liveTracking">Show live tracking from other devices</label>\n' +
 '  </div>\n' +
@@ -555,6 +567,7 @@ taskEstimateOptions + '\n' +
 '      idleReminderMin: parseInt(document.getElementById(\'idleReminderMin\').value, 10) || 0,\n' +
 '      dueReminderMin: parseInt(document.getElementById(\'dueReminderMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
+'      stopAtMidnight: document.getElementById(\'stopAtMidnight\').checked,\n' +
 '      enableTimeline: document.getElementById(\'enableTimeline\').checked,\n' +
 '      focusLenMin: parseInt(document.getElementById(\'focusLenMin\').value, 10) || 25,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
