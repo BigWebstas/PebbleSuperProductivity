@@ -18,6 +18,7 @@ function check(name, fn) {
 }
 
 const today = store.todayStr();
+const yesterday = store.yesterdayStr();
 
 function entry(entityType, actionType, actionPayload) {
   return {
@@ -141,6 +142,18 @@ check('projects list carries undone non-done task counts, in title order', () =>
   stats.projects.forEach((p) => { byTitle[p.title] = p.taskCount; });
   assert.strictEqual(byTitle.Work, 1);
   assert.strictEqual(byTitle.Garden, 2);
+});
+
+check('worked / completed yesterday come from the yesterday day-key and doneOn', () => {
+  const py = new Date(); py.setDate(py.getDate() - 1);
+  const s = build([
+    addTask({ id: 'a', title: 'A', timeSpentOnDay: (function () { const m = {}; m[yesterday] = 700000; m[today] = 100000; return m; })() }),
+    addTask({ id: 'b', title: 'B', isDone: true, doneOn: py.getTime() }),
+    addTask({ id: 'c', title: 'C', isDone: true, doneOn: Date.now() }),
+  ]);
+  const stats = store.computeStats(s);
+  assert.strictEqual(stats.workedYesterdayMs, 700000);
+  assert.strictEqual(stats.completedYesterdayCount, 1);
 });
 
 console.log('');

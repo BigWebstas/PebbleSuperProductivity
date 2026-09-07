@@ -135,6 +135,10 @@ var NOTE_APPEND_DIVIDER = '•••••••••••••••••�
 // so it belongs on outgoing ops for correctness regardless.
 var SCHEMA_VERSION = 4;
 
+// Shown at the foot of the settings page. Bump alongside package.json and
+// main.c's APP_VERSION when cutting a release.
+var APP_VERSION = '0.6.47';
+
 // Opening the watchapp (Pebble's 'ready' event - see the bottom of this
 // file) used to always trigger a full doSync() no matter how recently one
 // had already completed, including the ordinary case of just backing out
@@ -374,6 +378,9 @@ function sendStatus(code, message) {
     // Upcoming page row (default on). Drives main.c's s_upcoming_enabled /
     // SECTION0_ROW_UPCOMING - future-dated tasks grouped by day.
     UPCOMING_ENABLED: config.enableUpcoming !== false ? 1 : 0,
+    // "Yesterday's stats" toggle - long Up/Down on the Stats page flips it to
+    // yesterday's worked time / completed count. Default off (main.c).
+    YESTERDAY_STATS_ENABLED: config.yesterdayStats ? 1 : 0,
     // 0 = system default, -1 = always on, N>0 = relight-and-hold for N
     // seconds after any button press - see main.c's own s_backlight_mode
     // comment. Always included (not conditionally), same reasoning as the
@@ -756,6 +763,8 @@ function handleStatsRequest() {
     STATS_EST_REMAINING_MS: Math.min(stats.estimateRemainingMs, 2e9),
     STATS_WORKED_TODAY_MS: Math.min(stats.workedTodayMs, 2e9),
     STATS_DONE_TODAY: stats.completedTodayCount,
+    STATS_WORKED_YESTERDAY_MS: Math.min(stats.workedYesterdayMs, 2e9),
+    STATS_DONE_YESTERDAY: stats.completedYesterdayCount,
     STATS_TEXT: lines,
   }, function () {}, function (e) {
     console.log('[pkjs] giving up on STATS_DATA after retries: ' + JSON.stringify(e));
@@ -2759,6 +2768,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableStats: config.enableStats !== false,
       enableSchedule: config.enableSchedule !== false,
       enableUpcoming: config.enableUpcoming !== false,
+      yesterdayStats: !!config.yesterdayStats,
       backlightMode: config.backlightMode || 0,
       touchNav: !!config.touchNav,
       overtimeNotify: !!config.overtimeNotify,
@@ -2773,6 +2783,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableTimeline: !!config.enableTimeline,
       focusLenMin: config.focusLenMin || 25,
       stopAtMidnight: !!config.stopAtMidnight,
+      appVersion: APP_VERSION,
     }
   );
   Pebble.openURL(url);
@@ -2843,6 +2854,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableStats: !!result.enableStats,
     enableSchedule: !!result.enableSchedule,
     enableUpcoming: !!result.enableUpcoming,
+    yesterdayStats: !!result.yesterdayStats,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,
     overtimeNotify: !!result.overtimeNotify,

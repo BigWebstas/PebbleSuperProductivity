@@ -58,6 +58,12 @@ function todayStr() {
   return dateToDateStr(new Date());
 }
 
+function yesterdayStr() {
+  var d = new Date();
+  d.setDate(d.getDate() - 1);
+  return dateToDateStr(d);
+}
+
 // dueWithTime is a ms timestamp (a task scheduled for a specific time of
 // day). The real app enforces dueDay/dueWithTime as MUTUALLY EXCLUSIVE -
 // setting one clears the other (task-shared-scheduling.reducer.ts) - so a
@@ -1372,9 +1378,12 @@ function getActiveHabits(state, limit) {
 function computeStats(state) {
   var tasks = state.task || {};
   var today = todayStr();
+  var yesterday = yesterdayStr();
   var estimateRemainingMs = 0;
   var workedTodayMs = 0;
+  var workedYesterdayMs = 0;
   var completedTodayCount = 0;
+  var completedYesterdayCount = 0;
 
   Object.keys(tasks).forEach(function (id) {
     var t = tasks[id];
@@ -1386,6 +1395,12 @@ function computeStats(state) {
 
     if (!hasSubs) {
       workedTodayMs += (t.timeSpentOnDay && t.timeSpentOnDay[today]) || 0;
+      workedYesterdayMs += (t.timeSpentOnDay && t.timeSpentOnDay[yesterday]) || 0;
+    }
+    // "Completed yesterday" leans on doneOn, which only survives replay for
+    // watch-completed / recently-completed tasks - so it can undercount.
+    if (t.isDone && t.doneOn && dateToDateStr(new Date(t.doneOn)) === yesterday) {
+      completedYesterdayCount++;
     }
 
     if (!isMainTask(t)) {
@@ -1439,7 +1454,9 @@ function computeStats(state) {
   return {
     estimateRemainingMs: estimateRemainingMs,
     workedTodayMs: workedTodayMs,
+    workedYesterdayMs: workedYesterdayMs,
     completedTodayCount: completedTodayCount,
+    completedYesterdayCount: completedYesterdayCount,
     projects: projects,
   };
 }
@@ -1658,6 +1675,7 @@ module.exports = {
   repeatOccurrences: repeatOccurrences,
   NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,
+  yesterdayStr: yesterdayStr,
   dateToDateStr: dateToDateStr,
   HIDE_DONE_GRACE_MS: HIDE_DONE_GRACE_MS,
 };

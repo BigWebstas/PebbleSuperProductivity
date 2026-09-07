@@ -30,6 +30,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var enableAddTask = options.enableAddTask !== false;
   var enableProjects = options.enableProjects !== false;
   var enableStats = options.enableStats !== false;
+  var yesterdayStats = !!options.yesterdayStats;
   var enableSchedule = options.enableSchedule !== false;
   var enableUpcoming = options.enableUpcoming !== false;
   var touchNav = !!options.touchNav;
@@ -45,6 +46,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var stopAtMidnight = !!options.stopAtMidnight;
   var enableTimeline = !!options.enableTimeline;
   var focusLenMin = options.focusLenMin || 25;
+  var appVersion = options.appVersion || '';
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
@@ -430,6 +432,17 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="yesterdayStats" type="checkbox"' + (yesterdayStats ? ' checked' : '') + '>\n' +
+'    <label for="yesterdayStats">Yesterday toggle on the Stats page</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    On the Stats page, hold Up or Down to flip between today and yesterday.\n' +
+'    Yesterday shows worked time and completed count for that day; the\n' +
+'    live figures (current session, without a break, break time, focus\n' +
+'    sessions) show a dash.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableSchedule" type="checkbox"' + (enableSchedule ? ' checked' : '') + '>\n' +
 '    <label for="enableSchedule">Enable Schedule</label>\n' +
 '  </div>\n' +
@@ -568,6 +581,7 @@ taskEstimateOptions + '\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
 '      enableProjects: document.getElementById(\'enableProjects\').checked,\n' +
 '      enableStats: document.getElementById(\'enableStats\').checked,\n' +
+'      yesterdayStats: document.getElementById(\'yesterdayStats\').checked,\n' +
 '      enableSchedule: document.getElementById(\'enableSchedule\').checked,\n' +
 '      enableUpcoming: document.getElementById(\'enableUpcoming\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
@@ -598,6 +612,8 @@ taskEstimateOptions + '\n' +
 '  });\n' +
 '})();\n' +
 '</script>\n' +
+'  <p class="hint" style="text-align:center;margin-top:24px">Super Productivity for Pebble' +
+  (appVersion ? ' &middot; v' + escapeHtmlAttr(appVersion) : '') + '</p>\n' +
 '</body>\n' +
 '</html>\n';
 

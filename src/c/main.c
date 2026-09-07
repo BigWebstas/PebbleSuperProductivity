@@ -2,7 +2,7 @@
 
 // Keep in sync by hand with package.json "version" on every bump - no runtime
 // API exposes it to C.
-#define APP_VERSION "0.6.46"
+#define APP_VERSION "0.6.47"
 
 // MESSAGE_KEY_* come from message_keys.auto.h (generated from package.json's
 // "messageKeys"); AppMessage assigns IDs from 10000, so a 0-based enum wouldn't
@@ -69,6 +69,9 @@
 #define KEY_STATS_WORKED_TODAY_MS MESSAGE_KEY_STATS_WORKED_TODAY_MS
 #define KEY_STATS_DONE_TODAY MESSAGE_KEY_STATS_DONE_TODAY
 #define KEY_STATS_TEXT MESSAGE_KEY_STATS_TEXT
+#define KEY_STATS_WORKED_YESTERDAY_MS MESSAGE_KEY_STATS_WORKED_YESTERDAY_MS
+#define KEY_STATS_DONE_YESTERDAY MESSAGE_KEY_STATS_DONE_YESTERDAY
+#define KEY_YESTERDAY_STATS_ENABLED MESSAGE_KEY_YESTERDAY_STATS_ENABLED
 #define KEY_SCHEDULE_ENABLED MESSAGE_KEY_SCHEDULE_ENABLED
 #define KEY_UPCOMING_ENABLED MESSAGE_KEY_UPCOMING_ENABLED
 #define KEY_UPCOMING_TEXT MESSAGE_KEY_UPCOMING_TEXT
@@ -622,6 +625,13 @@ static int s_stats_est_remaining_ms = 0;
 static int s_stats_worked_today_ms = 0;
 static int s_stats_done_today = 0;
 static bool s_stats_have_data = false;
+// "Yesterday toggle" (config.yesterdayStats). When on, long Up/Down on the
+// Stats page flips s_stats_show_yesterday: worked/completed switch to the
+// phone-sent yesterday figures, the live metrics show a dash.
+static bool s_yesterday_stats_enabled = false;
+static bool s_stats_show_yesterday = false;
+static int s_stats_worked_yesterday_ms = 0;
+static int s_stats_done_yesterday = 0;
 // "Upcoming" page row (config.enableUpcoming, default on) and its last
 // MSG_UPCOMING_DATA payload - future-dated tasks preformatted phone-side into
 // "\x02"-prefixed day headers + task lines the watch prints verbatim.
@@ -3918,6 +3928,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_stats_est_remaining_ms = tuple_int(iterator, KEY_STATS_EST_REMAINING_MS, 0);
       s_stats_worked_today_ms = tuple_int(iterator, KEY_STATS_WORKED_TODAY_MS, 0);
       s_stats_done_today = tuple_int(iterator, KEY_STATS_DONE_TODAY, 0);
+      s_stats_worked_yesterday_ms = tuple_int(iterator, KEY_STATS_WORKED_YESTERDAY_MS, 0);
+      s_stats_done_yesterday = tuple_int(iterator, KEY_STATS_DONE_YESTERDAY, 0);
       str_copy(s_stats_projects, tuple_str(iterator, KEY_STATS_TEXT, ""), sizeof(s_stats_projects));
       s_stats_have_data = true;
       stats_render(); // no-op if the window was closed before the reply landed
@@ -3947,6 +3959,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_stats_enabled = tuple_int(iterator, KEY_STATS_ENABLED, s_stats_enabled) != 0;
       s_schedule_enabled = tuple_int(iterator, KEY_SCHEDULE_ENABLED, s_schedule_enabled) != 0;
       s_upcoming_enabled = tuple_int(iterator, KEY_UPCOMING_ENABLED, s_upcoming_enabled) != 0;
+      s_yesterday_stats_enabled = tuple_int(iterator, KEY_YESTERDAY_STATS_ENABLED, s_yesterday_stats_enabled) != 0;
 #endif
       // Only re-applied when the value actually changed - this field is sent on
       // every status push (including routine background syncs), and re-triggering
@@ -5447,14 +5460,24 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   } else {
     str_copy(break_buf, "0", sizeof(break_buf));
   }
+  // "Yesterday" view (toggled with long Up/Down): the two figures the phone
+  // sends for that day; the live watch-local metrics show a dash.
+  bool yd = s_stats_show_yesterday;
+  char worked_y[24];
+  if (yd) {
+    format_duration_ms(s_stats_worked_yesterday_ms < 0 ? 0 : s_stats_worked_yesterday_ms,
+                       false, worked_y, sizeof(worked_y));
+    snprintf(done_buf, sizeof(done_buf), "%d", s_stats_done_yesterday);
+  }
+
   int16_t y = 0;
-  y = stats_draw_metric(ctx, y, w, "Estimate remaining", s_stats_est);
-  y = stats_draw_metric(ctx, y, w, "Worked today", s_stats_worked);
-  y = stats_draw_metric(ctx, y, w, "Without a break", s_stats_nobreak);
-  y = stats_draw_metric(ctx, y, w, "Break time", break_buf);
-  y = stats_draw_metric(ctx, y, w, "Current session", s_stats_session);
-  y = stats_draw_metric(ctx, y, w, "Completed today", done_buf);
-  y = stats_draw_metric(ctx, y, w, "Focus sessions", focus_buf);
+  y = stats_draw_metric(ctx, y, w, "Estimate remaining", yd ? "-" : s_stats_est);
+  y = stats_draw_metric(ctx, y, w, yd ? "Worked yesterday" : "Worked today", yd ? worked_y : s_stats_worked);
+  y = stats_draw_metric(ctx, y, w, "Without a break", yd ? "-" : s_stats_nobreak);
+  y = stats_draw_metric(ctx, y, w, "Break time", yd ? "-" : break_buf);
+  y = stats_draw_metric(ctx, y, w, "Current session", yd ? "-" : s_stats_session);
+  y = stats_draw_metric(ctx, y, w, yd ? "Done yesterday" : "Completed today", done_buf);
+  y = stats_draw_metric(ctx, y, w, "Focus sessions", yd ? "-" : focus_buf);
 
   fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
   graphics_context_set_text_color(ctx, GColorWhite);
@@ -5508,6 +5531,27 @@ static void request_stats(void) {
   begin_send(MSG_STATS_REQUEST, NULL, NULL, 0);
 }
 
+// Long Up/Down on the Stats page flips between today and yesterday, when the
+// "Yesterday toggle" setting is on. Wraps the scroll layer's own click config.
+static ClickConfigProvider s_stats_ccp = NULL;
+
+static void stats_toggle_yesterday_handler(ClickRecognizerRef recognizer, void *context) {
+  if (!s_yesterday_stats_enabled) {
+    return;
+  }
+  s_stats_show_yesterday = !s_stats_show_yesterday;
+  vibes_short_pulse();
+  stats_render();
+}
+
+static void stats_window_click_config_provider(void *context) {
+  if (s_stats_ccp) {
+    s_stats_ccp(context);
+  }
+  window_long_click_subscribe(BUTTON_ID_UP, 0, stats_toggle_yesterday_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_DOWN, 0, stats_toggle_yesterday_handler, NULL);
+}
+
 static void stats_window_load(Window *window) {
   Layer *window_layer;
   s_stats_content_bounds = window_chrome(window, &s_stats_status_bar, &window_layer);
@@ -5515,6 +5559,9 @@ static void stats_window_load(Window *window) {
   s_stats_scroll_layer = scroll_layer_create(s_stats_content_bounds);
   scroll_layer_set_content_size(s_stats_scroll_layer, s_stats_content_bounds.size);
   scroll_layer_set_click_config_onto_window(s_stats_scroll_layer, window);
+  s_stats_ccp = window_get_click_config_provider(window);
+  window_set_click_config_provider_with_context(window, stats_window_click_config_provider,
+                                                window_get_click_config_context(window));
 
   s_stats_content_layer = layer_create(GRect(0, 0, s_stats_content_bounds.size.w,
                                              s_stats_content_bounds.size.h));
@@ -5526,6 +5573,8 @@ static void stats_window_load(Window *window) {
 }
 
 static void stats_window_unload(Window *window) {
+  s_stats_show_yesterday = false;
+  s_stats_ccp = NULL;
   layer_destroy(s_stats_content_layer);
   s_stats_content_layer = NULL;
   scroll_layer_destroy(s_stats_scroll_layer);
