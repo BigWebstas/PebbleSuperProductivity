@@ -42,6 +42,7 @@
 #define KEY_PROJECT_INDEX MESSAGE_KEY_PROJECT_INDEX
 #define KEY_PROJECT_TITLE MESSAGE_KEY_PROJECT_TITLE
 #define KEY_PROJECT_COLOR MESSAGE_KEY_PROJECT_COLOR
+#define KEY_PROJECT_TASK_COUNT MESSAGE_KEY_PROJECT_TASK_COUNT
 #define KEY_PROJECT_TOTAL MESSAGE_KEY_PROJECT_TOTAL
 #define KEY_PROJECT_TASK_BACKLOG MESSAGE_KEY_PROJECT_TASK_BACKLOG
 #define KEY_PROJECTS_ENABLED MESSAGE_KEY_PROJECTS_ENABLED
@@ -126,7 +127,7 @@ enum {
   // a reply for a project the watch has navigated away from is ignored.
   MSG_PROJECT_LIST_REQUEST = 31,    // watch -> phone: (no keys)
   MSG_PROJECT_LIST_START = 32,      // phone -> watch: PROJECT_TOTAL
-  MSG_PROJECT_LIST_ITEM = 33,       // phone -> watch: PROJECT_INDEX + PROJECT_ID + PROJECT_TITLE
+  MSG_PROJECT_LIST_ITEM = 33,       // phone -> watch: PROJECT_INDEX + PROJECT_ID + PROJECT_TITLE + PROJECT_TASK_COUNT
   MSG_PROJECT_LIST_END = 34,        // phone -> watch: (no keys)
   MSG_PROJECT_TASKS_REQUEST = 35,   // watch -> phone: PROJECT_ID
   MSG_PROJECT_TASKS_START = 36,     // phone -> watch: PROJECT_ID + TASK_TOTAL
@@ -706,6 +707,7 @@ typedef struct {
   char id[MAX_PROJECT_ID_LEN];
   char title[MAX_TITLE_LEN];
   int color; // packed GColor8 byte for the theme-colour swatch, 0 = none
+  int task_count; // active main tasks in the regular list (no backlog, no done)
 } BrowseProject;
 static BrowseProject *s_browse_projects = NULL;
 static int s_browse_project_count = 0;      // committed (drawn) count
@@ -3872,6 +3874,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       str_copy(s_browse_projects[idx].id, id_tuple->value->cstring, MAX_PROJECT_ID_LEN);
       str_copy(s_browse_projects[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN);
       s_browse_projects[idx].color = tuple_int(iterator, KEY_PROJECT_COLOR, 0);
+      s_browse_projects[idx].task_count = tuple_int(iterator, KEY_PROJECT_TASK_COUNT, 0);
       break;
     }
     case MSG_PROJECT_LIST_END: {
@@ -4798,7 +4801,19 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     int16_t text_x = draw_project_marker(ctx, TITLE_BOX_X, bounds.size.h, p->id,
                                           (uint8_t)p->color, is_selected);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
-    draw_text(ctx, p->title, FONT_KEY_GOTHIC_24_BOLD, GRect(text_x, HEADING_TITLE_Y(bounds.size.h), bounds.size.w - text_x - TITLE_BOX_X, HEADING_TITLE_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+    // Right-aligned count of the project's regular-list tasks (backlog and
+    // done excluded, computed phone-side). Fixed-width strip so the title
+    // ellipsis lands before it; 3 digits of GOTHIC_24_BOLD fit in 40 px.
+    char count_buf[8];
+    snprintf(count_buf, sizeof(count_buf), "%d", p->task_count);
+    const int16_t count_w = 40;
+    int16_t title_y = HEADING_TITLE_Y(bounds.size.h);
+    draw_text(ctx, count_buf, FONT_KEY_GOTHIC_24_BOLD,
+              GRect(bounds.size.w - TITLE_BOX_X - count_w, title_y, count_w, HEADING_TITLE_H),
+              GTextOverflowModeTrailingEllipsis, GTextAlignmentRight);
+    draw_text(ctx, p->title, FONT_KEY_GOTHIC_24_BOLD,
+              GRect(text_x, title_y, bounds.size.w - text_x - TITLE_BOX_X - count_w, HEADING_TITLE_H),
+              GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     return;
   }
   Task *bt = resolve_browse_task_at(*cell_index);

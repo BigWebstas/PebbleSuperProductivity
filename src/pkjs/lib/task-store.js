@@ -1022,20 +1022,51 @@ function projectColorRgb(p) {
   return 0xc0 | ((r >> 6) << 4) | ((g >> 6) << 2) | (b >> 6); // GColor8.argb, always non-zero (alpha bits set)
 }
 
+// Count of a project's active main tasks in its REGULAR list - the backlog,
+// done tasks and subtasks are all excluded. projectId falsy / NO_PROJECT_ID
+// counts the no-project tasks. Shown right-aligned on each browser project row.
+function projectRegularTaskCount(state, projectId) {
+  var allTasks = state.task || {};
+  var wantNoProject = !projectId || projectId === NO_PROJECT_ID;
+  var n = 0;
+  Object.keys(allTasks).forEach(function (id) {
+    var t = allTasks[id];
+    if (!t || !t.title || !isMainTask(t) || t.isDone || t.__inBacklog) {
+      return;
+    }
+    if (wantNoProject ? !t.projectId : t.projectId === projectId) {
+      n++;
+    }
+  });
+  return n;
+}
+
 function getProjectList(state) {
   var projects = state.project || {};
   var allTasks = state.task || {};
   var out = Object.keys(projects)
     .map(function (id) { return projects[id]; })
     .filter(function (p) { return p && p.id && p.title && !p.isArchived; })
-    .map(function (p) { return { id: p.id, title: p.title, color: projectColorRgb(p) }; });
+    .map(function (p) {
+      return {
+        id: p.id,
+        title: p.title,
+        color: projectColorRgb(p),
+        taskCount: projectRegularTaskCount(state, p.id),
+      };
+    });
   out.sort(function (a, b) { return titleCompare(a.title, b.title); });
   var hasNoProject = Object.keys(allTasks).some(function (id) {
     var t = allTasks[id];
     return t && t.title && isMainTask(t) && !t.projectId && !t.isDone;
   });
   if (hasNoProject) {
-    out.push({ id: NO_PROJECT_ID, title: 'No Project', color: 0 });
+    out.push({
+      id: NO_PROJECT_ID,
+      title: 'No Project',
+      color: 0,
+      taskCount: projectRegularTaskCount(state, NO_PROJECT_ID),
+    });
   }
   return out;
 }

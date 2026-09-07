@@ -1415,10 +1415,39 @@ check('getProjectList returns non-archived projects sorted by title, with theme 
   );
   // color is the packed Pebble GColor8 byte (0xC0 | rr gg bb, 2 bits each)
   assert.deepStrictEqual(store.getProjectList(state), [
-    { id: 'p2', title: 'Groceries', color: 0xd9 }, // #4caf50
-    { id: 'p1', title: 'Work', color: 0xcb },      // #2196f3
-    { id: 'p4', title: 'Zeta', color: 0 },          // no theme -> 0, no swatch
+    { id: 'p2', title: 'Groceries', color: 0xd9, taskCount: 0 }, // #4caf50
+    { id: 'p1', title: 'Work', color: 0xcb, taskCount: 0 },      // #2196f3
+    { id: 'p4', title: 'Zeta', color: 0, taskCount: 0 },          // no theme -> 0, no swatch
   ]);
+});
+
+check('getProjectList taskCount is the regular-list active mains - no backlog, no done, no subtasks', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      addTask({ id: 'a', title: 'regular one', projectId: 'p1' }),
+      addTask({ id: 'b', title: 'regular two', projectId: 'p1' }),
+      addTask({ id: 'c', title: 'done one', projectId: 'p1', isDone: true }),
+      addTask({ id: 'd', title: 'backlogged', projectId: 'p1' }),
+      addTask({ id: 's', title: 'a subtask', projectId: 'p1', parentId: 'a' }),
+      addTask({ id: 'e', title: 'loose', /* no project */ }),
+    ],
+    state
+  );
+  store.applyOperations(
+    [taskEntry('[Task Shared] scheduleTaskWithTime', {
+      task: { id: 'd' },
+      dueWithTime: Date.now(),
+      isMoveToBacklog: true,
+    })],
+    state
+  );
+  const list = store.getProjectList(state);
+  const work = list.find((p) => p.id === 'p1');
+  assert.strictEqual(work.taskCount, 2); // a, b only
+  const none = list.find((p) => p.id === store.NO_PROJECT_ID);
+  assert.strictEqual(none.taskCount, 1); // e
 });
 
 check('getProjectList appends a synthetic "No Project" entry only when project-less active tasks exist', () => {

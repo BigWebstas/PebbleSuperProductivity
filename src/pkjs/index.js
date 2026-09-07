@@ -665,6 +665,7 @@ function sendProjectListAt(projects, index) {
     PROJECT_INDEX: index,
     PROJECT_ID: String(p.id).slice(0, 31),
     PROJECT_TITLE: String(p.title).slice(0, 63),
+    PROJECT_TASK_COUNT: p.taskCount || 0,
   };
   if (p.color) {
     // Packed Pebble GColor8 byte (see projectColorRgb); the watch assigns it
