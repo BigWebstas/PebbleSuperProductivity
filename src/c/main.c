@@ -1058,9 +1058,9 @@ static const uint32_t PERSIST_KEY_TRACKING_START = 111;
 static const uint32_t PERSIST_KEY_FOCUS_END = 114;
 static time_t s_focus_end_epoch = 0;
 static int s_focus_len_min = 25;
-// Anti-inactivity-close lever: re-assert the backlight this often while a focus
-// screen is up. Every second was overkill; 5 min is plenty to keep the app
-// foregrounded (there is no real API for this - see the focus-mode comment).
+// Anti-inactivity-close lever: pulse the backlight (light_enable_interaction -
+// a fading flash, like a button press, not a latch) this often while a focus
+// screen is up. There is no real API for this - see the focus-mode comment.
 #define FOCUS_LIGHT_POKE_S 300
 static time_t s_focus_last_poke_epoch = 0;
 
@@ -5567,21 +5567,18 @@ static void stop_live_tick(void) {
 
 // ---- focus mode ----
 // There is NO API to disable PebbleOS's inactivity auto-close. The lever we
-// have: the tracking tick (live_tick_callback) calls light_enable(true) every
-// FOCUS_LIGHT_POKE_S while a focus session's screen is on top. It may still
-// time out on real hardware; when it does, the persisted s_focus_end_epoch
-// means init() drops straight back onto the focus screen and back into the
-// session.
+// have: the tracking tick (live_tick_callback) calls light_enable_interaction()
+// every FOCUS_LIGHT_POKE_S while a focus session's screen is on top - a brief
+// backlight pulse that fades on its own, same as a button press, not a latch.
+// It may still time out on real hardware; when it does, the persisted
+// s_focus_end_epoch means init() drops straight back onto the focus screen.
 
-// Ends the running focus session: clears state, releases the backlight
-// (unless the user set it always-on), buzzes, repaints the header strip.
-// `notify` = ran to completion (long buzz + banner); else a plain stop.
+// Ends the running focus session: clears state, buzzes, repaints the header
+// strip. `notify` = ran to completion (long buzz + banner); else a plain stop.
+// Nothing to undo for the backlight - the pulses fade themselves.
 static void focus_end(bool notify) {
   s_focus_end_epoch = 0;
   save_focus();
-  if (s_backlight_mode != BACKLIGHT_MODE_ALWAYS_ON) {
-    light_enable(false);
-  }
   if (notify) {
     vibes_long_pulse();
     show_top_banner("Focus done");
@@ -5603,8 +5600,8 @@ static void focus_toggle(void) {
     s_focus_end_epoch = time(NULL) + (time_t)s_focus_len_min * 60;
     save_focus();
     vibes_short_pulse();
-    light_enable(true);
-    s_focus_last_poke_epoch = time(NULL); // next tick poke is FOCUS_LIGHT_POKE_S out
+    light_enable_interaction();
+    s_focus_last_poke_epoch = time(NULL); // next tick pulse is FOCUS_LIGHT_POKE_S out
     menu_layer_reload_data(s_menu_layer);
   }
   live_window_refresh();
@@ -5716,14 +5713,15 @@ static void live_window_refresh(void) {
 
 static void live_tick_callback(void *data) {
   s_live_tick_timer = NULL;
-  // Re-assert the backlight every FOCUS_LIGHT_POKE_S during a focus session -
-  // the only lever against the inactivity auto-close (see the focus-mode
-  // comment). The 1s tick still runs for the countdown; the poke is throttled.
+  // Pulse the backlight every FOCUS_LIGHT_POKE_S during a focus session - the
+  // only lever against the inactivity auto-close (see the focus-mode comment).
+  // The 1s tick still runs for the countdown; the pulse is throttled and fades
+  // on its own like a button press.
   if (focus_active()) {
     time_t now = time(NULL);
     if (now - s_focus_last_poke_epoch >= FOCUS_LIGHT_POKE_S) {
       s_focus_last_poke_epoch = now;
-      light_enable(true);
+      light_enable_interaction();
     }
   }
   if (s_tracking_task_id[0] != '\0' || s_presence_state == 1) {
