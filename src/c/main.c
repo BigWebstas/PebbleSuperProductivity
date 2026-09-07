@@ -5720,13 +5720,22 @@ static void live_tick_callback(void *data) {
   }
 }
 
+// stop_tracking_and_report() ends with live_window_refresh(), which pops this
+// screen once nothing is tracking. Also ends any focus session.
+static void live_stop_local_tracking(void) {
+  stop_tracking_and_report();
+  menu_layer_reload_data(s_menu_layer);
+  refresh_scroll_state(true);
+}
+
 static void live_window_select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  // In focus mode a short Select is a no-op - only a long hold ends the
+  // session, so a stray press can't drop you out mid-focus.
+  if (focus_active()) {
+    return;
+  }
   if (s_tracking_task_id[0] != '\0') {
-    // stop_tracking_and_report() ends with live_window_refresh(), which pops
-    // this screen once nothing is tracking.
-    stop_tracking_and_report();
-    menu_layer_reload_data(s_menu_layer);
-    refresh_scroll_state(true);
+    live_stop_local_tracking();
     return;
   }
   if (s_presence_can_stop && !s_presence_stopping) {
@@ -5736,14 +5745,23 @@ static void live_window_select_click_handler(ClickRecognizerRef recognizer, void
   }
 }
 
+// Long-Select stops the local timer (which also ends a focus session). Long
+// Up/Down end focus but leave the timer running.
+static void live_window_select_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  backlight_touch();
+  if (s_tracking_task_id[0] != '\0') {
+    live_stop_local_tracking();
+  }
+}
+
 static void focus_long_click_handler(ClickRecognizerRef recognizer, void *context) {
   backlight_touch();
   focus_toggle();
 }
 
 // While a focus session runs, Back is trapped on this screen - the point of
-// focus mode is that a stray press doesn't drop you to the watchface. End the
-// session (hold Up/Down) to leave. Without a session Back just pops as usual.
+// focus mode is that a stray press doesn't drop you to the watchface. A long
+// hold of Up / Down / Select ends it. Without a session Back just pops.
 static void live_window_back_click_handler(ClickRecognizerRef recognizer, void *context) {
   if (focus_active()) {
     vibes_short_pulse();
@@ -5754,6 +5772,7 @@ static void live_window_back_click_handler(ClickRecognizerRef recognizer, void *
 
 static void live_window_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, live_window_select_click_handler);
+  window_long_click_subscribe(BUTTON_ID_SELECT, 0, live_window_select_long_click_handler, NULL);
   window_single_click_subscribe(BUTTON_ID_BACK, live_window_back_click_handler);
   window_long_click_subscribe(BUTTON_ID_UP, 0, focus_long_click_handler, NULL);
   window_long_click_subscribe(BUTTON_ID_DOWN, 0, focus_long_click_handler, NULL);
