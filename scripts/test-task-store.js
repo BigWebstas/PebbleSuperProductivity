@@ -1598,6 +1598,58 @@ check('getProjectTasks caps each list at the given limit', () => {
   assert.strictEqual(store.getProjectTasks(state, 'p1', 10, false).regular.length, 10);
 });
 
+// A "[TASK] LWW Update" op (SP's field-conflict resolution - see task-store.js's
+// own comment) carries the winning entity spread at the top level and must
+// REPLACE the stored task. The common case is projectId moving.
+function lwwEntry(entityType, data) {
+  return {
+    serverSeq: 1,
+    op: { opType: 'UPD', entityType: entityType, actionType: '[' + entityType + '] LWW Update',
+          payload: { actionPayload: data } },
+    receivedAt: 1,
+  };
+}
+
+check('a [TASK] LWW Update re-homes the task to the winning projectId', () => {
+  const state = store.emptyState();
+  store.applyOperations([
+    entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Old' } }),
+    entry('PROJECT', '[Project] Add Project', { project: { id: 'p2', title: 'New' } }),
+    addTask({ id: 't1', title: 'Move me', isDone: false, projectId: 'p1' }),
+  ], state);
+  assert.deepStrictEqual(store.getProjectTasks(state, 'p1', 30, false).regular.map((t) => t.id), ['t1']);
+
+  store.applyOperations([
+    lwwEntry('TASK', { id: 't1', title: 'Move me', isDone: false, projectId: 'p2',
+                       meta: { isPersistent: true } }),
+  ], state);
+  assert.deepStrictEqual(store.getProjectTasks(state, 'p1', 30, false).regular.map((t) => t.id), []);
+  assert.deepStrictEqual(store.getProjectTasks(state, 'p2', 30, false).regular.map((t) => t.id), ['t1']);
+  // The stray action `meta` is not carried onto the stored entity.
+  assert.strictEqual(state.task.t1.meta, undefined);
+});
+
+check('a [TASK] LWW Update keeps the watch-only __inBacklog flag', () => {
+  const state = store.emptyState();
+  store.applyOperations([
+    addTask({ id: 't1', title: 'B', isDone: false, projectId: 'p1' }, { isAddToBacklog: true }),
+  ], state);
+  assert.strictEqual(state.task.t1.__inBacklog, true);
+  store.applyOperations([lwwEntry('TASK', { id: 't1', title: 'B renamed', isDone: false, projectId: 'p1' })], state);
+  assert.strictEqual(state.task.t1.title, 'B renamed');
+  assert.strictEqual(state.task.t1.__inBacklog, true);
+});
+
+check('a [PROJECT] LWW Update replaces the project (title convergence)', () => {
+  const state = store.emptyState();
+  store.applyOperations([
+    entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Stale' } }),
+    addTask({ id: 't1', title: 'T', isDone: false, projectId: 'p1' }),
+  ], state);
+  store.applyOperations([lwwEntry('PROJECT', { id: 'p1', title: 'Fresh', isArchived: false })], state);
+  assert.strictEqual(store.getProjectTasks(state, 'p1', 30, false).regular[0].project, 'Fresh');
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);

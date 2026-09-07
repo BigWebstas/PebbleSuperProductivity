@@ -730,6 +730,40 @@ function applyOperation(entry, state, crypto) {
     }
     var entityType = op.entityType && String(op.entityType).toLowerCase();
 
+    // SP resolves a field-level sync conflict (projectId is the common one -
+    // see the real repo's lww-projectid-convergence spec + repairTaskProjectForLww)
+    // by emitting a "[<ENTITY>] LWW Update" op whose actionPayload is the
+    // WINNING entity spread at the top level (id + every field + a `meta`
+    // blob). It REPLACES the stored entity, it does not merge. None of the
+    // per-action handlers below know this actionType, so before this a task
+    // moved between projects on the desktop kept its stale projectId on the
+    // watch - it stayed listed under the old project in the Projects browser
+    // and drew the wrong project name everywhere (grouped today view, Schedule
+    // page). Handled here generically for the entity types the watch renders;
+    // the payload is a full entity so a plain replace is right (a task keeps
+    // only __inBacklog, which is the watch's own synthetic flag).
+    if (op.actionType && /\]\s*LWW Update\s*$/.test(op.actionType)) {
+      var lwwData = (payload && payload.actionPayload) || payload;
+      if (lwwData && lwwData.id) {
+        if (lwwData.meta) {
+          lwwData = Object.assign({}, lwwData);
+          delete lwwData.meta;
+        }
+        if (entityType === 'task') {
+          replaceTaskPreservingBacklog(ensureCollection(state, 'task'), lwwData);
+        } else if (entityType === 'project') {
+          ensureCollection(state, 'project')[lwwData.id] = lwwData;
+        } else if (entityType === 'note') {
+          ensureCollection(state, 'note')[lwwData.id] = lwwData;
+        } else if (entityType === 'tag') {
+          ensureCollection(state, 'tag')[lwwData.id] = lwwData;
+        } else if (entityType === 'simple_counter') {
+          ensureCollection(state, 'simpleCounter')[lwwData.id] = lwwData;
+        }
+      }
+      return;
+    }
+
     if (entityType === 'task') {
       applyTaskAction(op, payload && payload.actionPayload, state);
       return;
