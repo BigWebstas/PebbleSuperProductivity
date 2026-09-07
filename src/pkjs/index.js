@@ -886,16 +886,16 @@ function doSync() {
   var lastSeq = loadLastSeq();
   var vectorClock = loadVectorClock();
   var isFirstSync = lastSeq === 0 && Object.keys(state.task).length === 0;
-  // Tracked across the whole multi-page pullPage() loop, not reset per
-  // page - each page's own done/total ratio starts back near 0% (it's a
-  // fresh, smaller batch of ops), so resetting this per page let the
-  // displayed percent visibly drop back down every time a new page's
-  // decrypt work began, right after it had just reached 100% on the
-  // previous one (confirmed live as a reported bug: hits 100%, then
-  // reverts to a lower number). Never letting the displayed value
-  // decrease means it holds at 100% through any later page's own lower
-  // ratio instead, all the way to the sync's actual completion.
-  var decryptLastPercentSent = -1;
+  // Sync progress is reported as one overall percentage driven by real
+  // serverSeq position (startSeq..latestSeq spans the whole pull), NOT by
+  // any single page's own done/total ratio. A large first sync runs many
+  // pages; a per-page ratio climbs to 100% on page 1 then sits there while
+  // every later page still has work (confirmed live as a reported bug:
+  // hits 100%, reverts to a lower number). startSeq is captured after any
+  // snapshot bootstrap, just before the first pullPage(). Both values only
+  // ever move forward, so the displayed percent never regresses.
+  var startSeq = 0;
+  var syncPercentSent = -1;
 
   var pullPage = function () {
     // Deliberately NOT passing clientId as excludeClient here (unlike every
@@ -923,20 +923,32 @@ function doSync() {
       // account). Gated on there actually being ops to decrypt so an
       // empty/no-op page doesn't flicker the status for nothing.
       //
-      // Throttled to every 10 percentage points (not every single op) -
+      // Throttled to every 5 percentage points (not every single op) -
       // sendStatus() fires a real AppMessage each call, and a page can hold
       // up to 500 ops; queuing one Bluetooth send per op would build a
       // backlog that delays the eventual "done" status behind it, which is
       // worse than the staleness this is trying to fix.
       if (res.ops && res.ops.length) {
+        var latestSeq = res.latestSeq;
         store.applyOperations(res.ops, state, crypto, function (done, total) {
-          var percent = Math.floor(100 * done / total);
-          // percent > decryptLastPercentSent (not just the throttle check
-          // below) is what keeps this from ever regressing - see
-          // decryptLastPercentSent's own comment.
-          if (percent > decryptLastPercentSent && (percent >= decryptLastPercentSent + 10 || done === total)) {
-            decryptLastPercentSent = percent;
-            sendStatus(STATUS_SYNCING, 'Decrypting ' + percent + '%');
+          // seqNow: the serverSeq of the op just applied - real progress
+          // through startSeq..latestSeq, so this keeps climbing smoothly
+          // across every page (and through the slow last-page decrypt),
+          // instead of resetting per page. Capped at 99 until doSync()
+          // sends the final STATUS_OK.
+          if (!latestSeq || latestSeq <= startSeq) {
+            return;
+          }
+          var seqNow = res.ops[done - 1] ? res.ops[done - 1].serverSeq : lastSeq;
+          var percent = Math.min(99, Math.floor(100 * (seqNow - startSeq) / (latestSeq - startSeq)));
+          // percent > syncPercentSent (not just the throttle check below) is
+          // what keeps this from ever regressing - see startSeq's comment.
+          if (percent > syncPercentSent && (percent >= syncPercentSent + 5 || done === total)) {
+            syncPercentSent = percent;
+            // "Decrypting" for an E2EE account (crypto set) - that Argon2id
+            // stretch is the genuinely slow, hang-looking part worth naming;
+            // a plaintext account just says "Syncing".
+            sendStatus(STATUS_SYNCING, (crypto ? 'Decrypting ' : 'Syncing ') + percent + '%');
           }
         });
       } else {
@@ -1009,6 +1021,9 @@ function doSync() {
       return flushPendingOps(config);
     })
     .then(function () {
+      // After any snapshot bootstrap moved lastSeq forward - this is the
+      // sync's real starting point for the progress percentage.
+      startSeq = lastSeq;
       return pullPage();
     });
 
