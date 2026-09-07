@@ -1751,6 +1751,12 @@ static void stop_scroll_timer(void) {
 // device-less form when the presence payload could not be decoded phone-side.
 static const char *presence_state_phrase(void) {
   static char buf[48];
+  // State 5: the phone's presence socket dropped mid-session (index.js's
+  // pushPresenceOffline). Not "<verb> on <device>" - the device is fine, our
+  // link to it isn't.
+  if (s_presence_state == 5) {
+    return "Offline";
+  }
   const char *verb = s_presence_state == 2 ? "Paused"
                      : s_presence_state == 3 ? "Was tracking"
                      : s_presence_state == 4 ? "Stopped"
@@ -5657,13 +5663,13 @@ static void live_window_refresh(void) {
       text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
       text_layer_set_text(s_live_elapsed_layer, elapsed_buf);
       layer_set_hidden(text_layer_get_layer(s_live_elapsed_layer), false);
-      text_layer_set_text(s_live_hint_layer, "Hold to end focus");
+      text_layer_set_text(s_live_hint_layer, "Hold to end");
     } else {
       text_layer_set_text(s_live_state_layer, "Tracking");
       text_layer_set_text(s_live_task_layer, t->title);
       live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), t->time_spent_ms, t->time_estimate_ms,
                        (int)(time(NULL) - s_tracking_start_epoch));
-      text_layer_set_text(s_live_hint_layer, "Select stop / hold: focus");
+      text_layer_set_text(s_live_hint_layer, "Select=stop  hold=focus");
     }
     if (!s_live_tick_timer) {
       s_live_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, live_tick_callback, NULL);

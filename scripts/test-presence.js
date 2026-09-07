@@ -227,6 +227,43 @@ check('reconnects on an unexpected close', async () => {
   assert.notStrictEqual(lastSocket, first, 'a new socket was created');
 });
 
+check('keeps retrying past the old 50-attempt cap (retry forever)', async () => {
+  const c = newClient({ tuning: { minReconnectMs: 1, maxReconnectMs: 2, livenessMs: 10000, heartbeatMs: 10000, lingerMs: 10 } });
+  for (let i = 0; i < 60; i++) {
+    const sock = lastSocket;
+    sock.onclose({ code: 1006 });
+    await delay(6);
+    sock !== lastSocket || assert.fail('reconnect stopped at attempt ' + i);
+    lastSocket._open();
+  }
+  assert.strictEqual(c.isConnected(), true);
+});
+
+check('onOffline fires on an unexpected close while a session is shown; reconnect re-emits', async () => {
+  const c = newClient();
+  const states = [];
+  let offline = 0;
+  c.onState((v) => states.push(v.state));
+  c.onOffline(() => { offline++; });
+  lastSocket._emit({ type: 'presence_state', payload: envelopePlain(TRACKING), ordinal: 1 });
+  assert.deepStrictEqual(states, ['tracking']);
+
+  lastSocket.onclose({ code: 1006 });
+  assert.strictEqual(offline, 1, 'offline surfaced');
+  await delay(20);
+  lastSocket._open(); // reconnect
+  assert.deepStrictEqual(states, ['tracking', 'tracking'], 'last view re-emitted on reconnect');
+});
+
+check('onOffline does NOT fire when nothing is on screen', () => {
+  const c = newClient();
+  let offline = 0;
+  c.onState(() => {});
+  c.onOffline(() => { offline++; });
+  lastSocket.onclose({ code: 1006 });
+  assert.strictEqual(offline, 0);
+});
+
 // ---- E2EE envelope (one real Argon2id derivation) -----------------------
 
 check('E2EE: decodes a ciphertext whose salt is cached; refuses plaintext', () => {

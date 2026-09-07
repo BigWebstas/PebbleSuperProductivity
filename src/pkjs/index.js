@@ -2363,6 +2363,7 @@ function catchUpTrackedTask(view) {
 
 function sendPresenceClear() {
   presenceLastSessionId = null;
+  presenceLastView = null;
   presenceCatchUp = null;
   stopPresenceStaleTimer();
   sendWithRetry({ MSG_TYPE: MSG_PRESENCE_UPDATE, PRESENCE_STATE: 0 }, function () {}, function (e) {
@@ -2432,8 +2433,35 @@ function pushPresenceToWatch(view, stale, isNewSession) {
   });
 }
 
+// The last non-cleared view pushed to the watch - kept so pushPresenceOffline()
+// can re-send its title/device under PRESENCE_STATE 5 when the socket drops.
+var presenceLastView = null;
+
+// PRESENCE_STATE 5: a session was on screen and the WebSocket dropped. Shows
+// "Reconnecting" on the watch (main.c's presence_state_phrase), no Stop - we
+// can't reach the producer. onPresenceState overrides it on reconnect.
+function pushPresenceOffline() {
+  if (!presenceLastView) {
+    return;
+  }
+  var t = presenceLastView.taskId ? loadState().task[presenceLastView.taskId] : null;
+  sendWithRetry({
+    MSG_TYPE: MSG_PRESENCE_UPDATE,
+    PRESENCE_STATE: 5,
+    PRESENCE_TASK_TITLE: String((t && t.title) || '').slice(0, 63),
+    PRESENCE_DEVICE: String(presenceLastView.deviceLabel || '').slice(0, 23),
+    PRESENCE_ELAPSED_S: 0,
+    PRESENCE_CAN_STOP: 0,
+  }, function () {}, function (e) {
+    console.log('[pkjs] giving up on PRESENCE_UPDATE (offline): ' + JSON.stringify(e));
+  });
+}
+
 function onPresenceState(view) {
   presenceLastReceivedAt = Date.now();
+  if (!view.opaque) {
+    presenceLastView = view;
+  }
   var newSessionId = view.opaque ? null : view.sessionId;
   // A different sessionId means the remote device started (or switched) a
   // tracking session - the watch re-arms its over-estimate latch on this.
@@ -2499,6 +2527,10 @@ function applyPresence(config) {
     });
     presenceClient.onState(onPresenceState);
     presenceClient.onCleared(sendPresenceClear);
+    // Socket dropped mid-session - surface it on the watch as "offline" so the
+    // frozen timer doesn't read as live. Cleared by the next onPresenceState
+    // (the client re-emits the last view on reconnect).
+    presenceClient.onOffline(pushPresenceOffline);
     // A remote device stopped the timer this watch is broadcasting - relay
     // the stop to the watch; its own MSG_TRACK_TIME_STOP then acks it.
     presenceClient.onStopCommand(function () {

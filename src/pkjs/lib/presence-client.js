@@ -48,7 +48,10 @@ var DEVICE_LABEL = 'Pebble';
 
 var MIN_RECONNECT_MS = 1000;
 var MAX_RECONNECT_MS = 60 * 1000;
-var MAX_RECONNECT_ATTEMPTS = 50;
+// No attempt cap - a phone can be offline for hours and the socket must come
+// back on its own when the network does. The backoff exponent is clamped so
+// the delay tops out at MAX_RECONNECT_MS and stays there.
+var MAX_BACKOFF_EXPONENT = 16;
 
 // Close codes the server uses to say "don't come back on your own".
 var NO_RECONNECT_CLOSE_CODES = { 4003: 1, 4008: 1, 4009: 1 };
@@ -103,6 +106,7 @@ function PresenceClient(opts) {
   this._onStateCb = noop;
   this._onClearedCb = noop;
   this._onStopCommandCb = noop;
+  this._onOfflineCb = noop;
 }
 
 // cb({ state, reason, taskId, sinceTs, deviceLabel, sessionId, seq,
@@ -117,6 +121,14 @@ PresenceClient.prototype.onState = function (cb) {
 // cb() - the shown session should be hidden (linger elapsed, or disconnect).
 PresenceClient.prototype.onCleared = function (cb) {
   this._onClearedCb = cb || noop;
+};
+
+// cb() - the socket dropped while a session was on screen and a reconnect is
+// pending. The consumer should show it as "offline / reconnecting" rather than
+// a frozen live view. A successful reconnect re-emits the last view through
+// onState, which clears the offline surface.
+PresenceClient.prototype.onOffline = function (cb) {
+  this._onOfflineCb = cb || noop;
 };
 
 PresenceClient.prototype.isConnected = function () {
@@ -280,6 +292,11 @@ PresenceClient.prototype._open = function () {
     if (self._producer) {
       self._sendProducerState('tracking');
       self._startHeartbeat();
+    } else if (self._current && !self._current.opaque && self._current.state === 'tracking') {
+      // Viewer: we were showing a remote session and just reconnected. The
+      // server may not re-push its slot, so re-emit the last view now to clear
+      // the offline surface; the producer's heartbeat refreshes it within 60s.
+      self._onStateCb(self._current);
     }
   };
 
@@ -309,6 +326,11 @@ PresenceClient.prototype._open = function () {
       return;
     }
     self._log('closed (' + code + '), will reconnect');
+    // A session was on screen - tell the consumer to show it as offline while
+    // we retry, instead of leaving a frozen live view.
+    if (self._current && self._current.state !== 'stopped') {
+      self._onOfflineCb();
+    }
     self._scheduleReconnect();
   };
 
@@ -378,12 +400,9 @@ PresenceClient.prototype._scheduleReconnect = function () {
   if (this._intentionalClose || this._reconnectTimer) {
     return;
   }
-  if (this._reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    this._log('giving up after ' + MAX_RECONNECT_ATTEMPTS + ' reconnect attempts');
-    return;
-  }
   this._reconnectAttempts++;
-  var delay = Math.min(this._minReconnectMs * Math.pow(2, this._reconnectAttempts - 1), this._maxReconnectMs);
+  var exp = Math.min(this._reconnectAttempts - 1, MAX_BACKOFF_EXPONENT);
+  var delay = Math.min(this._minReconnectMs * Math.pow(2, exp), this._maxReconnectMs);
   delay = Math.round(delay * (0.9 + Math.random() * 0.2)); // +/-10% jitter
   var self = this;
   this._reconnectTimer = setTimeout(function () {
