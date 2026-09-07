@@ -154,14 +154,26 @@ enum {
 
 // emery (Pebble Time 2) has far more free heap than basalt/chalk/diorite, but
 // its PebbleProcessInfo virtual size (.text+.data+.bss <= 64KB) is the real
-// ceiling, and the Task double-buffer is a big chunk of .bss - each extra slot
-// costs ~684 B across s_tasks + s_incoming + s_groups + s_schedule_order. 36
-// keeps a healthy code margin for new non-aplite features (was 50 -> 40 -> 36);
-// a today list longer than that is already past what fits a watch screen.
+// ceiling. On emery the big list arrays (s_tasks, s_incoming, s_habits,
+// s_groups) are heap-allocated in init() via alloc_heap_lists() rather than
+// living in .bss, so a slot costs runtime heap - of which emery has ~90 KB
+// free - not the scarce virtual-size budget. That's what lets emery carry a
+// 50-task list again (the cap fell 50 -> 40 -> 36 only while those arrays were
+// static). Only s_schedule_order (int per task) stays in .bss on emery, at a
+// trivial 200 B. Other platforms keep static arrays and a lower cap.
 #ifdef PBL_PLATFORM_EMERY
-#define MAX_TASKS 36
+#define MAX_TASKS 50
 #else
 #define MAX_TASKS 30
+#endif
+
+// On emery the list arrays move out of .bss onto the heap (alloc_heap_lists(),
+// called first thing in init()) to stay under the 64 KB virtual-size ceiling.
+// Elsewhere they stay plain static arrays.
+#ifdef PBL_PLATFORM_EMERY
+#define HEAP_BACKED_LISTS 1
+#else
+#define HEAP_BACKED_LISTS 0
 #endif
 #define MAX_TITLE_LEN 64
 // Generated task ids are ~21 chars, but calendar-integration ids
@@ -266,7 +278,11 @@ typedef struct {
 // Single buffer, not the s_tasks/s_incoming double-buffer, to save RAM on
 // aplite. Safe because nothing redraws the habits menu until MSG_HABIT_SYNC_END
 // bumps s_habit_count.
+#if HEAP_BACKED_LISTS
+static Habit *s_habits; // calloc'd in alloc_heap_lists()
+#else
 static Habit s_habits[MAX_HABITS];
+#endif
 static int s_habit_count = 0;
 static int s_habit_incoming_total = 0;
 
@@ -573,10 +589,15 @@ static bool s_habit_countdown_paused = false;
 static int s_habit_countdown_frozen_elapsed_ms = 0;
 #endif
 
+#if HEAP_BACKED_LISTS
+static Task *s_tasks;             // calloc'd in alloc_heap_lists()
+static Task *s_incoming;          // calloc'd in alloc_heap_lists()
+#else
 static Task s_tasks[MAX_TASKS];
+static Task s_incoming[MAX_TASKS];
+#endif
 static int s_task_count = 0;      // tasks currently shown (committed)
 static int s_incoming_total = 0;  // total announced by the current sync batch
-static Task s_incoming[MAX_TASKS];
 // -1 is a "no real status yet" sentinel, never sent or matched over the wire.
 // init() then makes the real STATUS_SYNCING transition explicit through
 // set_status_code() (the chokepoint every status change goes through) rather
@@ -779,7 +800,11 @@ static AppTimer *s_backlight_timer = NULL;
 // a handful of projects. recompute_groups() stretches the last slot over any
 // overflow rather than dropping tasks, so a pathological list still renders.
 #define MAX_GROUPS 20
+#if HEAP_BACKED_LISTS
+static TaskGroup *s_groups; // calloc'd in alloc_heap_lists()
+#else
 static TaskGroup s_groups[MAX_GROUPS];
+#endif
 static int s_group_count = 0;
 
 // Marquee-scrolls the selected task row's title when it's too wide to fit
@@ -6501,11 +6526,41 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
 }
 #endif
 
+#if HEAP_BACKED_LISTS
+// The list arrays that are static .bss on every other platform. Heap-allocated
+// here so they don't count against emery's 64 KB virtual-size ceiling; emery
+// has ~90 KB of free app heap, so this ~50 KB block is safe. Never freed - they
+// live for the whole app, and PebbleOS reclaims the heap on exit anyway.
+static bool alloc_heap_lists(void) {
+  s_tasks    = calloc(MAX_TASKS, sizeof(Task));
+  s_incoming = calloc(MAX_TASKS, sizeof(Task));
+  s_habits   = calloc(MAX_HABITS, sizeof(Habit));
+  s_groups   = calloc(MAX_GROUPS, sizeof(TaskGroup));
+  return s_tasks && s_incoming && s_habits && s_groups;
+}
+#endif
+
 static void init(void) {
   // Set the starting status through set_status_code() (not its static
   // initializer - see s_status_code's comment) so this first "Syncing..."
   // stretch goes through the same chokepoint as every later status.
   set_status_code(STATUS_SYNCING);
+#if HEAP_BACKED_LISTS
+  if (!alloc_heap_lists()) {
+    // Can't realistically happen on emery. If it somehow does, there are no
+    // list buffers, so skip the inbox handler (nothing to parse into) and show
+    // the sync-error screen instead of dereferencing a NULL array.
+    str_copy(s_status_msg, "Out of memory", sizeof(s_status_msg));
+    set_status_code(STATUS_ERROR);
+    s_main_window = window_create();
+    window_set_window_handlers(s_main_window, (WindowHandlers) {
+      .load = window_load,
+      .unload = window_unload,
+    });
+    window_stack_push(s_main_window, true);
+    return;
+  }
+#endif
   load_tasks();
   load_habits();
   load_tracking();
