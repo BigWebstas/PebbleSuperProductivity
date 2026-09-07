@@ -1237,15 +1237,16 @@ typedef enum {
 #define SCHEDULE_ROW_ACTIVE() (s_schedule_enabled)
 #endif
 
-// Whether the "LIVE" presence row sits at the top of section 0. Compile-time
-// false on aplite (the whole feature is excluded).
-#ifdef PBL_PLATFORM_APLITE
+// Whether the dark-blue "LIVE" row sits at the top of section 0. Now always
+// false: a remote presence session shows in the pinned "TRACKING" section
+// (remote_in_pinned_section) whenever nothing is tracked locally, and the
+// separate blue row on top of that just duplicated the same task. In the
+// rare overlap - this watch tracking its own task while another device also
+// tracks - the pinned slot shows the local task and the remote session is
+// not surfaced separately. The SECTION0_ROW_LIVE enum and its render /
+// selection branches are left in place but unreachable; safe to delete in a
+// later cleanup pass.
 #define LIVE_ROW_ACTIVE() false
-#else
-// The dark-blue section-0 row - only when a remote session isn't riding the
-// pinned "TRACKING" section instead (see remote_in_pinned_section).
-#define LIVE_ROW_ACTIVE() (s_presence_state != 0 && !remote_in_pinned_section())
-#endif
 
 static int section0_row_count(void) {
   int count = 1; // Resync always present.
