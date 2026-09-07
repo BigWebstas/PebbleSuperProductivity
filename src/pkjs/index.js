@@ -72,6 +72,11 @@ var MSG_TASK_PLAN_TODAY = 39;       // watch -> phone: TASK_ID (set the task's d
 // preformatted as "Title\tcount" lines the watch prints verbatim.
 var MSG_STATS_REQUEST = 40;         // watch -> phone: (no keys)
 var MSG_STATS_DATA = 41;            // phone -> watch: STATS_EST_REMAINING_MS + STATS_WORKED_TODAY_MS + STATS_DONE_TODAY + STATS_TEXT
+// Upcoming page (config.enableUpcoming, non-aplite). One request, one reply:
+// UPCOMING_TEXT - preformatted lines the watch prints, a "\x02"-prefixed day
+// header before each day's tasks.
+var MSG_UPCOMING_REQUEST = 42;      // watch -> phone: (no keys)
+var MSG_UPCOMING_DATA = 43;         // phone -> watch: UPCOMING_TEXT
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -366,6 +371,9 @@ function sendStatus(code, message) {
     // today's tasks that carry a dueWithTime. Same always-included,
     // next-sync-cycle self-correction reasoning as the flags above.
     SCHEDULE_ENABLED: config.enableSchedule !== false ? 1 : 0,
+    // Upcoming page row (default on). Drives main.c's s_upcoming_enabled /
+    // SECTION0_ROW_UPCOMING - future-dated tasks grouped by day.
+    UPCOMING_ENABLED: config.enableUpcoming !== false ? 1 : 0,
     // 0 = system default, -1 = always on, N>0 = relight-and-hold for N
     // seconds after any button press - see main.c's own s_backlight_mode
     // comment. Always included (not conditionally), same reasoning as the
@@ -751,6 +759,79 @@ function handleStatsRequest() {
     STATS_TEXT: lines,
   }, function () {}, function (e) {
     console.log('[pkjs] giving up on STATS_DATA after retries: ' + JSON.stringify(e));
+  });
+}
+
+var UPCOMING_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+var UPCOMING_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// "YYYY-MM-DD" -> "Tomorrow" or "Fri Sep 12". The watch can't format a future
+// date (it never learns them), so the header text is built here.
+function formatUpcomingDay(dayStr) {
+  var p = String(dayStr).split('-');
+  var d = new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10));
+  var tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  if (store.dateToDateStr(tomorrow) === dayStr) {
+    return 'Tomorrow';
+  }
+  return UPCOMING_DAYS[d.getDay()] + ' ' + UPCOMING_MONTHS[d.getMonth()] + ' ' + d.getDate();
+}
+
+function formatUpcomingTime(min) {
+  var h = Math.floor(min / 60);
+  var m = min % 60;
+  var ampm = h >= 12 ? 'PM' : 'AM';
+  var h12 = h % 12;
+  if (h12 === 0) {
+    h12 = 12;
+  }
+  return h12 + ':' + (m < 10 ? '0' + m : m) + ' ' + ampm;
+}
+
+// Answers MSG_UPCOMING_REQUEST (the watch's optional Upcoming page, non-aplite).
+// One message, UPCOMING_TEXT: a "\x02"-prefixed day header line before each
+// day's tasks, then one line per task ("<time>  <title>  · <project>").
+// Read-only, from the replayed op-log state. Capped to a single AppMessage.
+function handleUpcomingRequest() {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (config.enableUpcoming === false) {
+    return;
+  }
+  var items = store.computeUpcoming(loadState(), 40);
+  var lines = [];
+  var lastDay = '';
+  var clean = function (s, n) {
+    return String(s).replace(/[\t\n\x02]/g, ' ').slice(0, n);
+  };
+  items.forEach(function (it) {
+    if (it.day !== lastDay) {
+      lastDay = it.day;
+      lines.push('\x02' + formatUpcomingDay(it.day));
+    }
+    var line = clean(it.title, 40);
+    if (it.timeMin >= 0) {
+      line = formatUpcomingTime(it.timeMin) + '  ' + line;
+    }
+    if (it.project) {
+      line += '  · ' + clean(it.project, 20);
+    }
+    lines.push(line);
+  });
+  var text = lines.join('\n');
+  if (text.length > 600) {
+    text = text.slice(0, 600);
+  }
+  sendWithRetry({
+    MSG_TYPE: MSG_UPCOMING_DATA,
+    UPCOMING_TEXT: text,
+  }, function () {}, function (e) {
+    console.log('[pkjs] giving up on UPCOMING_DATA after retries: ' + JSON.stringify(e));
   });
 }
 
@@ -2630,6 +2711,9 @@ Pebble.addEventListener('appmessage', function (e) {
     case MSG_STATS_REQUEST:
       handleStatsRequest();
       break;
+    case MSG_UPCOMING_REQUEST:
+      handleUpcomingRequest();
+      break;
     default:
       break;
   }
@@ -2671,6 +2755,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableProjects: config.enableProjects !== false,
       enableStats: config.enableStats !== false,
       enableSchedule: config.enableSchedule !== false,
+      enableUpcoming: config.enableUpcoming !== false,
       backlightMode: config.backlightMode || 0,
       touchNav: !!config.touchNav,
       overtimeNotify: !!config.overtimeNotify,
@@ -2754,6 +2839,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableProjects: !!result.enableProjects,
     enableStats: !!result.enableStats,
     enableSchedule: !!result.enableSchedule,
+    enableUpcoming: !!result.enableUpcoming,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,
     overtimeNotify: !!result.overtimeNotify,

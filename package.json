@@ -161,7 +161,9 @@
       "PRESENCE_ESTIMATE_MS",
       "PRESENCE_NEW_SESSION",
       "FOCUS_LEN_MIN",
-      "STOP_AT_MIDNIGHT"
+      "STOP_AT_MIDNIGHT",
+      "UPCOMING_ENABLED",
+      "UPCOMING_TEXT"
     ]
   }
 }

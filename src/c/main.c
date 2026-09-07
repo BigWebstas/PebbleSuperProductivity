@@ -70,6 +70,8 @@
 #define KEY_STATS_DONE_TODAY MESSAGE_KEY_STATS_DONE_TODAY
 #define KEY_STATS_TEXT MESSAGE_KEY_STATS_TEXT
 #define KEY_SCHEDULE_ENABLED MESSAGE_KEY_SCHEDULE_ENABLED
+#define KEY_UPCOMING_ENABLED MESSAGE_KEY_UPCOMING_ENABLED
+#define KEY_UPCOMING_TEXT MESSAGE_KEY_UPCOMING_TEXT
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -133,6 +135,10 @@ enum {
   // preformatted as "Title\tcount" lines the watch prints verbatim).
   MSG_STATS_REQUEST = 40,           // watch -> phone: (no keys)
   MSG_STATS_DATA = 41,             // phone -> watch: STATS_EST_REMAINING_MS + STATS_WORKED_TODAY_MS + STATS_TEXT
+  // Upcoming page (config.enableUpcoming, non-aplite). One request, one reply:
+  // UPCOMING_TEXT - preformatted lines, each day's tasks under a "\x02" header.
+  MSG_UPCOMING_REQUEST = 42,        // watch -> phone: (no keys)
+  MSG_UPCOMING_DATA = 43,           // phone -> watch: UPCOMING_TEXT
 };
 
 // STATUS_CODE values sent from the phone.
@@ -616,6 +622,12 @@ static int s_stats_est_remaining_ms = 0;
 static int s_stats_worked_today_ms = 0;
 static int s_stats_done_today = 0;
 static bool s_stats_have_data = false;
+// "Upcoming" page row (config.enableUpcoming, default on) and its last
+// MSG_UPCOMING_DATA payload - future-dated tasks preformatted phone-side into
+// "\x02"-prefixed day headers + task lines the watch prints verbatim.
+static bool s_upcoming_enabled = true;
+static char s_upcoming_text[640] = "";
+static bool s_upcoming_have_data = false;
 #endif
 
 // The Projects browser is built on every platform except aplite (too little
@@ -1241,6 +1253,8 @@ static void push_stats_window(void);
 static void stats_render(void);
 static void push_schedule_window(void);
 static void schedule_refresh_if_open(void);
+static void push_upcoming_window(void);
+static void upcoming_render(void);
 #endif
 #if PROJECTS_BROWSER
 static void push_browse_window(const char *jump_to_project);
@@ -1325,6 +1339,7 @@ typedef enum {
   SECTION0_ROW_PROJECTS, // projects browser, between Habits and Add Task (non-aplite)
   SECTION0_ROW_STATS,    // stats page, between Projects and Add Task (non-aplite)
   SECTION0_ROW_SCHEDULE, // schedule page, between Stats and Add Task (non-aplite)
+  SECTION0_ROW_UPCOMING, // upcoming page, between Schedule and Add Task (non-aplite)
   SECTION0_ROW_ADD_TASK,
 } Section0RowKind;
 
@@ -1361,6 +1376,13 @@ typedef enum {
 #define SCHEDULE_ROW_ACTIVE() (s_schedule_enabled)
 #endif
 
+// Whether the "Upcoming" row sits in section 0. Compile-time false on aplite.
+#ifdef PBL_PLATFORM_APLITE
+#define UPCOMING_ROW_ACTIVE() false
+#else
+#define UPCOMING_ROW_ACTIVE() (s_upcoming_enabled)
+#endif
+
 // A remote presence session shows in the pinned "TRACKING" section
 // (remote_in_pinned_section) whenever nothing is tracked locally. There used
 // to be a separate dark-blue "LIVE" row at the top of section 0 as well; it
@@ -1381,6 +1403,9 @@ static int section0_row_count(void) {
     count++;
   }
   if (SCHEDULE_ROW_ACTIVE()) {
+    count++;
+  }
+  if (UPCOMING_ROW_ACTIVE()) {
     count++;
   }
   if (PBL_IF_MICROPHONE_ELSE(s_add_task_enabled, false)) {
@@ -1418,6 +1443,12 @@ static Section0RowKind section0_row_kind(int row) {
   if (SCHEDULE_ROW_ACTIVE()) {
     if (row == next) {
       return SECTION0_ROW_SCHEDULE;
+    }
+    next++;
+  }
+  if (UPCOMING_ROW_ACTIVE()) {
+    if (row == next) {
+      return SECTION0_ROW_UPCOMING;
     }
     next++;
   }
@@ -2132,6 +2163,28 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       graphics_draw_circle(ctx, clock_c, 8);
       graphics_draw_line(ctx, clock_c, GPoint(clock_c.x, clock_c.y - 5));     // minute hand
       graphics_draw_line(ctx, clock_c, GPoint(clock_c.x + 4, clock_c.y + 2)); // hour hand
+      return;
+    }
+#endif
+
+#ifndef PBL_PLATFORM_APLITE
+    if (kind == SECTION0_ROW_UPCOMING) {
+      // Opens the Upcoming page - future-dated tasks by day. Indigo, its own
+      // colour among the nav rows. A ">>" glyph on the right, from primitives.
+      GColor icon = is_selected ? GColorWhite : GColorBlack;
+      fill_bg(ctx, bounds, GColorIndigo);
+      graphics_context_set_text_color(ctx, icon);
+      GRect up_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                                  bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+      draw_text(ctx, "Upcoming", HEADING_FONT_KEY, up_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      int16_t cx = bounds.size.w - ROW_ICON_SIZE - 4;
+      int16_t cy = bounds.size.h / 2;
+      graphics_context_set_stroke_color(ctx, icon);
+      for (int k = 0; k < 2; k++) {
+        int16_t x = cx + k * 6;
+        graphics_draw_line(ctx, GPoint(x, cy - 5), GPoint(x + 5, cy));
+        graphics_draw_line(ctx, GPoint(x + 5, cy), GPoint(x, cy + 5));
+      }
       return;
     }
 #endif
@@ -2935,6 +2988,8 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
       push_stats_window();
     } else if (kind == SECTION0_ROW_SCHEDULE) {
       push_schedule_window();
+    } else if (kind == SECTION0_ROW_UPCOMING) {
+      push_upcoming_window();
     } else if (kind == SECTION0_ROW_ADD_TASK) {
       start_add_task_dictation();
 #endif
@@ -3868,6 +3923,12 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       stats_render(); // no-op if the window was closed before the reply landed
       break;
     }
+    case MSG_UPCOMING_DATA: {
+      str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), sizeof(s_upcoming_text));
+      s_upcoming_have_data = true;
+      upcoming_render(); // no-op if the window was closed before the reply landed
+      break;
+    }
 #endif
     case MSG_SYNC_STATUS: {
       Tuple *status_tuple = dict_find(iterator, KEY_STATUS_CODE);
@@ -3885,6 +3946,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 #ifndef PBL_PLATFORM_APLITE
       s_stats_enabled = tuple_int(iterator, KEY_STATS_ENABLED, s_stats_enabled) != 0;
       s_schedule_enabled = tuple_int(iterator, KEY_SCHEDULE_ENABLED, s_schedule_enabled) != 0;
+      s_upcoming_enabled = tuple_int(iterator, KEY_UPCOMING_ENABLED, s_upcoming_enabled) != 0;
 #endif
       // Only re-applied when the value actually changed - this field is sent on
       // every status push (including routine background syncs), and re-triggering
@@ -5485,6 +5547,127 @@ static void push_stats_window(void) {
   window_stack_push(s_stats_window, true);
   request_stats();
 }
+
+// ---------- upcoming window ----------
+// Optional section-0 row ("Upcoming"). A read-only scrollable list of every
+// task scheduled for a day AFTER today, grouped by day - the phone computes it
+// (store.computeUpcoming) and sends the whole thing preformatted in one
+// MSG_UPCOMING_DATA: a "\x02"-prefixed day header line before each day's tasks.
+// The watch just parses and draws, reusing the Stats page's fonts/metrics.
+static Window *s_upcoming_window;
+static StatusBarLayer *s_upcoming_status_bar;
+static ScrollLayer *s_upcoming_scroll_layer;
+static Layer *s_upcoming_content_layer;
+static GRect s_upcoming_content_bounds;
+
+static int16_t upcoming_content_height(void) {
+  int16_t h = 8;
+  const char *p = s_upcoming_text;
+  bool at_line_start = true;
+  for (; *p; p++) {
+    if (at_line_start) {
+      h += (*p == '\x02') ? STATS_LABEL_H : STATS_LINE_H;
+    }
+    at_line_start = (*p == '\n');
+  }
+  return h;
+}
+
+static void upcoming_content_update_proc(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  int16_t w = b.size.w;
+  fill_bg(ctx, b, GColorWhite);
+
+  if (!s_upcoming_have_data || s_upcoming_text[0] == '\0') {
+    graphics_context_set_text_color(ctx, GColorBlack);
+    draw_text(ctx, s_upcoming_have_data ? "Nothing scheduled" : "Loading…", STATS_LINE_FONT,
+              GRect(STATS_PAD_X, 8, w - STATS_PAD_X * 2, STATS_LINE_H),
+              GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+    return;
+  }
+
+  const char *p = s_upcoming_text;
+  char line[96];
+  int16_t y = 4;
+  while (*p) {
+    const char *nl = strchr(p, '\n');
+    size_t len = nl ? (size_t)(nl - p) : strlen(p);
+    bool header = (*p == '\x02');
+    const char *src = header ? p + 1 : p;
+    size_t slen = header ? (len ? len - 1 : 0) : len;
+    if (slen >= sizeof(line)) {
+      slen = sizeof(line) - 1;
+    }
+    memcpy(line, src, slen);
+    line[slen] = '\0';
+    if (header) {
+      fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
+      graphics_context_set_text_color(ctx, GColorWhite);
+      draw_text(ctx, line, STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      y += STATS_LABEL_H;
+    } else {
+      graphics_context_set_text_color(ctx, GColorBlack);
+      draw_text(ctx, line, STATS_LINE_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LINE_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      y += STATS_LINE_H;
+    }
+    if (!nl) {
+      break;
+    }
+    p = nl + 1;
+  }
+}
+
+static void upcoming_render(void) {
+  if (!s_upcoming_content_layer) {
+    return;
+  }
+  int16_t h = s_upcoming_have_data ? upcoming_content_height() : s_upcoming_content_bounds.size.h;
+  if (h < s_upcoming_content_bounds.size.h) {
+    h = s_upcoming_content_bounds.size.h;
+  }
+  layer_set_frame(s_upcoming_content_layer, GRect(0, 0, s_upcoming_content_bounds.size.w, h));
+  scroll_layer_set_content_size(s_upcoming_scroll_layer, GSize(s_upcoming_content_bounds.size.w, h));
+  layer_mark_dirty(s_upcoming_content_layer);
+}
+
+static void request_upcoming(void) {
+  begin_send(MSG_UPCOMING_REQUEST, NULL, NULL, 0);
+}
+
+static void upcoming_window_load(Window *window) {
+  Layer *window_layer;
+  s_upcoming_content_bounds = window_chrome(window, &s_upcoming_status_bar, &window_layer);
+  s_upcoming_scroll_layer = scroll_layer_create(s_upcoming_content_bounds);
+  scroll_layer_set_content_size(s_upcoming_scroll_layer, s_upcoming_content_bounds.size);
+  scroll_layer_set_click_config_onto_window(s_upcoming_scroll_layer, window);
+  s_upcoming_content_layer = layer_create(GRect(0, 0, s_upcoming_content_bounds.size.w,
+                                                s_upcoming_content_bounds.size.h));
+  layer_set_update_proc(s_upcoming_content_layer, upcoming_content_update_proc);
+  scroll_layer_add_child(s_upcoming_scroll_layer, s_upcoming_content_layer);
+  layer_add_child(window_layer, scroll_layer_get_layer(s_upcoming_scroll_layer));
+  upcoming_render();
+}
+
+static void upcoming_window_unload(Window *window) {
+  layer_destroy(s_upcoming_content_layer);
+  s_upcoming_content_layer = NULL;
+  scroll_layer_destroy(s_upcoming_scroll_layer);
+  s_upcoming_scroll_layer = NULL;
+  status_bar_layer_destroy(s_upcoming_status_bar);
+  s_upcoming_status_bar = NULL;
+}
+
+static void push_upcoming_window(void) {
+  if (!s_upcoming_window) {
+    s_upcoming_window = window_create();
+    window_set_window_handlers(s_upcoming_window, (WindowHandlers) {
+      .load = upcoming_window_load,
+      .unload = upcoming_window_unload,
+    });
+  }
+  window_stack_push(s_upcoming_window, true);
+  request_upcoming();
+}
 #endif
 
 // ---------- schedule window ----------
@@ -6444,6 +6627,9 @@ static void deinit(void) {
   }
   if (s_schedule_window) {
     window_destroy(s_schedule_window);
+  }
+  if (s_upcoming_window) {
+    window_destroy(s_upcoming_window);
   }
   stop_live_tick();
   if (s_live_window) {

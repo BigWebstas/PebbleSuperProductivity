@@ -31,6 +31,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var enableProjects = options.enableProjects !== false;
   var enableStats = options.enableStats !== false;
   var enableSchedule = options.enableSchedule !== false;
+  var enableUpcoming = options.enableUpcoming !== false;
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
   var overtimeRepeat = !!options.overtimeRepeat;
@@ -439,6 +440,16 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableUpcoming" type="checkbox"' + (enableUpcoming ? ' checked' : '') + '>\n' +
+'    <label for="enableUpcoming">Enable Upcoming</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Shows an Upcoming row on the watch: tasks scheduled for a day after\n' +
+'    today, grouped by day, like the desktop\'s planner. Recurring tasks show\n' +
+'    once the desktop has created their next instance.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableAddTask" type="checkbox"' + (enableAddTask ? ' checked' : '') + '>\n' +
 '    <label for="enableAddTask">Enable Add Task (voice)</label>\n' +
 '  </div>\n' +
@@ -558,6 +569,7 @@ taskEstimateOptions + '\n' +
 '      enableProjects: document.getElementById(\'enableProjects\').checked,\n' +
 '      enableStats: document.getElementById(\'enableStats\').checked,\n' +
 '      enableSchedule: document.getElementById(\'enableSchedule\').checked,\n' +
+'      enableUpcoming: document.getElementById(\'enableUpcoming\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +

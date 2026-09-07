@@ -1373,6 +1373,60 @@ function computeStats(state) {
   };
 }
 
+// The watch's optional "Upcoming" page: every not-done main task scheduled for
+// a local day AFTER today - by dueDay, or by the local day of a dueWithTime.
+// Today and the past are already covered by the today list / Schedule page.
+// Sorted by day then time-of-day (dateless entries last within a day), capped.
+// Phase A only looks at tasks that already carry a future date (which includes
+// the recurring instances SP has materialised ahead); computed occurrences of
+// not-yet-created repeat configs are a later addition. Phone-side: the watch
+// has no future-date data of its own.
+function computeUpcoming(state, limit) {
+  var tasks = (state && state.task) || {};
+  var projects = (state && state.project) || {};
+  var today = todayStr();
+  var out = [];
+
+  Object.keys(tasks).forEach(function (id) {
+    var t = tasks[id];
+    if (!t || !t.title || t.isDone || !isMainTask(t)) {
+      return;
+    }
+    var day = null;
+    var timeMin = -1;
+    if (typeof t.dueWithTime === 'number' && isFinite(t.dueWithTime)) {
+      var d = new Date(t.dueWithTime);
+      day = dateToDateStr(d);
+      timeMin = d.getHours() * 60 + d.getMinutes();
+    } else if (t.dueDay) {
+      day = String(t.dueDay);
+    } else {
+      return;
+    }
+    if (day <= today) {
+      return;
+    }
+    var projTitle = t.projectId && projects[t.projectId] && projects[t.projectId].title;
+    out.push({
+      day: day,
+      timeMin: timeMin,
+      title: String(t.title),
+      project: projTitle ? String(projTitle) : '',
+    });
+  });
+
+  out.sort(function (a, b) {
+    if (a.day !== b.day) {
+      return a.day < b.day ? -1 : 1;
+    }
+    var am = a.timeMin < 0 ? 24 * 60 : a.timeMin;
+    var bm = b.timeMin < 0 ? 24 * 60 : b.timeMin;
+    return am - bm;
+  });
+
+  return out.slice(0, limit || 40);
+}
+
 module.exports = {
   emptyState: emptyState,
   applyOperation: applyOperation,
@@ -1382,6 +1436,7 @@ module.exports = {
   getProjectList: getProjectList,
   getProjectTasks: getProjectTasks,
   computeStats: computeStats,
+  computeUpcoming: computeUpcoming,
   NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,
   dateToDateStr: dateToDateStr,

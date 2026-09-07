@@ -1650,6 +1650,34 @@ check('a [PROJECT] LWW Update replaces the project (title convergence)', () => {
   assert.strictEqual(store.getProjectTasks(state, 'p1', 30, false).regular[0].project, 'Fresh');
 });
 
+check('computeUpcoming: future-dated tasks only, sorted by day then time', () => {
+  const state = store.emptyState();
+  store.applyOperations([
+    entry('PROJECT', '[Project] Add Project', { project: { id: 'p', title: 'Garden' } }),
+    addTask({ id: 'far', title: 'Water', dueDay: '2099-02-01', projectId: 'p' }),
+    addTask({ id: 'soonAm', title: 'Standup', dueWithTime: Date.parse('2099-01-15T09:30:00'), projectId: 'p' }),
+    addTask({ id: 'soonPm', title: 'Review', dueWithTime: Date.parse('2099-01-15T15:00:00') }),
+    addTask({ id: 'noTime', title: 'Errand', dueDay: '2099-01-15' }),
+    addTask({ id: 'nowD', title: 'Today', dueDay: today }),
+    addTask({ id: 'done', title: 'Done', dueDay: '2099-01-10', isDone: true }),
+    addTask({ id: 'undated', title: 'Someday' }),
+  ], state);
+  const up = store.computeUpcoming(state, 40);
+  assert.deepStrictEqual(up.map((u) => u.title), ['Standup', 'Review', 'Errand', 'Water']);
+  assert.strictEqual(up[0].project, 'Garden');
+  assert.strictEqual(up[2].timeMin, -1); // dateless entry sorts last within its day
+});
+
+check('computeUpcoming: honours the limit', () => {
+  const state = store.emptyState();
+  const ops = [entry('PROJECT', '[Project] Add Project', { project: { id: 'p', title: 'P' } })];
+  for (let i = 0; i < 30; i++) {
+    ops.push(addTask({ id: 't' + i, title: 'T' + i, dueDay: '2099-03-' + (i < 9 ? '0' : '') + (i + 1) }));
+  }
+  store.applyOperations(ops, state);
+  assert.strictEqual(store.computeUpcoming(state, 10).length, 10);
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);
