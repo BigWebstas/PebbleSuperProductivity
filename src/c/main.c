@@ -144,10 +144,12 @@ enum {
 
 // emery (Pebble Time 2) has far more free heap than basalt/chalk/diorite, but
 // its PebbleProcessInfo virtual size (.text+.data+.bss <= 64KB) is the real
-// ceiling, and the Task double-buffer is a big chunk of .bss - so emery's cap
-// is only modestly higher, kept where the Projects browser's extras still fit.
+// ceiling, and the Task double-buffer is a big chunk of .bss - each extra slot
+// costs ~684 B across s_tasks + s_incoming + s_groups + s_schedule_order. 36
+// keeps a healthy code margin for new non-aplite features (was 50 -> 40 -> 36);
+// a today list longer than that is already past what fits a watch screen.
 #ifdef PBL_PLATFORM_EMERY
-#define MAX_TASKS 40
+#define MAX_TASKS 36
 #else
 #define MAX_TASKS 30
 #endif
@@ -3504,6 +3506,19 @@ static void set_status_code(int32_t new_status_code) {
   s_status_code = new_status_code;
 }
 
+// The TASK_* fields shared by MSG_TASK_ITEM and MSG_PROJECT_TASKS_ITEM. The
+// caller has already validated id_tuple / title_tuple non-NULL and bounds-
+// checked idx; MSG_TASK_ITEM fills in project/tags/colour separately.
+static void parse_common_task_fields(DictionaryIterator *it, Task *dst,
+                                     Tuple *id_tuple, Tuple *title_tuple) {
+  str_copy(dst->id, id_tuple->value->cstring, MAX_ID_LEN);
+  str_copy(dst->title, title_tuple->value->cstring, MAX_TITLE_LEN);
+  dst->done = tuple_int(it, KEY_TASK_DONE, 0) != 0;
+  dst->due_min = tuple_int(it, KEY_TASK_DUE_MIN, -1);
+  dst->time_spent_ms = tuple_int(it, KEY_TASK_TIME_SPENT_MS, 0);
+  dst->time_estimate_ms = tuple_int(it, KEY_TASK_TIME_ESTIMATE_MS, 0);
+}
+
 static void inbox_received_handler(DictionaryIterator *iterator, void *context) {
   Tuple *type_tuple = dict_find(iterator, KEY_MSG_TYPE);
   if (!type_tuple) {
@@ -3530,8 +3545,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (idx < 0 || idx >= MAX_TASKS) {
         break;
       }
-      str_copy(s_incoming[idx].id, id_tuple->value->cstring, MAX_ID_LEN);
-      str_copy(s_incoming[idx].title, title_tuple->value->cstring, MAX_TITLE_LEN);
+      // Key absent (not 0, a valid 12:00am) means "no dueWithTime" - the phone
+      // only sends a field when the task has it. parse_common_task_fields
+      // handles id/title/done/due/spent/estimate; project/tags/colour here.
+      parse_common_task_fields(iterator, &s_incoming[idx], id_tuple, title_tuple);
       str_copy(s_incoming[idx].project, tuple_str(iterator, KEY_TASK_PROJECT, ""), MAX_PROJECT_LEN);
 #ifndef PBL_PLATFORM_APLITE
       str_copy(s_incoming[idx].project_id, tuple_str(iterator, KEY_TASK_PROJECT_ID, ""), MAX_PROJECT_ID_LEN);
@@ -3540,12 +3557,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_incoming[idx].project_color = (uint8_t)tuple_int(iterator, KEY_TASK_PROJECT_COLOR, 0);
 #endif
 #endif
-      s_incoming[idx].done = tuple_int(iterator, KEY_TASK_DONE, 0) != 0;
-      // Key absent (not 0, a valid 12:00am) means "no dueWithTime" - the phone
-      // only sends it when the task has one. Same for the two below.
-      s_incoming[idx].due_min = tuple_int(iterator, KEY_TASK_DUE_MIN, -1);
-      s_incoming[idx].time_spent_ms = tuple_int(iterator, KEY_TASK_TIME_SPENT_MS, 0);
-      s_incoming[idx].time_estimate_ms = tuple_int(iterator, KEY_TASK_TIME_ESTIMATE_MS, 0);
       break;
     }
     case MSG_TASK_SYNC_END: {
@@ -3721,13 +3732,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       Task *bt = &s_browse_tasks[idx];
       memset(bt, 0, sizeof(Task));
-      str_copy(bt->id, id_tuple->value->cstring, MAX_ID_LEN);
-      str_copy(bt->title, title_tuple->value->cstring, MAX_TITLE_LEN);
-      bt->project[0] = '\0';
-      bt->done = tuple_int(iterator, KEY_TASK_DONE, 0) != 0;
-      bt->due_min = tuple_int(iterator, KEY_TASK_DUE_MIN, -1);
-      bt->time_spent_ms = tuple_int(iterator, KEY_TASK_TIME_SPENT_MS, 0);
-      bt->time_estimate_ms = tuple_int(iterator, KEY_TASK_TIME_ESTIMATE_MS, 0);
+      parse_common_task_fields(iterator, bt, id_tuple, title_tuple);
       if (tuple_int(iterator, KEY_PROJECT_TASK_BACKLOG, 0) != 0 && idx < s_browse_backlog_start) {
         s_browse_backlog_start = idx;
       }
@@ -3769,29 +3774,15 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       str_copy(s_status_msg, tuple_str(iterator, KEY_STATUS_MSG, ""), MAX_STATUS_MSG_LEN);
       // Feature toggles from the phone's pairing settings - optional fields,
-      // absent-means-unchanged so a version mismatch can't reset a flag. Read
-      // before reload_data so a change shows in the same redraw.
-      Tuple *habits_enabled_tuple = dict_find(iterator, KEY_HABITS_ENABLED);
-      if (habits_enabled_tuple) {
-        s_habits_enabled = habits_enabled_tuple->value->int32 != 0;
-      }
-      Tuple *add_task_enabled_tuple = dict_find(iterator, KEY_ADD_TASK_ENABLED);
-      if (add_task_enabled_tuple) {
-        s_add_task_enabled = add_task_enabled_tuple->value->int32 != 0;
-      }
-      Tuple *projects_enabled_tuple = dict_find(iterator, KEY_PROJECTS_ENABLED);
-      if (projects_enabled_tuple) {
-        s_projects_enabled = projects_enabled_tuple->value->int32 != 0;
-      }
+      // absent-means-unchanged (pass the current value as the fallback) so a
+      // version mismatch can't reset a flag. Read before reload_data so a
+      // change shows in the same redraw.
+      s_habits_enabled = tuple_int(iterator, KEY_HABITS_ENABLED, s_habits_enabled) != 0;
+      s_add_task_enabled = tuple_int(iterator, KEY_ADD_TASK_ENABLED, s_add_task_enabled) != 0;
+      s_projects_enabled = tuple_int(iterator, KEY_PROJECTS_ENABLED, s_projects_enabled) != 0;
 #ifndef PBL_PLATFORM_APLITE
-      Tuple *stats_enabled_tuple = dict_find(iterator, KEY_STATS_ENABLED);
-      if (stats_enabled_tuple) {
-        s_stats_enabled = stats_enabled_tuple->value->int32 != 0;
-      }
-      Tuple *schedule_enabled_tuple = dict_find(iterator, KEY_SCHEDULE_ENABLED);
-      if (schedule_enabled_tuple) {
-        s_schedule_enabled = schedule_enabled_tuple->value->int32 != 0;
-      }
+      s_stats_enabled = tuple_int(iterator, KEY_STATS_ENABLED, s_stats_enabled) != 0;
+      s_schedule_enabled = tuple_int(iterator, KEY_SCHEDULE_ENABLED, s_schedule_enabled) != 0;
 #endif
       // Only re-applied when the value actually changed - this field is sent on
       // every status push (including routine background syncs), and re-triggering
