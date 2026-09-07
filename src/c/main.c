@@ -1058,6 +1058,11 @@ static const uint32_t PERSIST_KEY_TRACKING_START = 111;
 static const uint32_t PERSIST_KEY_FOCUS_END = 114;
 static time_t s_focus_end_epoch = 0;
 static int s_focus_len_min = 25;
+// Anti-inactivity-close lever: re-assert the backlight this often while a focus
+// screen is up. Every second was overkill; 5 min is plenty to keep the app
+// foregrounded (there is no real API for this - see the focus-mode comment).
+#define FOCUS_LIGHT_POKE_S 300
+static time_t s_focus_last_poke_epoch = 0;
 
 static bool focus_active(void) {
   return s_focus_end_epoch != 0 && s_tracking_task_id[0] != '\0';
@@ -5562,11 +5567,11 @@ static void stop_live_tick(void) {
 
 // ---- focus mode ----
 // There is NO API to disable PebbleOS's inactivity auto-close. The lever we
-// have: the 1s tracking tick (live_tick_callback) calls light_enable(true)
-// while a focus session's screen is on top, which also counts as activity.
-// It may still time out on real hardware; when it does, the persisted
-// s_focus_end_epoch means init() drops straight back onto the focus screen
-// and back into the session.
+// have: the tracking tick (live_tick_callback) calls light_enable(true) every
+// FOCUS_LIGHT_POKE_S while a focus session's screen is on top. It may still
+// time out on real hardware; when it does, the persisted s_focus_end_epoch
+// means init() drops straight back onto the focus screen and back into the
+// session.
 
 // Ends the running focus session: clears state, releases the backlight
 // (unless the user set it always-on), buzzes, repaints the header strip.
@@ -5599,6 +5604,7 @@ static void focus_toggle(void) {
     save_focus();
     vibes_short_pulse();
     light_enable(true);
+    s_focus_last_poke_epoch = time(NULL); // next tick poke is FOCUS_LIGHT_POKE_S out
     menu_layer_reload_data(s_menu_layer);
   }
   live_window_refresh();
@@ -5710,10 +5716,15 @@ static void live_window_refresh(void) {
 
 static void live_tick_callback(void *data) {
   s_live_tick_timer = NULL;
-  // Re-assert the backlight every second during a focus session - the only
-  // lever against the inactivity auto-close (see the focus-mode comment).
+  // Re-assert the backlight every FOCUS_LIGHT_POKE_S during a focus session -
+  // the only lever against the inactivity auto-close (see the focus-mode
+  // comment). The 1s tick still runs for the countdown; the poke is throttled.
   if (focus_active()) {
-    light_enable(true);
+    time_t now = time(NULL);
+    if (now - s_focus_last_poke_epoch >= FOCUS_LIGHT_POKE_S) {
+      s_focus_last_poke_epoch = now;
+      light_enable(true);
+    }
   }
   if (s_tracking_task_id[0] != '\0' || s_presence_state == 1) {
     live_window_refresh(); // re-arms the timer, or stops if the window closed
