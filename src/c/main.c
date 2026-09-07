@@ -6044,6 +6044,14 @@ static void maybe_notify_idle(void) {
       s_tracking_task_id[0] != '\0' || s_break_last_stop_epoch == 0) {
     return;
   }
+  // A remote device actively tracking counts as "something is being tracked" -
+  // no nudge, and hold the idle baseline at now so the count restarts from
+  // when that remote session ends, not from this watch's last local stop.
+  if (s_presence_state == 1) {
+    s_break_last_stop_epoch = time(NULL);
+    s_untracked_notify_count = 0;
+    return;
+  }
   int elapsed_min = (int)((time(NULL) - s_break_last_stop_epoch) / 60);
   int intervals = elapsed_min / s_idle_reminder_min;
   if (intervals <= s_untracked_notify_count) {
