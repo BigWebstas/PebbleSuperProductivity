@@ -737,7 +737,12 @@ static int32_t s_backlight_mode = 0;
 static AppTimer *s_backlight_timer = NULL;
 #endif
 
-static TaskGroup s_groups[MAX_TASKS]; // worst case: every task its own group
+// One per project run in the grouped today view. Bounded well below MAX_TASKS
+// (which would be one task per project - never happens): a real today list has
+// a handful of projects. recompute_groups() stretches the last slot over any
+// overflow rather than dropping tasks, so a pathological list still renders.
+#define MAX_GROUPS 20
+static TaskGroup s_groups[MAX_GROUPS];
 static int s_group_count = 0;
 
 // Marquee-scrolls the selected task row's title when it's too wide to fit
@@ -887,10 +892,14 @@ static const char *tuple_str(DictionaryIterator *it, uint32_t key, const char *f
 static void recompute_groups(void) {
   s_group_count = 0;
   int i = 0;
-  while (i < s_task_count && s_group_count < MAX_TASKS) {
+  while (i < s_task_count && s_group_count < MAX_GROUPS) {
     int j = i + 1;
     while (j < s_task_count && strncmp(s_tasks[j].project, s_tasks[i].project, MAX_PROJECT_LEN) == 0) {
       j++;
+    }
+    // Last slot absorbs every remaining task instead of dropping the tail.
+    if (s_group_count == MAX_GROUPS - 1) {
+      j = s_task_count;
     }
     str_copy(s_groups[s_group_count].name, s_tasks[i].project, MAX_PROJECT_LEN);
 #ifndef PBL_PLATFORM_APLITE
@@ -2065,7 +2074,9 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     const char *subtitle = "Synced";
     switch (s_status_code) {
       case STATUS_SYNCING:
-        subtitle = "Syncing...";
+        // s_status_msg carries the phone's "Decrypting N%" during the slow
+        // E2EE replay (index.js's sendStatus); empty once past it.
+        subtitle = s_status_msg[0] != '\0' ? s_status_msg : "Syncing...";
         break;
       case STATUS_ERROR:
         if (s_status_msg[0] != '\0') {
