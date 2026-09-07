@@ -42,6 +42,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var dueReminderMin = options.dueReminderMin || 0;
   var liveTracking = !!options.liveTracking;
   var enableTimeline = !!options.enableTimeline;
+  var focusLenMin = options.focusLenMin || 25;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
@@ -98,6 +99,18 @@ function buildPairingPageUrl(baseUrl, email, options) {
     [60, 'Every 60 minutes not tracking'],
   ].map(function (opt) {
     var selected = opt[0] === idleReminderMin ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
+  var focusLenOptions = [
+    [10, '10 minutes'],
+    [15, '15 minutes'],
+    [20, '20 minutes'],
+    [25, '25 minutes'],
+    [30, '30 minutes'],
+    [45, '45 minutes'],
+    [60, '60 minutes'],
+  ].map(function (opt) {
+    var selected = opt[0] === focusLenMin ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var backlightOptions = [
@@ -320,11 +333,23 @@ dueReminderOptions + '\n' +
 '    <label for="liveTracking">Show live tracking from other devices</label>\n' +
 '  </div>\n' +
 '  <p class="hint">\n' +
-'    While the watchapp is open, shows a "LIVE" row for whatever you\'re\n' +
-'    tracking on your desktop or phone, and lets you stop that timer from\n' +
-'    the watch. Updates only while the app is open - it is a glance, not a\n' +
-'    notification. SuperSync only. Not available on original Pebble/Pebble\n' +
+'    While the watchapp is open, shows what you\'re tracking on your desktop\n' +
+'    or phone in the pinned TRACKING section, and lets you stop that timer\n' +
+'    from the watch. Updates only while the app is open - it is a glance, not\n' +
+'    a notification. SuperSync only. Not available on original Pebble/Pebble\n' +
 '    Steel (aplite).\n' +
+'  </p>\n' +
+'\n' +
+'  <label for="focusLenMin">Focus mode session length</label>\n' +
+'  <select id="focusLenMin">\n' +
+focusLenOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">\n' +
+'    On the full-screen tracking page, hold Up or Down to start a focus\n' +
+'    session of this length - a countdown, a buzz at zero, and the Back\n' +
+'    button trapped so a stray press can\'t drop you to the watchface. Hold\n' +
+'    Up or Down again to end it. Watch-local, separate from the desktop\'s\n' +
+'    focus mode. Not available on original Pebble/Pebble Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="backlightMode">Backlight</label>\n' +
@@ -531,6 +556,7 @@ taskEstimateOptions + '\n' +
 '      dueReminderMin: parseInt(document.getElementById(\'dueReminderMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
 '      enableTimeline: document.getElementById(\'enableTimeline\').checked,\n' +
+'      focusLenMin: parseInt(document.getElementById(\'focusLenMin\').value, 10) || 25,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +
 '  });\n' +

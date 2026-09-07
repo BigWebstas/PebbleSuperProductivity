@@ -159,7 +159,8 @@
       "PRESENCE_CAN_STOP",
       "PRESENCE_SPENT_MS",
       "PRESENCE_ESTIMATE_MS",
-      "PRESENCE_NEW_SESSION"
+      "PRESENCE_NEW_SESSION",
+      "FOCUS_LEN_MIN"
     ]
   }
 }

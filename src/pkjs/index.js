@@ -411,6 +411,9 @@ function sendStatus(code, message) {
     // vibrate a banner. 0 = off. Watch-side only (main.c's minute_tick_handler),
     // app-open only. Always included, same reasoning as above.
     DUE_REMINDER_MIN: config.dueReminderMin || 0,
+    // Focus-mode session length in minutes (watch-local pomodoro on the
+    // full-screen tracking page - main.c's s_focus_len_min). Default 25.
+    FOCUS_LEN_MIN: config.focusLenMin || 25,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -2646,6 +2649,7 @@ Pebble.addEventListener('showConfiguration', function () {
       dueReminderMin: config.dueReminderMin || 0,
       liveTracking: !!config.liveTracking,
       enableTimeline: !!config.enableTimeline,
+      focusLenMin: config.focusLenMin || 25,
     }
   );
   Pebble.openURL(url);
@@ -2727,6 +2731,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     dueReminderMin: parseInt(result.dueReminderMin, 10) || 0,
     liveTracking: !!result.liveTracking,
     enableTimeline: !!result.enableTimeline,
+    focusLenMin: parseInt(result.focusLenMin, 10) || 25,
   };
   saveConfig(newConfig);
 

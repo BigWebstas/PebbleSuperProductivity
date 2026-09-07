@@ -54,6 +54,7 @@
 #define KEY_BREAK_REMINDER_MIN MESSAGE_KEY_BREAK_REMINDER_MIN
 #define KEY_IDLE_REMINDER_MIN MESSAGE_KEY_IDLE_REMINDER_MIN
 #define KEY_DUE_REMINDER_MIN MESSAGE_KEY_DUE_REMINDER_MIN
+#define KEY_FOCUS_LEN_MIN MESSAGE_KEY_FOCUS_LEN_MIN
 #define KEY_PRESENCE_STATE MESSAGE_KEY_PRESENCE_STATE
 #define KEY_PRESENCE_TASK_TITLE MESSAGE_KEY_PRESENCE_TASK_TITLE
 #define KEY_PRESENCE_DEVICE MESSAGE_KEY_PRESENCE_DEVICE
@@ -1035,6 +1036,37 @@ static void load_habits(void) {
 static const uint32_t PERSIST_KEY_TRACKING_ID = 110;
 static const uint32_t PERSIST_KEY_TRACKING_START = 111;
 
+#ifndef PBL_PLATFORM_APLITE
+// Focus mode: a watch-local pomodoro wrapped around the current LOCAL
+// tracking session (the desktop's own focus mode is not in the SuperSync
+// op-log, so it can't be mirrored - this is the watch's own). s_focus_end_epoch
+// is the wall-clock time the session ends; 0 = not focusing. Only meaningful
+// while s_tracking_task_id is set. s_focus_len_min is the configured length,
+// pushed from the pairing page (FOCUS_LEN_MIN). Persisted so the focus screen
+// comes straight back if the firmware's inactivity timeout closed the app.
+static const uint32_t PERSIST_KEY_FOCUS_END = 114;
+static time_t s_focus_end_epoch = 0;
+static int s_focus_len_min = 25;
+
+static bool focus_active(void) {
+  return s_focus_end_epoch != 0 && s_tracking_task_id[0] != '\0';
+}
+
+static void save_focus(void) {
+  if (s_focus_end_epoch != 0) {
+    persist_write_int(PERSIST_KEY_FOCUS_END, (int)s_focus_end_epoch);
+  } else {
+    persist_delete(PERSIST_KEY_FOCUS_END);
+  }
+}
+
+static void load_focus(void) {
+  if (persist_exists(PERSIST_KEY_FOCUS_END)) {
+    s_focus_end_epoch = (time_t)persist_read_int(PERSIST_KEY_FOCUS_END);
+  }
+}
+#endif
+
 // Its own key pair, independent of save_tasks(), so a tracked session survives
 // a resync that replaces s_tasks wholesale.
 static void save_tracking(void) {
@@ -1138,6 +1170,7 @@ static void refresh_pinned_section(void);
 static void push_live_window(void);
 static void live_window_refresh(void);
 static void stop_live_tick(void);
+static void focus_end(bool notify);
 static const char *presence_state_phrase(void);
 static void send_presence_stop(void);
 #endif
@@ -1498,7 +1531,7 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
     GRect hb = layer_get_bounds(cell_layer);
     fill_bg(ctx, hb, GColorGreen);
     graphics_context_set_text_color(ctx, GColorBlack);
-    draw_text(ctx, "TRACKING/FOCUSING", CHROME_FONT_KEY, GRect(TITLE_BOX_X, 0, hb.size.w - TITLE_BOX_X * 2, hb.size.h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+    draw_text(ctx, focus_active() ? "FOCUSING" : "TRACKING", CHROME_FONT_KEY, GRect(TITLE_BOX_X, 0, hb.size.w - TITLE_BOX_X * 2, hb.size.h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     graphics_context_set_stroke_color(ctx, GColorBlack);
     graphics_draw_line(ctx, GPoint(0, hb.size.h - 1), GPoint(hb.size.w, hb.size.h - 1));
     return;
@@ -2706,6 +2739,12 @@ static void stop_tracking_and_report(void) {
   s_tracking_start_epoch = 0;
   save_tracking();
 #ifndef PBL_PLATFORM_APLITE
+  // A focus session only wraps a local track - stopping the timer ends it too
+  // (drops the keepalive timer, releases the backlight). Silent: the stop
+  // itself is the user's cue.
+  if (s_focus_end_epoch != 0) {
+    focus_end(false);
+  }
   s_overtime_notified = false;
   s_overtime_last_notify_epoch = 0;
   hide_overtime_banner();
@@ -3797,6 +3836,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 #endif
       // "Notify before a task is due" - minutes ahead, 0 = off.
       s_due_reminder_min = tuple_int(iterator, KEY_DUE_REMINDER_MIN, s_due_reminder_min);
+      // Focus-mode session length in minutes. Only the NEXT session picks up a
+      // change; a running one keeps its already-computed end time.
+      s_focus_len_min = tuple_int(iterator, KEY_FOCUS_LEN_MIN, s_focus_len_min);
 #endif
       // reload_data refreshes the Resync row's status subtitle;
       // update_empty_layer() handles the empty screen. Both no-op while the
@@ -5510,6 +5552,50 @@ static void stop_live_tick(void) {
   }
 }
 
+// ---- focus mode ----
+// There is NO API to disable PebbleOS's inactivity auto-close. The lever we
+// have: the 1s tracking tick (live_tick_callback) calls light_enable(true)
+// while a focus session's screen is on top, which also counts as activity.
+// It may still time out on real hardware; when it does, the persisted
+// s_focus_end_epoch means init() drops straight back onto the focus screen
+// and back into the session.
+
+// Ends the running focus session: clears state, releases the backlight
+// (unless the user set it always-on), buzzes, repaints the header strip.
+// `notify` = ran to completion (long buzz + banner); else a plain stop.
+static void focus_end(bool notify) {
+  s_focus_end_epoch = 0;
+  save_focus();
+  if (s_backlight_mode != BACKLIGHT_MODE_ALWAYS_ON) {
+    light_enable(false);
+  }
+  if (notify) {
+    vibes_long_pulse();
+    show_top_banner("Focus done");
+  } else {
+    vibes_short_pulse();
+  }
+  menu_layer_reload_data(s_menu_layer);
+}
+
+// Toggles focus on the current LOCAL tracking session. A no-op when nothing
+// is tracked locally. Bound to long-press UP and DOWN on the tracking window.
+static void focus_toggle(void) {
+  if (s_focus_end_epoch != 0) {
+    focus_end(false);
+  } else {
+    if (s_tracking_task_id[0] == '\0') {
+      return;
+    }
+    s_focus_end_epoch = time(NULL) + (time_t)s_focus_len_min * 60;
+    save_focus();
+    vibes_short_pulse();
+    light_enable(true);
+    menu_layer_reload_data(s_menu_layer);
+  }
+  live_window_refresh();
+}
+
 // Fills the elapsed layer: "spent / estimate" (est_ms > 0) or a running
 // H:MM:SS clock, with the font sized to match. Shared by the local and remote
 // branches of live_window_refresh. `buf` must outlive the call (a static).
@@ -5555,11 +5641,30 @@ static void live_window_refresh(void) {
       window_stack_pop(true);
       return;
     }
-    text_layer_set_text(s_live_state_layer, "Tracking");
-    text_layer_set_text(s_live_task_layer, t->title);
-    live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), t->time_spent_ms, t->time_estimate_ms,
-                     (int)(time(NULL) - s_tracking_start_epoch));
-    text_layer_set_text(s_live_hint_layer, "Select to stop");
+    // A focus session that has run out ends here (the 1s tick keeps calling
+    // us) - falls through to the plain "Tracking" display below.
+    if (s_focus_end_epoch != 0 && time(NULL) >= s_focus_end_epoch) {
+      focus_end(true);
+    }
+    if (focus_active()) {
+      int left_s = (int)(s_focus_end_epoch - time(NULL));
+      if (left_s < 0) {
+        left_s = 0;
+      }
+      snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d", left_s / 60, left_s % 60);
+      text_layer_set_text(s_live_state_layer, "Focusing");
+      text_layer_set_text(s_live_task_layer, t->title);
+      text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
+      text_layer_set_text(s_live_elapsed_layer, elapsed_buf);
+      layer_set_hidden(text_layer_get_layer(s_live_elapsed_layer), false);
+      text_layer_set_text(s_live_hint_layer, "Hold to end focus");
+    } else {
+      text_layer_set_text(s_live_state_layer, "Tracking");
+      text_layer_set_text(s_live_task_layer, t->title);
+      live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), t->time_spent_ms, t->time_estimate_ms,
+                       (int)(time(NULL) - s_tracking_start_epoch));
+      text_layer_set_text(s_live_hint_layer, "Select stop / hold: focus");
+    }
     if (!s_live_tick_timer) {
       s_live_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, live_tick_callback, NULL);
     }
@@ -5597,6 +5702,11 @@ static void live_window_refresh(void) {
 
 static void live_tick_callback(void *data) {
   s_live_tick_timer = NULL;
+  // Re-assert the backlight every second during a focus session - the only
+  // lever against the inactivity auto-close (see the focus-mode comment).
+  if (focus_active()) {
+    light_enable(true);
+  }
   if (s_tracking_task_id[0] != '\0' || s_presence_state == 1) {
     live_window_refresh(); // re-arms the timer, or stops if the window closed
   }
@@ -5618,8 +5728,27 @@ static void live_window_select_click_handler(ClickRecognizerRef recognizer, void
   }
 }
 
+static void focus_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  backlight_touch();
+  focus_toggle();
+}
+
+// While a focus session runs, Back is trapped on this screen - the point of
+// focus mode is that a stray press doesn't drop you to the watchface. End the
+// session (hold Up/Down) to leave. Without a session Back just pops as usual.
+static void live_window_back_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (focus_active()) {
+    vibes_short_pulse();
+    return;
+  }
+  window_stack_pop(true);
+}
+
 static void live_window_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, live_window_select_click_handler);
+  window_single_click_subscribe(BUTTON_ID_BACK, live_window_back_click_handler);
+  window_long_click_subscribe(BUTTON_ID_UP, 0, focus_long_click_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_DOWN, 0, focus_long_click_handler, NULL);
 }
 
 static void live_window_load(Window *window) {
@@ -5964,6 +6093,14 @@ static void init(void) {
   load_tracking();
 #ifndef PBL_PLATFORM_APLITE
   load_habit_tracking();
+  load_focus();
+  // Drop a stale session: focus needs a live local track, and a session
+  // already past its end is over (the app was closed when it expired).
+  if (s_focus_end_epoch != 0 &&
+      (s_tracking_task_id[0] == '\0' || time(NULL) >= s_focus_end_epoch)) {
+    s_focus_end_epoch = 0;
+    save_focus();
+  }
 #endif
 #ifdef BREAK_REMINDER
   load_break_state();
@@ -6020,6 +6157,16 @@ static void init(void) {
     .unload = window_unload,
   });
   window_stack_push(s_main_window, true);
+
+#ifndef PBL_PLATFORM_APLITE
+  // A focus session that survived an app close (the inactivity timeout, or
+  // the user backing out by mistake) comes straight back to its screen, and
+  // re-arms the keepalive. This is the "never loses focus" half of the
+  // feature that survives the app actually being killed.
+  if (focus_active()) {
+    push_live_window();
+  }
+#endif
 
 #if defined(PBL_TOUCH)
   // Apply the default (off); the first sync turns it on if the phone says so.
