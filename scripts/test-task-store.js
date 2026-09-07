@@ -1678,6 +1678,79 @@ check('computeUpcoming: honours the limit', () => {
   assert.strictEqual(store.computeUpcoming(state, 10).length, 10);
 });
 
+// ---- recurring-task projection (Upcoming phase B) ----
+
+function ymd(d) {
+  return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+}
+
+check('repeatOccurrences DAILY every 1 lists each day in range past lastTaskCreationDay', () => {
+  const days = store.repeatOccurrences(
+    { title: 'Standup', repeatCycle: 'DAILY', repeatEvery: 1, startDate: '2020-01-01', lastTaskCreationDay: '2099-01-05' },
+    '2099-01-04', '2099-01-08');
+  assert.deepStrictEqual(days, ['2099-01-06', '2099-01-07', '2099-01-08']);
+});
+
+check('repeatOccurrences DAILY every 3 respects the cadence from startDate', () => {
+  const days = store.repeatOccurrences(
+    { title: 'X', repeatCycle: 'DAILY', repeatEvery: 3, startDate: '2099-01-01' },
+    '2099-01-01', '2099-01-11');
+  assert.deepStrictEqual(days, ['2099-01-04', '2099-01-07', '2099-01-10']);
+});
+
+check('repeatOccurrences WEEKLY honours weekday flags and repeatEvery', () => {
+  // 2099-01-05 is a Monday. Every 2 weeks, Mon + Wed.
+  const days = store.repeatOccurrences(
+    { title: 'X', repeatCycle: 'WEEKLY', repeatEvery: 2, startDate: '2099-01-05', monday: true, wednesday: true },
+    '2099-01-04', '2099-01-25');
+  assert.deepStrictEqual(days, ['2099-01-05', '2099-01-07', '2099-01-19', '2099-01-21']);
+});
+
+check('repeatOccurrences MONTHLY day-of-month, clamped for short months', () => {
+  const days = store.repeatOccurrences(
+    { title: 'X', repeatCycle: 'MONTHLY', repeatEvery: 1, startDate: '2099-01-31' },
+    '2099-01-15', '2099-04-01');
+  assert.deepStrictEqual(days, ['2099-01-31', '2099-02-28', '2099-03-31']);
+});
+
+check('repeatOccurrences MONTHLY nth-weekday anchor', () => {
+  // 2nd Tuesday (weekday 2, nth 2) of each month.
+  const days = store.repeatOccurrences(
+    { title: 'X', repeatCycle: 'MONTHLY', repeatEvery: 1, startDate: '2099-01-01', monthlyWeekOfMonth: 2, monthlyWeekday: 2 },
+    '2099-01-01', '2099-03-31');
+  days.forEach((d) => assert.strictEqual(new Date(d).getUTCDay(), 2));
+  assert.strictEqual(days.length, 3);
+});
+
+check('repeatOccurrences skips isPaused and deletedInstanceDates', () => {
+  assert.deepStrictEqual(
+    store.repeatOccurrences({ title: 'X', repeatCycle: 'DAILY', repeatEvery: 1, startDate: '2099-01-01', isPaused: true }, '2099-01-01', '2099-01-05'),
+    []);
+  assert.deepStrictEqual(
+    store.repeatOccurrences({ title: 'X', repeatCycle: 'DAILY', repeatEvery: 1, startDate: '2099-01-01', deletedInstanceDates: ['2099-01-03'] }, '2099-01-01', '2099-01-04'),
+    ['2099-01-02', '2099-01-04']);
+});
+
+check('computeUpcoming merges recurring occurrences, marked and deduped', () => {
+  const state = store.emptyState();
+  const d = new Date();
+  d.setDate(d.getDate() + 2);
+  const in2 = ymd(d);
+  store.applyOperations([
+    entry('PROJECT', '[Project] Add Project', { project: { id: 'p', title: 'Home' } }),
+    entry('TASK_REPEAT_CFG', '[TaskRepeatCfg] Upsert TaskRepeatCfg', {
+      taskRepeatCfg: { id: 'r1', title: 'Water plants', repeatCycle: 'DAILY', repeatEvery: 1, startDate: '2020-01-01', projectId: 'p' },
+    }),
+    // a real task already exists for `in2` - the projected occurrence for that day is dropped
+    addTask({ id: 't1', title: 'Water plants', dueDay: in2, projectId: 'p' }),
+  ], state);
+  const up = store.computeUpcoming(state, 40);
+  const recurring = up.filter((u) => u.recurring);
+  assert.ok(recurring.length >= 3, 'recurring occurrences present');
+  assert.strictEqual(recurring[0].project, 'Home');
+  assert.strictEqual(up.filter((u) => u.day === in2 && u.title === 'Water plants').length, 1, 'no double-show on in2');
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);

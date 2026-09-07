@@ -815,6 +815,9 @@ function handleUpcomingRequest() {
       lines.push('\x02' + formatUpcomingDay(it.day));
     }
     var line = clean(it.title, 40);
+    if (it.recurring) {
+      line = '* ' + line; // repeats - a projected occurrence, not a real task yet
+    }
     if (it.timeMin >= 0) {
       line = formatUpcomingTime(it.timeMin) + '  ' + line;
     }

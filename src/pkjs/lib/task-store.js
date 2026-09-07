@@ -77,7 +77,7 @@ function msIsToday(ms) {
 //                          modified, ...} },
 //          tag: { [id]: {id, title, ...} } }
 function emptyState() {
-  return { task: {}, project: {}, simpleCounter: {}, note: {}, tag: {} };
+  return { task: {}, project: {}, simpleCounter: {}, note: {}, tag: {}, taskRepeatCfg: {} };
 }
 
 function ensureCollection(state, entityType) {
@@ -707,6 +707,68 @@ function applySimpleCounterAction(op, actionPayload, state) {
   }
 }
 
+// TASK_REPEAT_CFG (recurring-task templates). Only used by the Upcoming page
+// (computeUpcoming projects their future occurrences); the payload shapes below
+// are read straight from super-productivity's task-repeat-cfg.actions.ts.
+function applyTaskRepeatCfgAction(op, actionPayload, state) {
+  var cfgs = ensureCollection(state, 'taskRepeatCfg');
+  if (!actionPayload) {
+    return;
+  }
+  switch (op.actionType) {
+    case '[TaskRepeatCfg][Task] Add TaskRepeatCfg to Task':
+    case '[TaskRepeatCfg] Upsert TaskRepeatCfg':
+      if (actionPayload.taskRepeatCfg && actionPayload.taskRepeatCfg.id) {
+        var full = actionPayload.taskRepeatCfg;
+        cfgs[full.id] = actionPayload.startTime
+          ? Object.assign({}, full, { startTime: actionPayload.startTime })
+          : full;
+      }
+      break;
+
+    case '[TaskRepeatCfg] Update TaskRepeatCfg':
+      if (actionPayload.taskRepeatCfg && actionPayload.taskRepeatCfg.id) {
+        cfgs[actionPayload.taskRepeatCfg.id] = Object.assign(
+          {}, cfgs[actionPayload.taskRepeatCfg.id], actionPayload.taskRepeatCfg.changes);
+      }
+      break;
+
+    case '[TaskRepeatCfg] Update TaskRepeatCfgs':
+      (actionPayload.taskRepeatCfgs || []).forEach(function (u) {
+        if (u && u.id) {
+          cfgs[u.id] = Object.assign({}, cfgs[u.id], u.changes);
+        }
+      });
+      break;
+
+    case '[TaskRepeatCfg] Delete TaskRepeatCfg':
+      if (actionPayload.id) {
+        delete cfgs[actionPayload.id];
+      }
+      break;
+
+    case '[TaskRepeatCfg] Delete TaskRepeatCfgs':
+      (actionPayload.ids || []).forEach(function (id) { delete cfgs[id]; });
+      break;
+
+    // A single materialised instance was deleted - remember the date so its
+    // occurrence stops showing in the Upcoming projection.
+    case '[TaskRepeatCfg] Delete Single Instance':
+      if (actionPayload.repeatCfgId && actionPayload.dateStr && cfgs[actionPayload.repeatCfgId]) {
+        var c = cfgs[actionPayload.repeatCfgId];
+        var deleted = (c.deletedInstanceDates || []).slice();
+        if (deleted.indexOf(actionPayload.dateStr) === -1) {
+          deleted.push(actionPayload.dateStr);
+        }
+        cfgs[actionPayload.repeatCfgId] = Object.assign({}, c, { deletedInstanceDates: deleted });
+      }
+      break;
+
+    default:
+      break;
+  }
+}
+
 // Applies one SuperSync operation to `state` in place. `crypto` is the
 // object returned by supersync-client.js's createCrypto(password) if E2EE is
 // on, or null/undefined otherwise. Never throws - a single malformed/
@@ -759,6 +821,8 @@ function applyOperation(entry, state, crypto) {
           ensureCollection(state, 'tag')[lwwData.id] = lwwData;
         } else if (entityType === 'simple_counter') {
           ensureCollection(state, 'simpleCounter')[lwwData.id] = lwwData;
+        } else if (entityType === 'task_repeat_cfg') {
+          ensureCollection(state, 'taskRepeatCfg')[lwwData.id] = lwwData;
         }
       }
       return;
@@ -786,6 +850,10 @@ function applyOperation(entry, state, crypto) {
     }
     if (entityType === 'tag') {
       applyTagAction(op, payload && payload.actionPayload, state);
+      return;
+    }
+    if (entityType === 'task_repeat_cfg') {
+      applyTaskRepeatCfgAction(op, payload && payload.actionPayload, state);
       return;
     }
 
@@ -849,6 +917,9 @@ function applyOperation(entry, state, crypto) {
         }
         if (payload && payload.tag && payload.tag.entities) {
           state.tag = payload.tag.entities;
+        }
+        if (payload && payload.taskRepeatCfg && payload.taskRepeatCfg.entities) {
+          state.taskRepeatCfg = payload.taskRepeatCfg.entities;
         }
         break;
       default:
@@ -1373,19 +1444,138 @@ function computeStats(state) {
   };
 }
 
+// ---- recurring-task occurrence projection (Upcoming page, phase B) ----
+// A day-by-day scan mirroring super-productivity's getNextRepeatOccurrence
+// predicates (DAILY/WEEKLY/MONTHLY/YEARLY, monthly Nth-weekday + last-day
+// anchors, deletedInstanceDates). Not a perfect port - repeatFromCompletionDate
+// is approximated from lastTaskCreationDay, and the whole thing is a preview,
+// not the desktop's authoritative materialisation.
+
+var REPEAT_WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+// "YYYY-MM-DD" -> local Date at midnight.
+function parseDayStr(s) {
+  var p = String(s).split('-');
+  return new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10));
+}
+
+function diffInDays(fromDay, toDay) {
+  return Math.round((parseDayStr(toDay).getTime() - parseDayStr(fromDay).getTime()) / 86400000);
+}
+function diffInMonths(fromDay, toDay) {
+  var a = parseDayStr(fromDay), b = parseDayStr(toDay);
+  return (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth());
+}
+function addDaysStr(dayStr, n) {
+  var d = parseDayStr(dayStr);
+  d.setDate(d.getDate() + n);
+  return dateToDateStr(d);
+}
+function lastDayOfMonth(year, month0) {
+  return new Date(year, month0 + 1, 0).getDate();
+}
+// nth (1-4) weekday of a month, or 5 = last. weekday: 0=Sun..6=Sat.
+function nthWeekdayDate(year, month0, weekday, nth) {
+  if (nth >= 5) {
+    var last = lastDayOfMonth(year, month0);
+    for (var d = last; d >= 1; d--) {
+      if (new Date(year, month0, d).getDay() === weekday) {
+        return d;
+      }
+    }
+    return null;
+  }
+  var first = new Date(year, month0, 1).getDay();
+  var offset = (weekday - first + 7) % 7;
+  var day = 1 + offset + (nth - 1) * 7;
+  return day <= lastDayOfMonth(year, month0) ? day : null;
+}
+
+function repeatMatchesDay(cfg, dayStr, startDay) {
+  var every = cfg.repeatEvery > 0 ? cfg.repeatEvery : 1;
+  var d = parseDayStr(dayStr);
+  switch (cfg.repeatCycle) {
+    case 'DAILY': {
+      var dd = diffInDays(startDay, dayStr);
+      return dd >= 0 && dd % every === 0;
+    }
+    case 'WEEKLY': {
+      var dw = Math.floor(diffInDays(startDay, dayStr) / 7);
+      return dw >= 0 && dw % every === 0 && cfg[REPEAT_WEEKDAYS[d.getDay()]] === true;
+    }
+    case 'MONTHLY': {
+      var dm = diffInMonths(startDay, dayStr);
+      if (dm < 0 || dm % every !== 0) {
+        return false;
+      }
+      var hasNth = cfg.monthlyWeekOfMonth != null && cfg.monthlyWeekday != null;
+      if (hasNth) {
+        return d.getDate() === nthWeekdayDate(d.getFullYear(), d.getMonth(), cfg.monthlyWeekday, cfg.monthlyWeekOfMonth);
+      }
+      if (cfg.monthlyLastDay) {
+        return d.getDate() === lastDayOfMonth(d.getFullYear(), d.getMonth());
+      }
+      var anchorDom = parseDayStr(startDay).getDate();
+      return d.getDate() === Math.min(anchorDom, lastDayOfMonth(d.getFullYear(), d.getMonth()));
+    }
+    case 'YEARLY': {
+      var s = parseDayStr(startDay);
+      var yd = d.getFullYear() - s.getFullYear();
+      if (yd < 0 || yd % every !== 0 || d.getMonth() !== s.getMonth()) {
+        return false;
+      }
+      var anchorDay = Math.min(s.getDate(), lastDayOfMonth(d.getFullYear(), d.getMonth()));
+      return d.getDate() === anchorDay;
+    }
+    default:
+      return false;
+  }
+}
+
+// Occurrence dates (YYYY-MM-DD) of `cfg` strictly within (fromDay, toDay],
+// skipping days already materialised (<= lastTaskCreationDay) and deleted ones.
+function repeatOccurrences(cfg, fromDay, toDay) {
+  if (!cfg || cfg.isPaused || !cfg.title || !cfg.repeatCycle) {
+    return [];
+  }
+  var startDay = (cfg.repeatFromCompletionDate && cfg.lastTaskCreationDay)
+    ? cfg.lastTaskCreationDay
+    : (cfg.startDate || '1970-01-01');
+  var lastCreated = cfg.lastTaskCreationDay || null;
+  var deleted = cfg.deletedInstanceDates || [];
+  var out = [];
+  var day = addDaysStr(fromDay, 1);
+  var guard = 0;
+  while (day <= toDay && guard++ < 400) {
+    if ((!lastCreated || day > lastCreated) &&
+        deleted.indexOf(day) === -1 &&
+        repeatMatchesDay(cfg, day, startDay)) {
+      out.push(day);
+    }
+    day = addDaysStr(day, 1);
+  }
+  return out;
+}
+
+var UPCOMING_HORIZON_DAYS = 21;
+
 // The watch's optional "Upcoming" page: every not-done main task scheduled for
 // a local day AFTER today - by dueDay, or by the local day of a dueWithTime.
 // Today and the past are already covered by the today list / Schedule page.
 // Sorted by day then time-of-day (dateless entries last within a day), capped.
-// Phase A only looks at tasks that already carry a future date (which includes
-// the recurring instances SP has materialised ahead); computed occurrences of
-// not-yet-created repeat configs are a later addition. Phone-side: the watch
-// has no future-date data of its own.
+// Two sources: tasks that already carry a future date (any date, capped by
+// `limit`), and projected occurrences of recurring configs (repeatOccurrences,
+// within UPCOMING_HORIZON_DAYS) that the desktop hasn't materialised yet -
+// those are marked `recurring: true`. A projected occurrence whose day+title
+// already appears as a real task is dropped. Phone-side: the watch has no
+// future-date data of its own.
 function computeUpcoming(state, limit) {
   var tasks = (state && state.task) || {};
   var projects = (state && state.project) || {};
+  var repeatCfgs = (state && state.taskRepeatCfg) || {};
   var today = todayStr();
   var out = [];
+  var seen = {}; // "day\x01title" of real tasks, to dedupe projected occurrences
 
   Object.keys(tasks).forEach(function (id) {
     var t = tasks[id];
@@ -1413,6 +1603,34 @@ function computeUpcoming(state, limit) {
       title: String(t.title),
       project: projTitle ? String(projTitle) : '',
     });
+    seen[day + '\x01' + String(t.title)] = true;
+  });
+
+  var horizonDay = addDaysStr(today, UPCOMING_HORIZON_DAYS);
+  Object.keys(repeatCfgs).forEach(function (id) {
+    var cfg = repeatCfgs[id];
+    var occ = repeatOccurrences(cfg, today, horizonDay);
+    if (!occ.length) {
+      return;
+    }
+    var startMin = -1;
+    if (cfg.startTime && /^\d{1,2}:\d{2}/.test(cfg.startTime)) {
+      var hm = cfg.startTime.split(':');
+      startMin = parseInt(hm[0], 10) * 60 + parseInt(hm[1], 10);
+    }
+    var cfgProj = cfg.projectId && projects[cfg.projectId] && projects[cfg.projectId].title;
+    occ.forEach(function (day) {
+      if (seen[day + '\x01' + String(cfg.title)]) {
+        return;
+      }
+      out.push({
+        day: day,
+        timeMin: startMin,
+        title: String(cfg.title),
+        project: cfgProj ? String(cfgProj) : '',
+        recurring: true,
+      });
+    });
   });
 
   out.sort(function (a, b) {
@@ -1437,6 +1655,7 @@ module.exports = {
   getProjectTasks: getProjectTasks,
   computeStats: computeStats,
   computeUpcoming: computeUpcoming,
+  repeatOccurrences: repeatOccurrences,
   NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,
   dateToDateStr: dateToDateStr,
