@@ -1064,8 +1064,34 @@ static int s_focus_len_min = 25;
 #define FOCUS_LIGHT_POKE_S 300
 static time_t s_focus_last_poke_epoch = 0;
 
+// Count of focus sessions that ran ALL the way to 0:00 today (not ones ended
+// early). Watch-local - SP has no syncable focus/pomodoro entity, so this
+// can't reach the desktop's end-of-day review; it only feeds the Stats page,
+// same as "Current session" and "Without a break". s_focus_done_day is a
+// local-calendar day id (tm_year*400 + tm_yday) for the rollover check.
+static const uint32_t PERSIST_KEY_FOCUS_DONE_COUNT = 115;
+static const uint32_t PERSIST_KEY_FOCUS_DONE_DAY = 116;
+static int s_focus_completed_today = 0;
+static int s_focus_done_day = 0;
+
 static bool focus_active(void) {
   return s_focus_end_epoch != 0 && s_tracking_task_id[0] != '\0';
+}
+
+static int focus_day_id(void) {
+  time_t now = time(NULL);
+  struct tm *lt = localtime(&now);
+  return lt->tm_year * 400 + lt->tm_yday;
+}
+
+// Zeroes the completed count when the local day has rolled over. Called before
+// every read and before an increment.
+static void focus_roll_day(void) {
+  int d = focus_day_id();
+  if (d != s_focus_done_day) {
+    s_focus_done_day = d;
+    s_focus_completed_today = 0;
+  }
 }
 
 static void save_focus(void) {
@@ -1074,12 +1100,24 @@ static void save_focus(void) {
   } else {
     persist_delete(PERSIST_KEY_FOCUS_END);
   }
+  persist_write_int(PERSIST_KEY_FOCUS_DONE_COUNT, s_focus_completed_today);
+  persist_write_int(PERSIST_KEY_FOCUS_DONE_DAY, s_focus_done_day);
 }
 
 static void load_focus(void) {
   if (persist_exists(PERSIST_KEY_FOCUS_END)) {
     s_focus_end_epoch = (time_t)persist_read_int(PERSIST_KEY_FOCUS_END);
   }
+  s_focus_completed_today = persist_read_int(PERSIST_KEY_FOCUS_DONE_COUNT);
+  s_focus_done_day = persist_read_int(PERSIST_KEY_FOCUS_DONE_DAY);
+  focus_roll_day();
+}
+
+// Records one fully-completed focus session for today's Stats count.
+static void focus_bump_completed(void) {
+  focus_roll_day();
+  s_focus_completed_today++;
+  save_focus();
 }
 #endif
 
@@ -5265,7 +5303,7 @@ static int stats_project_line_count(void) {
 }
 
 static int16_t stats_content_height(void) {
-  return (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 5  // the five metrics
+  return (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 6  // the six metrics
        + STATS_LABEL_H + 2                                 // PROJECTS bar
        + stats_project_line_count() * STATS_LINE_H
        + 8;
@@ -5284,12 +5322,16 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
 
   char done_buf[12];
   snprintf(done_buf, sizeof(done_buf), "%d", s_stats_done_today);
+  focus_roll_day();
+  char focus_buf[12];
+  snprintf(focus_buf, sizeof(focus_buf), "%d", s_focus_completed_today);
   int16_t y = 0;
   y = stats_draw_metric(ctx, y, w, "Estimate remaining", s_stats_est);
   y = stats_draw_metric(ctx, y, w, "Worked today", s_stats_worked);
   y = stats_draw_metric(ctx, y, w, "Without a break", s_stats_nobreak);
   y = stats_draw_metric(ctx, y, w, "Current session", s_stats_session);
   y = stats_draw_metric(ctx, y, w, "Completed today", done_buf);
+  y = stats_draw_metric(ctx, y, w, "Focus sessions", focus_buf);
 
   fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
   graphics_context_set_text_color(ctx, GColorWhite);
@@ -5582,6 +5624,7 @@ static void focus_end(bool notify) {
   if (notify) {
     vibes_long_pulse();
     show_top_banner("Focus done");
+    focus_bump_completed(); // ran to 0:00 - counts for the Stats page
   } else {
     vibes_short_pulse();
   }
