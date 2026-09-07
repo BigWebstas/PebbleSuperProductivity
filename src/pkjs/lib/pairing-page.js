@@ -41,6 +41,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var idleReminderMin = options.idleReminderMin || 0;
   var dueReminderMin = options.dueReminderMin || 0;
   var liveTracking = !!options.liveTracking;
+  var enableTimeline = !!options.enableTimeline;
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
     ? 'Already saved - leave blank to keep it'
@@ -301,6 +302,20 @@ dueReminderOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableTimeline" type="checkbox"' + (enableTimeline ? ' checked' : '') + '>\n' +
+'    <label for="enableTimeline">Add scheduled tasks to the timeline</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Pushes a PebbleOS timeline pin for every task that has a set time, for\n' +
+'    the next two weeks, with a reminder using the "Notify before a task is\n' +
+'    due" lead time above. Pins update and disappear as you reschedule or\n' +
+'    finish tasks. The pin shows the task title and project name to Rebble\'s\n' +
+'    timeline service - that part is not end-to-end encrypted, which is why\n' +
+'    this is off by default. Needs timeline enabled for this app in the\n' +
+'    Rebble developer portal.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="liveTracking" type="checkbox"' + (liveTracking ? ' checked' : '') + '>\n' +
 '    <label for="liveTracking">Show live tracking from other devices</label>\n' +
 '  </div>\n' +
@@ -515,6 +530,7 @@ taskEstimateOptions + '\n' +
 '      idleReminderMin: parseInt(document.getElementById(\'idleReminderMin\').value, 10) || 0,\n' +
 '      dueReminderMin: parseInt(document.getElementById(\'dueReminderMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
+'      enableTimeline: document.getElementById(\'enableTimeline\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +
 '  });\n' +

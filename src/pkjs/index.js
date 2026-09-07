@@ -10,6 +10,7 @@ var pairingPage = require('./lib/pairing-page.js');
 var sha256lib = require('./lib/sha256.js');
 var presence = require('./lib/presence-client.js');
 var opQueue = require('./lib/op-queue.js');
+var timeline = require('./lib/timeline.js');
 
 // Keep in sync with the enums at the top of src/c/main.c.
 var MSG_TASK_SYNC_START = 1;
@@ -923,6 +924,10 @@ function doSync() {
       saveVectorClock(vectorClock);
       saveLastSyncedAt(Date.now());
       pushCachedStateToWatch(config);
+      // Best-effort, fire-and-forget: reconciles the PebbleOS timeline off
+      // the state we just saved. Never awaited, never touches the watch
+      // status, swallows its own errors - see syncTimelinePins().
+      syncTimelinePins(state, config);
     })
     .catch(function (err) {
       console.log('[pkjs] sync failed: ' + (err && err.message));
@@ -1061,6 +1066,117 @@ function flushPendingOps(config) {
     }
     console.log('[pkjs] flushPendingOps: paused with ' + Math.max(0, queued.length - index) +
       ' queued (' + (err && err.message) + ')');
+  });
+}
+
+// ---------------- PebbleOS timeline pins ----------------
+
+var TIMELINE_API_BASE = 'https://timeline-api.rebble.io';
+
+// One PUT/DELETE against Rebble's per-user timeline API. The pin id is the
+// URL path; the per-user token (from Pebble.getTimelineToken, unrelated to
+// the SuperSync JWT) goes in X-User-Token. Resolves with the status code on
+// 2xx, rejects with an Error (err.status set) otherwise - a 404 on DELETE
+// is a normal "already gone" and handled by the caller.
+function timelineRequest(method, path, userToken, body) {
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    xhr.open(method, TIMELINE_API_BASE + path, true);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.setRequestHeader('X-User-Token', userToken);
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.status);
+      } else {
+        var err = new Error('timeline ' + method + ' HTTP ' + xhr.status +
+          (xhr.responseText ? ' ' + xhr.responseText : ''));
+        err.status = xhr.status;
+        reject(err);
+      }
+    };
+    xhr.onerror = function () { reject(new Error('timeline network error')); };
+    xhr.ontimeout = function () { reject(new Error('timeline request timed out')); };
+    xhr.timeout = 15000;
+    xhr.send(body ? JSON.stringify(body) : undefined);
+  });
+}
+
+// Reconciles the PebbleOS timeline with the task list: a pin for every task
+// scheduled to a specific time in the next timeline.HORIZON_DAYS days, and
+// no pin for anything since completed, unscheduled, or aged out. Called at
+// the tail of every successful doSync(), AFTER the watch already has its
+// list - it is entirely best-effort and never sends a status to the watch.
+//
+// Gated on config.enableTimeline (default off). The pin title and project
+// name are sent to Rebble's timeline service in clear, outside SuperSync's
+// end-to-end encryption, so this is strictly opt-in. When the setting is
+// turned back off, the `pushed` map is still on disk, so this runs once
+// more with an empty desired set and deletes every pin it had created.
+//
+// timeline.plan() diffs the desired pins against a fingerprint map of what
+// was last pushed (timeline.STORAGE_KEY): an unchanged pin costs no
+// request. Work is capped at timeline.MAX_OPS_PER_SYNC per run and the
+// remainder is picked up next sync; the run stops on the first transport
+// error with a consistent map saved, and retries from there next time.
+function syncTimelinePins(state, config) {
+  var enabled = !!(config && config.enableTimeline === true);
+  var pushed = timeline.read(localStorage);
+  if (!enabled && !Object.keys(pushed).length) {
+    return;
+  }
+  if (typeof Pebble === 'undefined' || typeof Pebble.getTimelineToken !== 'function') {
+    return;
+  }
+
+  Pebble.getTimelineToken(function (userToken) {
+    if (!userToken) {
+      return;
+    }
+    var lead = config && config.dueReminderMin;
+    var desired = enabled
+      ? timeline.desiredPins(state, Date.now(),
+          { leadMin: (typeof lead === 'number' && lead >= 0) ? lead : undefined })
+      : [];
+    var work = timeline.plan(desired, pushed);
+
+    var ops = [];
+    work.puts.forEach(function (pin) { ops.push({ put: pin }); });
+    work.deletes.forEach(function (id) { ops.push({ del: id }); });
+    if (!ops.length) {
+      return;
+    }
+    ops = ops.slice(0, timeline.MAX_OPS_PER_SYNC);
+
+    var i = 0;
+    var step = function () {
+      if (i >= ops.length) {
+        timeline.write(localStorage, pushed);
+        console.log('[pkjs] timeline: ' + work.puts.length + ' to put, ' +
+          work.deletes.length + ' to delete (' + ops.length + ' this run)');
+        return;
+      }
+      var op = ops[i++];
+      var done;
+      if (op.put) {
+        done = timelineRequest('PUT', '/v1/user/pins/' + encodeURIComponent(op.put.id), userToken, op.put)
+          .then(function () { pushed[op.put.id] = timeline.fingerprint(op.put); });
+      } else {
+        done = timelineRequest('DELETE', '/v1/user/pins/' + encodeURIComponent(op.del), userToken)
+          .then(function () { delete pushed[op.del]; }, function (err) {
+            if (err && err.status === 404) { delete pushed[op.del]; return; }
+            throw err;
+          });
+      }
+      done.then(step, function (err) {
+        timeline.write(localStorage, pushed);
+        console.log('[pkjs] timeline push paused: ' + (err && err.message));
+      });
+    };
+    step();
+  }, function (err) {
+    // No token: timeline isn't enabled for this app in the Rebble dev
+    // portal, or the phone has no Pebble account. Retried next sync.
+    console.log('[pkjs] timeline token unavailable: ' + JSON.stringify(err));
   });
 }
 
@@ -2529,6 +2645,7 @@ Pebble.addEventListener('showConfiguration', function () {
       idleReminderMin: config.idleReminderMin || 0,
       dueReminderMin: config.dueReminderMin || 0,
       liveTracking: !!config.liveTracking,
+      enableTimeline: !!config.enableTimeline,
     }
   );
   Pebble.openURL(url);
@@ -2609,6 +2726,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     idleReminderMin: parseInt(result.idleReminderMin, 10) || 0,
     dueReminderMin: parseInt(result.dueReminderMin, 10) || 0,
     liveTracking: !!result.liveTracking,
+    enableTimeline: !!result.enableTimeline,
   };
   saveConfig(newConfig);
 
