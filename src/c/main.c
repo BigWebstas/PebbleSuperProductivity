@@ -514,6 +514,14 @@ static time_t s_break_last_stop_epoch = 0;   // when the last session ended (gap
 // break, so a quick stop/restart doesn't re-nag.
 static bool s_break_notified = false;
 #define BREAK_RESET_GAP_S (5 * 60)
+// Today's break tally for the Stats page: how many gaps >= BREAK_RESET_GAP_S
+// between a stop and the next start, and their total seconds. A single break
+// is capped (BREAK_MAX_S) so an untracked afternoon doesn't dwarf the number.
+// s_break_day is the local_day_id() the counts belong to. Watch-local.
+#define BREAK_MAX_S (4 * 3600)
+static int s_break_count_today = 0;
+static int s_break_total_s_today = 0;
+static int s_break_day = 0;
 
 // "Not tracking" nudge - purely time-based, no step count. Counts minutes
 // since the last stop (s_break_last_stop_epoch) and repeats a banner every
@@ -1085,7 +1093,9 @@ static bool focus_active(void) {
   return s_focus_end_epoch != 0 && s_tracking_task_id[0] != '\0';
 }
 
-static int focus_day_id(void) {
+// A local-calendar day id for "resets at midnight" counters (focus sessions,
+// break tally). Shared by focus_roll_day and break_roll_day.
+static int local_day_id(void) {
   time_t now = time(NULL);
   struct tm *lt = localtime(&now);
   return lt->tm_year * 400 + lt->tm_yday;
@@ -1094,7 +1104,7 @@ static int focus_day_id(void) {
 // Zeroes the completed count when the local day has rolled over. Called before
 // every read and before an increment.
 static void focus_roll_day(void) {
-  int d = focus_day_id();
+  int d = local_day_id();
   if (d != s_focus_done_day) {
     s_focus_done_day = d;
     s_focus_completed_today = 0;
@@ -1150,18 +1160,38 @@ static void load_tracking(void) {
 #ifdef BREAK_REMINDER
 static const uint32_t PERSIST_KEY_BREAK_ACCUM_S = 112;
 static const uint32_t PERSIST_KEY_BREAK_LAST_STOP = 113;
+static const uint32_t PERSIST_KEY_BREAK_COUNT_TODAY = 117;
+static const uint32_t PERSIST_KEY_BREAK_TOTAL_S_TODAY = 118;
+static const uint32_t PERSIST_KEY_BREAK_DAY = 119;
+
+// Zeroes the Stats break tally when the local day has rolled over.
+static void break_roll_day(void) {
+  int d = local_day_id();
+  if (d != s_break_day) {
+    s_break_day = d;
+    s_break_count_today = 0;
+    s_break_total_s_today = 0;
+  }
+}
 
 // Persists the break-reminder tally so it survives the app closing between a
 // stop and the next start. persist_read_int returns 0 for a missing key, which
-// is the right default for both.
+// is the right default for all of them.
 static void save_break_state(void) {
   persist_write_int(PERSIST_KEY_BREAK_ACCUM_S, s_break_accum_s);
   persist_write_int(PERSIST_KEY_BREAK_LAST_STOP, (int)s_break_last_stop_epoch);
+  persist_write_int(PERSIST_KEY_BREAK_COUNT_TODAY, s_break_count_today);
+  persist_write_int(PERSIST_KEY_BREAK_TOTAL_S_TODAY, s_break_total_s_today);
+  persist_write_int(PERSIST_KEY_BREAK_DAY, s_break_day);
 }
 
 static void load_break_state(void) {
   s_break_accum_s = persist_read_int(PERSIST_KEY_BREAK_ACCUM_S);
   s_break_last_stop_epoch = (time_t)persist_read_int(PERSIST_KEY_BREAK_LAST_STOP);
+  s_break_count_today = persist_read_int(PERSIST_KEY_BREAK_COUNT_TODAY);
+  s_break_total_s_today = persist_read_int(PERSIST_KEY_BREAK_TOTAL_S_TODAY);
+  s_break_day = persist_read_int(PERSIST_KEY_BREAK_DAY);
+  break_roll_day();
 }
 #endif
 
@@ -2750,6 +2780,11 @@ static void start_tracking(Task *task) {
       time(NULL) - s_break_last_stop_epoch >= BREAK_RESET_GAP_S) {
     s_break_accum_s = 0;
     s_break_notified = false;
+    // This gap was a real break - record it for the Stats page.
+    break_roll_day();
+    int gap = (int)(time(NULL) - s_break_last_stop_epoch);
+    s_break_count_today++;
+    s_break_total_s_today += gap > BREAK_MAX_S ? BREAK_MAX_S : gap;
   }
   save_break_state();
   // Fresh "not tracking" window for the next gap.
@@ -5318,7 +5353,7 @@ static int stats_project_line_count(void) {
 }
 
 static int16_t stats_content_height(void) {
-  return (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 6  // the six metrics
+  return (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 7  // the seven metrics
        + STATS_LABEL_H + 2                                 // PROJECTS bar
        + stats_project_line_count() * STATS_LINE_H
        + 8;
@@ -5340,10 +5375,21 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   focus_roll_day();
   char focus_buf[12];
   snprintf(focus_buf, sizeof(focus_buf), "%d", s_focus_completed_today);
+  // "Break time" - count / total duration of today's real breaks.
+  break_roll_day();
+  char break_buf[24];
+  if (s_break_count_today > 0) {
+    char bdur[16];
+    format_duration_ms(s_break_total_s_today * 1000, false, bdur, sizeof(bdur));
+    snprintf(break_buf, sizeof(break_buf), "%d / %s", s_break_count_today, bdur);
+  } else {
+    str_copy(break_buf, "0", sizeof(break_buf));
+  }
   int16_t y = 0;
   y = stats_draw_metric(ctx, y, w, "Estimate remaining", s_stats_est);
   y = stats_draw_metric(ctx, y, w, "Worked today", s_stats_worked);
   y = stats_draw_metric(ctx, y, w, "Without a break", s_stats_nobreak);
+  y = stats_draw_metric(ctx, y, w, "Break time", break_buf);
   y = stats_draw_metric(ctx, y, w, "Current session", s_stats_session);
   y = stats_draw_metric(ctx, y, w, "Completed today", done_buf);
   y = stats_draw_metric(ctx, y, w, "Focus sessions", focus_buf);
