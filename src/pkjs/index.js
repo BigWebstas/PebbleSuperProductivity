@@ -2966,6 +2966,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableStats: !!result.enableStats,
     enableSchedule: !!result.enableSchedule,
     enableUpcoming: !!result.enableUpcoming,
+    enableTags: !!result.enableTags,
     yesterdayStats: !!result.yesterdayStats,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,
