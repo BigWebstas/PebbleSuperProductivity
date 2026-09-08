@@ -1416,7 +1416,8 @@ typedef enum { PICK_ESTIMATE, PICK_DEADLINE, PICK_HABIT } PickKind;
 // task_id is a habit id for PICK_HABIT. current: ms (estimate) / days-from-today
 // or DEADLINE_NONE (deadline) / the counter's value (habit).
 static void push_value_picker(PickKind kind, const char *task_id, int current);
-static void push_action_menu(const char *task_id);
+typedef enum { ACTX_TODAY, ACTX_PROJECT, ACTX_TAG } ActionCtx;
+static void push_action_menu(const char *task_id, ActionCtx ctx, bool in_backlog);
 static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
@@ -3359,7 +3360,7 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  push_action_menu(task->id);
+  push_action_menu(task->id, ACTX_TODAY, false);
 #else
   if (task->done) {
     return; // tracking a completed task isn't a real scenario
@@ -3783,16 +3784,15 @@ static void begin_pending_reschedule(RescheduleKind kind) {
   s_pending_reschedule_project_id[0] = '\0';
 #if PROJECTS_BROWSER
   if (window_stack_get_top_window() == s_browse_window && s_browse_level == 1 && s_browse_menu) {
-    // Tags mode: the browsed id is a tag, not a project - the phone's
-    // reschedule handler would re-push an empty "that project's" list and
-    // blank the view. Reschedule isn't offered from the tag task list.
-    if (browse_wants_tags()) {
-      return;
-    }
     Task *bt = resolve_browse_task_at(menu_layer_get_selected_index(s_browse_menu));
     if (bt) {
       task_id = bt->id;
-      str_copy(s_pending_reschedule_project_id, s_browse_project_id, MAX_PROJECT_ID_LEN);
+      // Only a real project id round-trips (the phone re-pushes that project's
+      // list). In tags mode s_browse_project_id is a tag - leave it empty so the
+      // phone re-pushes the today list instead.
+      if (!browse_wants_tags()) {
+        str_copy(s_pending_reschedule_project_id, s_browse_project_id, MAX_PROJECT_ID_LEN);
+      }
     }
   } else
 #endif
@@ -5258,20 +5258,17 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
 }
 
 // Level 0: long-Select opens the selected project's notes (a project has no
-// tags, hence the cleared tags line). Level 1: long-Select moves the task
-// between the regular list and the backlog - the direction is set by which
-// section the row is in (a regular row -> backlog, a backlog row -> regular),
-// through the same 3s-cancel pending window as the Up/Down reschedule.
-// Both are no-ops in tags mode: a tag has no notes, and its tasks span
-// projects so "the backlog" is ambiguous.
+// tags; a tag row is a no-op). Level 1: long-Select opens the per-task action
+// menu, same as the today list - with "Move to backlog/list" as an extra row
+// for a project task.
 static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
-#ifndef PBL_PLATFORM_APLITE
-  if (browse_wants_tags()) {
-    return;
-  }
-#endif
   if (s_browse_level == 0) {
+#ifndef PBL_PLATFORM_APLITE
+    if (browse_wants_tags()) {
+      return; // a tag has no notes
+    }
+#endif
     BrowseProject *p = resolve_browse_project_at(*cell_index);
     if (!p) {
       return;
@@ -5280,16 +5277,19 @@ static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell
     show_notes_overlay_for(p->id, true);
     return;
   }
-  // The "No Project" bucket has no backlog - nothing to toggle.
-  if (s_browse_project_id[0] == '\0' ||
-      strncmp(s_browse_project_id, NO_PROJECT_ID_STR, MAX_PROJECT_ID_LEN) == 0) {
+#ifndef PBL_PLATFORM_APLITE
+  Task *bt = resolve_browse_task_at(*cell_index);
+  if (!bt) {
     return;
   }
-  if (!resolve_browse_task_at(*cell_index)) {
-    return;
-  }
-  bool in_backlog = pt_section_is_backlog((int)cell_index->section);
-  begin_pending_reschedule(in_backlog ? RESCHEDULE_FROM_BACKLOG : RESCHEDULE_TO_BACKLOG);
+  bool no_project = (s_browse_project_id[0] == '\0' ||
+                     strncmp(s_browse_project_id, NO_PROJECT_ID_STR, MAX_PROJECT_ID_LEN) == 0);
+  // ctx only decides whether the "Move to backlog" row shows - tags and the
+  // "No Project" bucket have no backlog. Scheduling itself routes through
+  // begin_pending_reschedule's own window/mode check, not ctx.
+  ActionCtx ctx = (browse_wants_tags() || no_project) ? ACTX_TAG : ACTX_PROJECT;
+  push_action_menu(bt->id, ctx, pt_section_is_backlog((int)cell_index->section));
+#endif
 }
 
 static void browse_update_empty(void) {
@@ -5344,28 +5344,13 @@ static void browse_back_click_handler(ClickRecognizerRef recognizer, void *conte
   window_stack_pop(true);
 }
 
-// Level 1 only: long-press Up = schedule today, long-press Down = tomorrow.
-// Same 3s-cancel-window / Select-to-cancel flow as the today list's Up/Down
-// (begin_pending_reschedule). A no-op at level 0 (the project list).
-static void browse_reschedule_long_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (s_browse_level != 1) {
-    return;
-  }
-  backlight_touch();
-  begin_pending_reschedule(click_recognizer_get_button_id(recognizer) == BUTTON_ID_UP
-                               ? RESCHEDULE_TODAY
-                               : RESCHEDULE_TOMORROW);
-}
-
+// Wraps MenuLayer's provider only to add BACK (level 1 -> level 0). Scheduling
+// and backlog moves are in the per-task action menu now (long-Select a task).
 static void browse_menu_click_config_provider(void *context) {
   if (s_browse_menu_ccp) {
     s_browse_menu_ccp(context);
   }
   window_single_click_subscribe(BUTTON_ID_BACK, browse_back_click_handler);
-  window_long_click_subscribe(BUTTON_ID_UP, RESCHEDULE_LONGPRESS_MS,
-                              browse_reschedule_long_click_handler, NULL);
-  window_long_click_subscribe(BUTTON_ID_DOWN, RESCHEDULE_LONGPRESS_MS,
-                              browse_reschedule_long_click_handler, NULL);
 }
 
 static void browse_window_load(Window *window) {
@@ -5970,10 +5955,10 @@ static void push_value_picker(PickKind kind, const char *task_id, int current) {
 }
 
 // ---------- per-task action menu ----------
-// Long-Select on a today-list task row opens this. Consolidates what used to be
-// scattered across cryptic gestures (track, tags, estimate, deadline) plus a
-// way into notes. Each row pops this menu, then launches its target - so Back
-// from the target returns to the list.
+// Long-Select on a task row - today list OR a Projects/Tags browser task view -
+// opens this. The one home for per-task actions. Each row pops this menu, then
+// launches its target, so Back from the target returns to the list.
+// ACT_BACKLOG only shows for a Projects-browser task (ACTX_PROJECT).
 enum {
   ACT_TRACK,
   ACT_TODAY,
@@ -5983,20 +5968,39 @@ enum {
   ACT_TAGS,
   ACT_ESTIMATE,
   ACT_DEADLINE,
+  ACT_BACKLOG,   // must stay last before ACT_COUNT (num_rows drops it otherwise)
   ACT_COUNT,
 };
+// ActionCtx declared with the forward decls.
 static Window *s_action_window = NULL;
 static MenuLayer *s_action_menu = NULL;
 static StatusBarLayer *s_action_status_bar = NULL;
 static char s_action_task_id[MAX_ID_LEN] = "";
+static ActionCtx s_action_ctx = ACTX_TODAY;
+static bool s_action_in_backlog = false;
 
 static bool action_task_is_tracked(void) {
   return s_tracking_task_id[0] != '\0' &&
          strncmp(s_tracking_task_id, s_action_task_id, MAX_ID_LEN) == 0;
 }
 
+// The Task* for s_action_task_id: the today list, else a browsed task.
+static Task *resolve_action_task(void) {
+  Task *t = find_task_by_id(s_action_task_id);
+#if PROJECTS_BROWSER
+  if (!t && s_browse_tasks) {
+    for (int i = 0; i < s_browse_task_count; i++) {
+      if (strncmp(s_browse_tasks[i].id, s_action_task_id, MAX_ID_LEN) == 0) {
+        return &s_browse_tasks[i];
+      }
+    }
+  }
+#endif
+  return t;
+}
+
 static uint16_t action_get_num_rows(MenuLayer *ml, uint16_t section, void *ctx) {
-  return ACT_COUNT;
+  return s_action_ctx == ACTX_PROJECT ? ACT_COUNT : ACT_COUNT - 1;
 }
 
 static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, void *c) {
@@ -6010,6 +6014,7 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
     case ACT_TAGS:       label = "Edit tags"; break;
     case ACT_ESTIMATE:   label = "Set estimate"; break;
     case ACT_DEADLINE:   label = "Set deadline"; break;
+    case ACT_BACKLOG:    label = s_action_in_backlog ? "Move to list" : "Move to backlog"; break;
   }
   menu_cell_basic_draw(ctx, cell, label, NULL, NULL);
 }
@@ -6017,7 +6022,7 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
 static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
   backlight_touch();
   uint16_t row = idx->row;
-  Task *t = find_task_by_id(s_action_task_id);
+  Task *t = resolve_action_task();
   window_stack_pop(true); // close the menu; targets push onto the list below it
   switch (row) {
     case ACT_TRACK:
@@ -6041,6 +6046,9 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
       break;
     case ACT_UNSCHEDULE:
       begin_pending_reschedule(RESCHEDULE_UNSCHEDULE);
+      break;
+    case ACT_BACKLOG:
+      begin_pending_reschedule(s_action_in_backlog ? RESCHEDULE_FROM_BACKLOG : RESCHEDULE_TO_BACKLOG);
       break;
     case ACT_NOTES:
       if (t) {
@@ -6083,11 +6091,13 @@ static void action_window_unload(Window *window) {
   s_action_status_bar = NULL;
 }
 
-static void push_action_menu(const char *task_id) {
+static void push_action_menu(const char *task_id, ActionCtx ctx, bool in_backlog) {
   if (!task_id || task_id[0] == '\0') {
     return;
   }
   str_copy(s_action_task_id, task_id, sizeof(s_action_task_id));
+  s_action_ctx = ctx;
+  s_action_in_backlog = in_backlog;
   if (!s_action_window) {
     s_action_window = window_create();
     window_set_window_handlers(s_action_window, (WindowHandlers) {
