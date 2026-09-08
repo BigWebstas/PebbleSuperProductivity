@@ -1481,6 +1481,19 @@ function computeStats(state) {
   var completedTodayCount = 0;
   var completedYesterdayCount = 0;
 
+  // Last 7 days incl. today (oldest first) - a small worklog on the Stats page.
+  var DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var weekBuckets = [0, 0, 0, 0, 0, 0, 0];
+  var weekLabels = [];
+  var weekIndex = {};
+  for (var wi = 0; wi < 7; wi++) {
+    var wd = new Date();
+    wd.setDate(wd.getDate() - (6 - wi));
+    weekIndex[dateToDateStr(wd)] = wi;
+    weekLabels.push(wi === 6 ? 'Today' : DOW[wd.getDay()]);
+  }
+  var workedWeekMs = 0;
+
   Object.keys(tasks).forEach(function (id) {
     var t = tasks[id];
     if (!t || !t.title) {
@@ -1492,6 +1505,15 @@ function computeStats(state) {
     if (!hasSubs) {
       workedTodayMs += (t.timeSpentOnDay && t.timeSpentOnDay[today]) || 0;
       workedYesterdayMs += (t.timeSpentOnDay && t.timeSpentOnDay[yesterday]) || 0;
+      if (t.timeSpentOnDay) {
+        Object.keys(t.timeSpentOnDay).forEach(function (ds) {
+          if (ds in weekIndex) {
+            var v = t.timeSpentOnDay[ds] || 0;
+            weekBuckets[weekIndex[ds]] += v;
+            workedWeekMs += v;
+          }
+        });
+      }
     }
     // "Completed yesterday" leans on doneOn, which only survives replay for
     // watch-completed / recently-completed tasks - so it can undercount.
@@ -1547,6 +1569,10 @@ function computeStats(state) {
     return { id: p.id, title: p.title, taskCount: count };
   });
 
+  var week = weekLabels.map(function (label, i) {
+    return { label: label, ms: weekBuckets[i] };
+  });
+
   return {
     estimateRemainingMs: estimateRemainingMs,
     workedTodayMs: workedTodayMs,
@@ -1554,6 +1580,8 @@ function computeStats(state) {
     completedTodayCount: completedTodayCount,
     completedYesterdayCount: completedYesterdayCount,
     projects: projects,
+    week: week,
+    workedWeekMs: workedWeekMs,
   };
 }
 

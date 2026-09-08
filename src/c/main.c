@@ -675,7 +675,9 @@ static bool s_stop_at_midnight = false;
 // Stats row (STATS_ROW_ACTIVE() is a compile-time false) and ~zero RAM to
 // spare.
 static bool s_stats_enabled = true;
-static char s_stats_projects[640] = "";
+// The Stats page's scrollable text: a "\x02"-prefixed section header line, then
+// its lines, repeated - "Last 7 days" (per-day tracked time) then "Projects".
+static char s_stats_projects[832] = "";
 static int s_stats_est_remaining_ms = 0;
 static int s_stats_worked_today_ms = 0;
 static int s_stats_done_today = 0;
@@ -5877,24 +5879,38 @@ static int16_t stats_draw_metric(GContext *ctx, int16_t y, int16_t w,
   return y + STATS_VALUE_H + STATS_GAP;
 }
 
-static int stats_project_line_count(void) {
+// Counts s_stats_projects' lines by kind: "\x02"-prefixed section headers draw
+// as a black bar (STATS_LABEL_H + 2), the rest as plain lines (STATS_LINE_H).
+static void stats_text_line_counts(int *label_lines, int *text_lines) {
+  *label_lines = 0;
+  *text_lines = 0;
   if (s_stats_projects[0] == '\0') {
-    return 1; // the "None" line
+    *text_lines = 1;
+    return;
   }
-  int n = 1;
+  bool sol = true;
   for (const char *p = s_stats_projects; *p; p++) {
+    if (sol) {
+      if (*p == '\x02') {
+        (*label_lines)++;
+      } else {
+        (*text_lines)++;
+      }
+      sol = false;
+    }
     if (*p == '\n') {
-      n++;
+      sol = true;
     }
   }
-  return n;
 }
 
 static int16_t stats_content_height(void) {
+  int label_lines, text_lines;
+  stats_text_line_counts(&label_lines, &text_lines);
   return (s_yesterday_stats_enabled ? STATS_LABEL_H + 2 : 0)  // Today/Yesterday bar
        + (STATS_LABEL_H + STATS_VALUE_H + STATS_GAP) * 7       // the seven metrics
-       + STATS_LABEL_H + 2                                     // PROJECTS bar
-       + stats_project_line_count() * STATS_LINE_H
+       + label_lines * (STATS_LABEL_H + 2)
+       + text_lines * STATS_LINE_H
        + 8;
 }
 
@@ -5952,11 +5968,6 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   y = stats_draw_metric(ctx, y, w, yd ? "Done yesterday" : "Completed today", done_buf);
   y = stats_draw_metric(ctx, y, w, "Focus sessions", yd ? "-" : focus_buf);
 
-  fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
-  graphics_context_set_text_color(ctx, GColorWhite);
-  draw_text(ctx, "PROJECTS", STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-  y += STATS_LABEL_H + 2;
-
   graphics_context_set_text_color(ctx, GColorBlack);
   GFont line_font = fonts_get_system_font(STATS_LINE_FONT);
   if (s_stats_projects[0] == '\0') {
@@ -5965,6 +5976,8 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     return;
   }
+  // Verbatim lines from s_stats_projects: a "\x02" prefix marks a section
+  // header (black bar), everything else is a plain line. See handleStatsRequest.
   const char *p = s_stats_projects;
   char line[80];
   while (*p) {
@@ -5975,10 +5988,20 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
     }
     memcpy(line, p, len);
     line[len] = '\0';
-    graphics_draw_text(ctx, line, line_font,
-                        GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LINE_H),
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-    y += STATS_LINE_H;
+    if (line[0] == '\x02') {
+      fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
+      graphics_context_set_text_color(ctx, GColorWhite);
+      draw_text(ctx, line + 1, STATS_LABEL_FONT,
+                GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
+                GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      graphics_context_set_text_color(ctx, GColorBlack);
+      y += STATS_LABEL_H + 2;
+    } else {
+      graphics_draw_text(ctx, line, line_font,
+                          GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LINE_H),
+                          GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+      y += STATS_LINE_H;
+    }
     if (!nl) {
       break;
     }

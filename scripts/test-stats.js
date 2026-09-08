@@ -101,6 +101,20 @@ check('worked today sums timeSpentOnDay[today] across leaf tasks only', () => {
   assert.strictEqual(store.computeStats(s).workedTodayMs, 1500000);
 });
 
+check('week: 7 buckets oldest-first, last labelled "Today", workedWeekMs is their sum', () => {
+  const iso = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
+  const s = build([
+    addTask({ id: 'a', title: 'A', timeSpentOnDay: { [iso(0)]: 600000, [iso(3)]: 1200000, [iso(9)]: 999 } }),
+    addTask({ id: 'b', title: 'B', timeSpentOnDay: { [iso(0)]: 300000 } }),
+  ]);
+  const stats = store.computeStats(s);
+  assert.strictEqual(stats.week.length, 7);
+  assert.strictEqual(stats.week[6].label, 'Today');
+  assert.strictEqual(stats.week[6].ms, 900000);   // a + b today
+  assert.strictEqual(stats.week[3].ms, 1200000);  // a, 3 days ago
+  assert.strictEqual(stats.workedWeekMs, 2100000); // the iso(9) entry is outside the window
+});
+
 check('a roll-up parent is skipped for worked-time; its subtasks are counted', () => {
   const s = build([
     addTask({ id: 'p', title: 'P', subTaskIds: ['s1', 's2'], timeSpentOnDay: dayMap(9999999) }),

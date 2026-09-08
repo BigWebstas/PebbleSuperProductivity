@@ -780,11 +780,24 @@ function handleStatsRequest() {
     return;
   }
   var stats = store.computeStats(loadState());
-  var lines = stats.projects.map(function (p) {
+  // STATS_TEXT is a preformatted block the watch prints verbatim. A line
+  // starting with "\x02" is a section header (drawn as a black bar). First the
+  // last-7-days worklog, then the per-project open-task counts.
+  var fmtDur = function (ms) {
+    var m = Math.round((ms || 0) / 60000);
+    if (m <= 0) { return '0'; }
+    var h = Math.floor(m / 60);
+    return h ? (h + 'h ' + (m % 60) + 'm') : (m + 'm');
+  };
+  var weekBlock = '\x02Last 7 days\n' +
+    stats.week.map(function (d) { return d.label + '  ' + fmtDur(d.ms); }).join('\n') +
+    '\nWeek  ' + fmtDur(stats.workedWeekMs);
+  var projectBlock = '\x02Projects\n' + stats.projects.map(function (p) {
     return String(p.title).replace(/[\t\n]/g, ' ').slice(0, 40) + ' - ' + p.taskCount;
   }).join('\n');
-  if (lines.length > 600) {
-    lines = lines.slice(0, 600);
+  var lines = weekBlock + '\n' + projectBlock;
+  if (lines.length > 800) {
+    lines = lines.slice(0, 800);
   }
   sendWithRetry({
     MSG_TYPE: MSG_STATS_DATA,
