@@ -84,6 +84,7 @@ var MSG_TASK_SET_BACKLOG = 44;      // watch -> phone: TASK_ID + PROJECT_ID + PR
 var MSG_TASK_SET_ESTIMATE = 45;     // watch -> phone: TASK_ID + TASK_TIME_ESTIMATE_MS (0 clears)
 var MSG_TASK_SET_DEADLINE = 46;     // watch -> phone: TASK_ID + TASK_DEADLINE_DAYS (days from today, <0 clears)
 var MSG_TASK_TOGGLE_TAG = 47;       // watch -> phone: TASK_ID + PROJECT_ID (tag id) + PROJECT_TASK_BACKLOG (1 add / 0 remove)
+var MSG_TASK_SET_DUE_TIME = 48;     // watch -> phone: TASK_ID + TASK_DUE_MIN (hour*60; phone picks today/tomorrow)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -1687,6 +1688,43 @@ function handleTaskReschedule(taskId, when, projectId) {
     });
 }
 
+// Watch "Schedule at <hour>": dueMin is the hour * 60. Set dueWithTime to the
+// next occurrence of that clock time - today if it's still in the future, else
+// tomorrow. Plain updateTask (like handleTaskReschedule), clearing dueDay.
+function handleTaskSetDueTime(taskId, dueMin) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task || typeof dueMin !== 'number') {
+    return;
+  }
+  var d = new Date();
+  d.setHours(Math.floor(dueMin / 60), dueMin % 60, 0, 0);
+  if (d.getTime() <= Date.now()) {
+    d.setDate(d.getDate() + 1);
+  }
+  var changes = { dueWithTime: d.getTime(), dueDay: null, remindAt: null };
+  state.task[taskId] = Object.assign({}, task, changes);
+  saveState(state);
+  sendTaskListToWatch(watchTaskList(state, config));
+
+  var clientId = getOrCreateClientId();
+  var failureMsg = null;
+  uploadOps([buildTaskUpdateOp(taskId, changes, clientId)], config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload due-time change: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, failureMsg);
+    });
+}
+
 // Watch tag editor: add (assign) or remove a tag from a task. A plain
 // updateTask { tagIds } - the same op the desktop's tag chip fires;
 // task-store's tagIds-aware paths replay it (mergeTaskChanges).
@@ -2954,6 +2992,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_SET_DEADLINE:
       handleTaskSetDeadline(payload.TASK_ID, payload.TASK_DEADLINE_DAYS);
+      break;
+    case MSG_TASK_SET_DUE_TIME:
+      handleTaskSetDueTime(payload.TASK_ID, payload.TASK_DUE_MIN);
       break;
     case MSG_PRESENCE_STOP:
       if (presenceClient && presenceLastSessionId) {

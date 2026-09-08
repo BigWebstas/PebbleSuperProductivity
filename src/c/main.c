@@ -166,6 +166,10 @@ enum {
   // is the tag id, PROJECT_TASK_BACKLOG is 1 to add / 0 to remove. Replays as
   // a plain [Task Shared] updateTask { tagIds }.
   MSG_TASK_TOGGLE_TAG = 47,         // watch -> phone: TASK_ID + PROJECT_ID + PROJECT_TASK_BACKLOG
+  // "Schedule at <hour>" from the action menu. TASK_DUE_MIN carries the hour as
+  // minutes since midnight; the phone sets dueWithTime to the next occurrence
+  // of that time (today if still future, else tomorrow).
+  MSG_TASK_SET_DUE_TIME = 48,       // watch -> phone: TASK_ID + TASK_DUE_MIN
 };
 
 // STATUS_CODE values sent from the phone.
@@ -1412,10 +1416,11 @@ static void show_notes_overlay(Task *task);
 static void show_project_notes_overlay(TaskGroup *group);
 static void hide_notes_overlay(void);
 static void push_notes_window(void);
-typedef enum { PICK_ESTIMATE, PICK_DEADLINE, PICK_HABIT } PickKind;
+typedef enum { PICK_ESTIMATE, PICK_DEADLINE, PICK_HABIT, PICK_TIME } PickKind;
 // task_id is a habit id for PICK_HABIT. current: ms (estimate) / days-from-today
-// or DEADLINE_NONE (deadline) / the counter's value (habit).
+// or DEADLINE_NONE (deadline) / the counter's value (habit) / hour 0-23 (time).
 static void push_value_picker(PickKind kind, const char *task_id, int current);
+static void send_task_set_due_time(const char *task_id, int hour);
 typedef enum { ACTX_TODAY, ACTX_PROJECT, ACTX_TAG } ActionCtx;
 static void push_action_menu(const char *task_id, ActionCtx ctx, bool in_backlog);
 static void pending_toggle_timer_callback(void *data);
@@ -2687,6 +2692,10 @@ static void send_pending_retry(void) {
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_int32(iter, KEY_TASK_DEADLINE_DAYS, s_retry_int);
       break;
+    case MSG_TASK_SET_DUE_TIME:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_int32(iter, KEY_TASK_DUE_MIN, s_retry_int);
+      break;
     case MSG_TASK_TOGGLE_TAG:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2); // the tag id
@@ -2817,6 +2826,11 @@ static void send_task_set_deadline(const char *task_id, int32_t days) {
 // Add (assign != 0) or remove a tag from a task.
 static void send_toggle_tag(const char *task_id, const char *tag_id, int32_t assign) {
   begin_send(MSG_TASK_TOGGLE_TAG, task_id, tag_id, assign);
+}
+
+// Schedule a task at `hour`:00 (the phone picks the day).
+static void send_task_set_due_time(const char *task_id, int hour) {
+  begin_send(MSG_TASK_SET_DUE_TIME, task_id, NULL, hour * 60);
 }
 #endif
 
@@ -5755,6 +5769,8 @@ static const int s_dl_ladder_days[] = { -1, 0, 1, 2, 3, 7, 14, 30 };
 // Habit counter value - a spread that covers small daily counters and the
 // odd big one. Sent as a delta off the current value (MSG_HABIT_ADJUST).
 static const int s_habit_ladder[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 40, 50, 75, 100 };
+// Hour of the day for "Schedule at..." - the phone picks today or tomorrow.
+static const int s_time_ladder_hr[] = { 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22 };
 #define ARRLEN(a) (int)(sizeof(a) / sizeof((a)[0]))
 static Window *s_pick_window = NULL;
 static Layer *s_pick_layer = NULL;
@@ -5766,11 +5782,13 @@ static int s_pick_idx = 0;
 static int pick_ladder_len(void) {
   return s_pick_kind == PICK_ESTIMATE ? ARRLEN(s_est_ladder_min)
        : s_pick_kind == PICK_DEADLINE ? ARRLEN(s_dl_ladder_days)
+       : s_pick_kind == PICK_TIME ? ARRLEN(s_time_ladder_hr)
        : ARRLEN(s_habit_ladder);
 }
 static int pick_ladder_val(int i) {
   return s_pick_kind == PICK_ESTIMATE ? s_est_ladder_min[i]
        : s_pick_kind == PICK_DEADLINE ? s_dl_ladder_days[i]
+       : s_pick_kind == PICK_TIME ? s_time_ladder_hr[i]
        : s_habit_ladder[i];
 }
 
@@ -5779,6 +5797,18 @@ static void pick_format(char *out, size_t len) {
   int v = pick_ladder_val(s_pick_idx);
   if (s_pick_kind == PICK_HABIT) {
     snprintf(out, len, "%d", v);
+    return;
+  }
+  if (s_pick_kind == PICK_TIME) {
+    if (clock_is_24h_style()) {
+      snprintf(out, len, "%d:00", v);
+    } else {
+      int h12 = v % 12;
+      if (h12 == 0) {
+        h12 = 12;
+      }
+      snprintf(out, len, "%d:00 %s", h12, v < 12 ? "AM" : "PM");
+    }
     return;
   }
   if (s_pick_kind == PICK_ESTIMATE) {
@@ -5836,7 +5866,8 @@ static void pick_layer_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_text_color(ctx, GColorBlack);
   int16_t cy = b.size.h / 2;
   draw_text(ctx, s_pick_kind == PICK_ESTIMATE ? "Estimate"
-                 : s_pick_kind == PICK_DEADLINE ? "Deadline" : "Count",
+                 : s_pick_kind == PICK_DEADLINE ? "Deadline"
+                 : s_pick_kind == PICK_TIME ? "Schedule at" : "Count",
             CHROME_FONT_KEY,
             GRect(0, cy - 44, b.size.w, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
   char val[16];
@@ -5892,6 +5923,11 @@ static void pick_select_click(ClickRecognizerRef r, void *c) {
       t->time_estimate_ms = (int)ms;
     }
     send_task_set_estimate(s_pick_task_id, ms);
+  } else if (s_pick_kind == PICK_TIME) {
+    if (t) {
+      t->due_min = v * 60; // the phone decides today vs tomorrow
+    }
+    send_task_set_due_time(s_pick_task_id, v);
   } else {
     if (t) {
       t->deadline_days = (v < 0) ? DEADLINE_NONE : v;
@@ -5942,7 +5978,7 @@ static void push_value_picker(PickKind kind, const char *task_id, int current) {
   } else if (kind == PICK_DEADLINE) {
     s_pick_idx = (current == DEADLINE_NONE) ? 0 : pick_nearest_idx(current);
   } else {
-    s_pick_idx = pick_nearest_idx(current); // habit value
+    s_pick_idx = pick_nearest_idx(current); // habit value, or hour 0-23 for PICK_TIME
   }
   if (!s_pick_window) {
     s_pick_window = window_create();
@@ -5963,6 +5999,7 @@ enum {
   ACT_TRACK,
   ACT_TODAY,
   ACT_TOMORROW,
+  ACT_AT,
   ACT_UNSCHEDULE,
   ACT_NOTES,
   ACT_TAGS,
@@ -6009,6 +6046,7 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
     case ACT_TRACK:      label = action_task_is_tracked() ? "Stop tracking" : "Start tracking"; break;
     case ACT_TODAY:      label = "Schedule today"; break;
     case ACT_TOMORROW:   label = "Schedule tomorrow"; break;
+    case ACT_AT:         label = "Schedule at..."; break;
     case ACT_UNSCHEDULE: label = "Unschedule"; break;
     case ACT_NOTES:      label = "Notes"; break;
     case ACT_TAGS:       label = "Edit tags"; break;
@@ -6044,6 +6082,18 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
     case ACT_TOMORROW:
       begin_pending_reschedule(RESCHEDULE_TOMORROW);
       break;
+    case ACT_AT: {
+      int hour = 9;
+      if (t && t->due_min >= 0) {
+        hour = t->due_min / 60;
+      } else {
+        time_t now = time(NULL);
+        struct tm *lt = localtime(&now);
+        hour = lt->tm_hour;
+      }
+      push_value_picker(PICK_TIME, s_action_task_id, hour);
+      break;
+    }
     case ACT_UNSCHEDULE:
       begin_pending_reschedule(RESCHEDULE_UNSCHEDULE);
       break;
