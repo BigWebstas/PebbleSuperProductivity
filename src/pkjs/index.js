@@ -616,7 +616,7 @@ function fillTaskFields(dict, t) {
     // Short issue-tracker key + optional story points ("PROJ-123 3p" / "#42"),
     // drawn as a badge at the start of the task's subtitle line. Already
     // length-shaped by task-store's taskIssueKey.
-    dict.TASK_ISSUE_KEY = String(t.issueKey).slice(0, 17);
+    dict.TASK_ISSUE_KEY = String(t.issueKey).slice(0, 21);
   }
   if (t.timeSpent) {
     // AppMessage ints are 32-bit signed - cap well under the ~24.8 days

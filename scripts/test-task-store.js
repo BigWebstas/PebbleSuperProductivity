@@ -309,6 +309,22 @@ check('getActiveTasks issueKey: Jira key as-is, numeric issue as #N, opaque drop
   assert.strictEqual(rows.find((t) => t.id === 'f').issueKey, '#7 0.5p');
 });
 
+check('getActiveTasks issueKey: trailing "!" when the upstream issue changed', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Stale', isDone: false, dueDay: today, issueId: 'PROJ-1', issueType: 'JIRA', issueWasUpdated: true }),
+      addTask({ id: 'b', title: 'Stale+pts', isDone: false, dueDay: today, issueId: '9', issueType: 'GITHUB', issuePoints: 3, issueWasUpdated: true }),
+      addTask({ id: 'c', title: 'Fresh', isDone: false, dueDay: today, issueId: 'PROJ-2', issueType: 'JIRA' }),
+    ],
+    state
+  );
+  const rows = active(state, 30, false, true);
+  assert.strictEqual(rows.find((t) => t.id === 'a').issueKey, 'PROJ-1!');
+  assert.strictEqual(rows.find((t) => t.id === 'b').issueKey, '#9 3p!');
+  assert.strictEqual(rows.find((t) => t.id === 'c').issueKey, 'PROJ-2');
+});
+
 check('getActiveTasks carries remindAt through to the watch row', () => {
   const state = store.emptyState();
   const noon = new Date(); noon.setHours(12, 0, 0, 0);

@@ -85,9 +85,11 @@ function taskDeadlineDays(t) {
 
 // Short issue-tracker key for a task linked to an issue (Jira/GitHub/...). Jira
 // etc. store the key itself in issueId ("PROJ-123"); GitHub/GitLab/Gitea store
-// a plain number, shown as "#123". Story points, when set, follow as " 3p".
-// Long/opaque ids (CalDAV uids) are dropped - no useful badge. undefined when
-// the task has no issue.
+// a plain number, shown as "#123". Story points, when set, follow as " 3p". A
+// trailing "!" means the linked issue changed upstream (issueWasUpdated) - it's
+// attached to the badge so it reads apart from the standalone "! 2d" deadline
+// marker. Long/opaque ids (CalDAV uids) are dropped - no useful badge.
+// undefined when the task has no issue.
 function taskIssueKey(t) {
   if (!t || !t.issueId) {
     return undefined;
@@ -100,6 +102,9 @@ function taskIssueKey(t) {
   var pts = t.issuePoints;
   if (typeof pts === 'number' && isFinite(pts) && pts > 0) {
     label += ' ' + (Math.round(pts * 10) / 10) + 'p';
+  }
+  if (t.issueWasUpdated) {
+    label += '!';
   }
   return label;
 }
