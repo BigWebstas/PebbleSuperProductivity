@@ -1,8 +1,9 @@
 #include <pebble.h>
 
 #ifndef PBL_PLATFORM_APLITE
-// Generated: Material-icon-name -> bitmap resource table for the per-habit icon
-// on the Habits list. Regenerate with scripts/gen-habit-icons.py.
+// Generated: index -> bitmap resource array (HABIT_ICON_RES) for the per-habit
+// icon on the Habits list. The phone maps the Material icon name to the index
+// and sends it in HABIT_ICON. Regenerate with scripts/gen-habit-icons.py.
 #include "habit_icons.h"
 #endif
 
@@ -359,20 +360,6 @@ static int s_habit_incoming_total = 0;
 // struct so the persisted habit cache stays pointer-free.
 static GBitmap *s_habit_icon_bmp[MAX_HABITS];
 
-// HABIT_ICONS[] lookup by Material icon name. Linear - the table is ~36 long
-// and this runs once per habit on sync, not per frame.
-static int8_t habit_icon_index(const char *name) {
-  if (!name || name[0] == '\0') {
-    return -1;
-  }
-  for (int i = 0; i < HABIT_ICON_COUNT; i++) {
-    if (strcmp(HABIT_ICONS[i].name, name) == 0) {
-      return (int8_t)i;
-    }
-  }
-  return -1;
-}
-
 static void rebuild_habit_icons(void) {
   for (int i = 0; i < MAX_HABITS; i++) {
     if (s_habit_icon_bmp[i]) {
@@ -382,7 +369,7 @@ static void rebuild_habit_icons(void) {
   }
   for (int i = 0; i < s_habit_count && i < MAX_HABITS; i++) {
     if (s_habits[i].icon_idx >= 0 && s_habits[i].icon_idx < HABIT_ICON_COUNT) {
-      s_habit_icon_bmp[i] = gbitmap_create_with_resource(HABIT_ICONS[s_habits[i].icon_idx].res);
+      s_habit_icon_bmp[i] = gbitmap_create_with_resource(HABIT_ICON_RES[s_habits[i].icon_idx]);
     }
   }
 }
@@ -4306,7 +4293,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habits[idx].countdown_ms = tuple_int(iterator, KEY_HABIT_COUNTDOWN_MS, 0);
       s_habits[idx].streak = tuple_int(iterator, KEY_HABIT_STREAK, 0);
       s_habits[idx].best_streak = tuple_int(iterator, KEY_HABIT_BEST_STREAK, 0);
-      s_habits[idx].icon_idx = habit_icon_index(tuple_str(iterator, KEY_HABIT_ICON, NULL));
+      {
+        int32_t ic = tuple_int(iterator, KEY_HABIT_ICON, -1);
+        s_habits[idx].icon_idx = (ic >= 0 && ic < HABIT_ICON_COUNT) ? (int8_t)ic : -1;
+      }
 #endif
       break;
     }

@@ -11,6 +11,7 @@ var sha256lib = require('./lib/sha256.js');
 var presence = require('./lib/presence-client.js');
 var opQueue = require('./lib/op-queue.js');
 var timeline = require('./lib/timeline.js');
+var habitIconMap = require('./lib/habit-icon-map.js');
 
 // Keep in sync with the enums at the top of src/c/main.c.
 var MSG_TASK_SYNC_START = 1;
@@ -658,10 +659,12 @@ function sendHabitAt(habits, index) {
   if (h.bestStreak && h.bestStreak > (h.streak || 0)) {
     dict.HABIT_BEST_STREAK = Math.min(h.bestStreak, 9999);
   }
-  // Material icon name - the watch keeps a bitmap for a curated subset and
-  // ignores names it doesn't have.
-  if (h.icon) {
-    dict.HABIT_ICON = String(h.icon).slice(0, 31);
+  // Material icon: the watch bundles a curated subset as bitmaps and indexes
+  // them by wire position (habit-icon-map.js). Names outside the set are
+  // dropped. A leading "outline"/"round" style prefix is not used by SP's
+  // stored value, so the bare name is the key.
+  if (h.icon && habitIconMap[h.icon] != null) {
+    dict.HABIT_ICON = habitIconMap[h.icon];
   }
   sendWithRetry(dict, function () {
     sendHabitAt(habits, index + 1);

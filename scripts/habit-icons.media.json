@@ -89,6 +89,94 @@
   },
   {
     "type": "bitmap",
+    "name": "IMAGE_HI_SPORTS_BASKETBALL",
+    "file": "images/hi/sports-basketball.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SPORTS_TENNIS",
+    "file": "images/hi/sports-tennis.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SPORTS_MARTIAL_ARTS",
+    "file": "images/hi/sports-martial-arts.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_HIKING",
+    "file": "images/hi/hiking.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_DOWNHILL_SKIING",
+    "file": "images/hi/downhill-skiing.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SKATEBOARDING",
+    "file": "images/hi/skateboarding.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_ROWING",
+    "file": "images/hi/rowing.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PEDAL_BIKE",
+    "file": "images/hi/pedal-bike.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
     "name": "IMAGE_HI_FREE_BREAKFAST",
     "file": "images/hi/free-breakfast.png",
     "targetPlatforms": [
@@ -155,6 +243,116 @@
   },
   {
     "type": "bitmap",
+    "name": "IMAGE_HI_LOCAL_PIZZA",
+    "file": "images/hi/local-pizza.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_LUNCH_DINING",
+    "file": "images/hi/lunch-dining.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_DINNER_DINING",
+    "file": "images/hi/dinner-dining.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_BAKERY_DINING",
+    "file": "images/hi/bakery-dining.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_EGG",
+    "file": "images/hi/egg.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_LOCAL_DRINK",
+    "file": "images/hi/local-drink.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_COFFEE",
+    "file": "images/hi/coffee.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_NO_FOOD",
+    "file": "images/hi/no-food.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_RAMEN_DINING",
+    "file": "images/hi/ramen-dining.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_ICECREAM",
+    "file": "images/hi/icecream.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
     "name": "IMAGE_HI_BEDTIME",
     "file": "images/hi/bedtime.png",
     "targetPlatforms": [
@@ -177,8 +375,8 @@
   },
   {
     "type": "bitmap",
-    "name": "IMAGE_HI_LOCAL_FLORIST",
-    "file": "images/hi/local-florist.png",
+    "name": "IMAGE_HI_PSYCHOLOGY",
+    "file": "images/hi/psychology.png",
     "targetPlatforms": [
       "basalt",
       "chalk",
@@ -188,8 +386,8 @@
   },
   {
     "type": "bitmap",
-    "name": "IMAGE_HI_PARK",
-    "file": "images/hi/park.png",
+    "name": "IMAGE_HI_SPA",
+    "file": "images/hi/spa.png",
     "targetPlatforms": [
       "basalt",
       "chalk",
@@ -199,8 +397,74 @@
   },
   {
     "type": "bitmap",
-    "name": "IMAGE_HI_PETS",
-    "file": "images/hi/pets.png",
+    "name": "IMAGE_HI_HEALING",
+    "file": "images/hi/healing.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_MONITOR_HEART",
+    "file": "images/hi/monitor-heart.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_MEDICAL_SERVICES",
+    "file": "images/hi/medical-services.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_MOOD",
+    "file": "images/hi/mood.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SENTIMENT_SATISFIED",
+    "file": "images/hi/sentiment-satisfied.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_AIR",
+    "file": "images/hi/air.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_WAVES",
+    "file": "images/hi/waves.png",
     "targetPlatforms": [
       "basalt",
       "chalk",
@@ -298,8 +562,448 @@
   },
   {
     "type": "bitmap",
-    "name": "IMAGE_HI_SMOKE_FREE",
-    "file": "images/hi/smoke-free.png",
+    "name": "IMAGE_HI_AUTO_STORIES",
+    "file": "images/hi/auto-stories.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_HISTORY_EDU",
+    "file": "images/hi/history-edu.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SCIENCE",
+    "file": "images/hi/science.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CALCULATE",
+    "file": "images/hi/calculate.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PALETTE",
+    "file": "images/hi/palette.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PIANO",
+    "file": "images/hi/piano.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_MIC",
+    "file": "images/hi/mic.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_HEADPHONES",
+    "file": "images/hi/headphones.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_TRANSLATE",
+    "file": "images/hi/translate.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_DRAW",
+    "file": "images/hi/draw.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_KEYBOARD",
+    "file": "images/hi/keyboard.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PHOTO_CAMERA",
+    "file": "images/hi/photo-camera.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_MOVIE",
+    "file": "images/hi/movie.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CLEANING_SERVICES",
+    "file": "images/hi/cleaning-services.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_LOCAL_LAUNDRY_SERVICE",
+    "file": "images/hi/local-laundry-service.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_WASH",
+    "file": "images/hi/wash.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CHECKROOM",
+    "file": "images/hi/checkroom.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_BED",
+    "file": "images/hi/bed.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_KITCHEN",
+    "file": "images/hi/kitchen.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_YARD",
+    "file": "images/hi/yard.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_GRASS",
+    "file": "images/hi/grass.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_HANDYMAN",
+    "file": "images/hi/handyman.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_RECYCLING",
+    "file": "images/hi/recycling.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SAVINGS",
+    "file": "images/hi/savings.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SHOPPING_CART",
+    "file": "images/hi/shopping-cart.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PAYMENTS",
+    "file": "images/hi/payments.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_ACCOUNT_BALANCE_WALLET",
+    "file": "images/hi/account-balance-wallet.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_WORK",
+    "file": "images/hi/work.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_BUSINESS_CENTER",
+    "file": "images/hi/business-center.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_ATTACH_MONEY",
+    "file": "images/hi/attach-money.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_TRENDING_UP",
+    "file": "images/hi/trending-up.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_RECEIPT_LONG",
+    "file": "images/hi/receipt-long.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_LOCAL_FLORIST",
+    "file": "images/hi/local-florist.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PARK",
+    "file": "images/hi/park.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PETS",
+    "file": "images/hi/pets.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_ECO",
+    "file": "images/hi/eco.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_FOREST",
+    "file": "images/hi/forest.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_TERRAIN",
+    "file": "images/hi/terrain.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_BEACH_ACCESS",
+    "file": "images/hi/beach-access.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CLOUD",
+    "file": "images/hi/cloud.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_WATER",
+    "file": "images/hi/water.png",
     "targetPlatforms": [
       "basalt",
       "chalk",
@@ -353,30 +1057,8 @@
   },
   {
     "type": "bitmap",
-    "name": "IMAGE_HI_CLEANING_SERVICES",
-    "file": "images/hi/cleaning-services.png",
-    "targetPlatforms": [
-      "basalt",
-      "chalk",
-      "diorite",
-      "emery"
-    ]
-  },
-  {
-    "type": "bitmap",
-    "name": "IMAGE_HI_SAVINGS",
-    "file": "images/hi/savings.png",
-    "targetPlatforms": [
-      "basalt",
-      "chalk",
-      "diorite",
-      "emery"
-    ]
-  },
-  {
-    "type": "bitmap",
-    "name": "IMAGE_HI_SHOPPING_CART",
-    "file": "images/hi/shopping-cart.png",
+    "name": "IMAGE_HI_SMOKE_FREE",
+    "file": "images/hi/smoke-free.png",
     "targetPlatforms": [
       "basalt",
       "chalk",
@@ -388,6 +1070,160 @@
     "type": "bitmap",
     "name": "IMAGE_HI_PHONE_IPHONE",
     "file": "images/hi/phone-iphone.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CALL",
+    "file": "images/hi/call.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CHAT",
+    "file": "images/hi/chat.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_GROUPS",
+    "file": "images/hi/groups.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_VOLUNTEER_ACTIVISM",
+    "file": "images/hi/volunteer-activism.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CELEBRATION",
+    "file": "images/hi/celebration.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_EMOJI_EVENTS",
+    "file": "images/hi/emoji-events.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_FLAG",
+    "file": "images/hi/flag.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_ALARM",
+    "file": "images/hi/alarm.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_TIMER",
+    "file": "images/hi/timer.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_EVENT",
+    "file": "images/hi/event.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_TODAY",
+    "file": "images/hi/today.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_TASK_ALT",
+    "file": "images/hi/task-alt.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CHECKLIST",
+    "file": "images/hi/checklist.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_DO_NOT_DISTURB_ON",
+    "file": "images/hi/do-not-disturb-on.png",
     "targetPlatforms": [
       "basalt",
       "chalk",
