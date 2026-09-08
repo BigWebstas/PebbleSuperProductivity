@@ -477,14 +477,14 @@ taskEstimateOptions + '\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableReflect" type="checkbox"' + (enableReflect ? ' checked' : '') + '>\n' +
-'    <label for="enableReflect">Log energy on Finish Day</label>\n' +
+'    <label for="enableReflect">Day review on Finish Day</label>\n' +
 '  </div>\n' +
 '  <p class="hint">\n' +
-'    Adds an energy check-in: press Select on the Finish Day row to log how\n' +
-'    the day felt (low / ok / good). Saved to the day\'s metric and synced to\n' +
-'    the desktop\'s productivity history. Long-press Finish Day still archives\n' +
-'    done tasks as before. Not available on original Pebble/Pebble Steel\n' +
-'    (aplite).\n' +
+'    Press Select on the Finish Day row for a quick review: energy\n' +
+'    (low / ok / good), a 1-4 day rating, and one thing to improve (dictated).\n' +
+'    Each is saved to the day\'s metric and synced to the desktop\'s\n' +
+'    productivity history. Long-press Finish Day still archives done tasks.\n' +
+'    Not available on original Pebble/Pebble Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +

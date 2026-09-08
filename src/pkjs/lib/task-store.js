@@ -1672,9 +1672,6 @@ function getActiveHabits(state, limit) {
         countdownMs: isCountdown ? (c.countdownDuration || 0) : 0,
         streak: tracksStreak ? habitStreak(c) : 0,
         bestStreak: tracksStreak ? habitBestStreak(c) : 0,
-        // Material icon name as SP stores it; the watch maps the ones it has a
-        // bitmap for (src/c/habit_icons.h) and ignores the rest.
-        icon: c.icon || '',
       };
     });
   rows.sort(function (a, b) { return titleCompare(a.title, b.title); });

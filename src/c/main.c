@@ -1,12 +1,5 @@
 #include <pebble.h>
 
-#ifndef PBL_PLATFORM_APLITE
-// Generated: index -> bitmap resource array (HABIT_ICON_RES) for the per-habit
-// icon on the Habits list. The phone maps the Material icon name to the index
-// and sends it in HABIT_ICON. Regenerate with scripts/gen-habit-icons.py.
-#include "habit_icons.h"
-#endif
-
 // Keep in sync by hand with package.json "version" on every bump - no runtime
 // API exposes it to C.
 #define APP_VERSION "0.6.48"
@@ -41,10 +34,11 @@
 #define KEY_HABIT_STREAK MESSAGE_KEY_HABIT_STREAK
 #define KEY_HABIT_BEST_STREAK MESSAGE_KEY_HABIT_BEST_STREAK
 #define KEY_HABIT_STREAK_NUDGE MESSAGE_KEY_HABIT_STREAK_NUDGE
-#define KEY_HABIT_ICON MESSAGE_KEY_HABIT_ICON
 #define KEY_CHECK_INDEX MESSAGE_KEY_CHECK_INDEX
 #define KEY_CHECK_VALUE MESSAGE_KEY_CHECK_VALUE
 #define KEY_METRIC_ENERGY MESSAGE_KEY_METRIC_ENERGY
+#define KEY_METRIC_RATING MESSAGE_KEY_METRIC_RATING
+#define KEY_METRIC_REFLECT_TEXT MESSAGE_KEY_METRIC_REFLECT_TEXT
 #define KEY_REFLECT_ENABLED MESSAGE_KEY_REFLECT_ENABLED
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
@@ -196,8 +190,10 @@ enum {
   // Toggle the CHECK_INDEX-th "- [ ]" / "- [x]" checklist line in a task's
   // notes markdown. Opened from the notes window (Select) when it has any.
   MSG_TASK_TOGGLE_CHECK = 51,       // watch -> phone: TASK_ID + CHECK_INDEX + CHECK_VALUE
-  // Today's energy check-in from the Reflect window (Select on Finish Day).
+  // The Reflect window (Select on Finish Day) - today's metric fields.
   MSG_METRIC_ENERGY = 52,           // watch -> phone: METRIC_ENERGY (1 low / 2 ok / 3 good)
+  MSG_METRIC_RATING = 53,           // watch -> phone: METRIC_RATING (impactOfWork 1-4)
+  MSG_METRIC_REFLECT = 54,          // watch -> phone: METRIC_REFLECT_TEXT (dictated improvement)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -352,10 +348,6 @@ typedef struct {
   // Longest run of goal-met days ever, sent only when it beats `streak` (0
   // otherwise). Shown as "best N" - a target once the current streak lapses.
   int best_streak;
-  // Index into HABIT_ICONS[] for the habit's Material icon, or -1 when the
-  // habit has no icon or one the watch doesn't bundle. The GBitmap itself
-  // lives in the s_habit_icon_bmp parallel array (not persisted).
-  int8_t icon_idx;
 #endif
 } Habit;
 
@@ -369,26 +361,6 @@ static Habit s_habits[MAX_HABITS];
 #endif
 static int s_habit_count = 0;
 static int s_habit_incoming_total = 0;
-#ifndef PBL_PLATFORM_APLITE
-// Per-habit icon GBitmaps, indexed by s_habits slot. Rebuilt on each habit
-// sync (rebuild_habit_icons), freed there and at deinit. Kept out of the Habit
-// struct so the persisted habit cache stays pointer-free.
-static GBitmap *s_habit_icon_bmp[MAX_HABITS];
-
-static void rebuild_habit_icons(void) {
-  for (int i = 0; i < MAX_HABITS; i++) {
-    if (s_habit_icon_bmp[i]) {
-      gbitmap_destroy(s_habit_icon_bmp[i]);
-      s_habit_icon_bmp[i] = NULL;
-    }
-  }
-  for (int i = 0; i < s_habit_count && i < MAX_HABITS; i++) {
-    if (s_habits[i].icon_idx >= 0 && s_habits[i].icon_idx < HABIT_ICON_COUNT) {
-      s_habit_icon_bmp[i] = gbitmap_create_with_resource(HABIT_ICON_RES[s_habits[i].icon_idx]);
-    }
-  }
-}
-#endif
 
 static Window *s_main_window;
 static MenuLayer *s_menu_layer;
@@ -538,9 +510,10 @@ static AppTimer *s_notes_load_timeout_timer = NULL;
 // 8s spuriously fired for notes opened right after launch. A truly unreachable
 // phone surfaces its own error from the send-retry path well before this.
 #define NOTES_LOAD_TIMEOUT_MS 20000
-// Distinguishes a dictation_status_callback for note-append from one for Add
-// Task - both share the single s_dictation_session/s_dictation_pending pair.
-static bool s_dictation_is_note_append = false;
+// Routes a dictation_status_callback: Add Task, a note-append, or a Reflect
+// "improvement" entry - all share the single s_dictation_session/pending pair.
+typedef enum { DICT_ADD_TASK, DICT_NOTE_APPEND, DICT_REFLECT } DictationTarget;
+static DictationTarget s_dictation_target = DICT_ADD_TASK;
 // Double-click detection on Select: a single click starts this timer instead of
 // committing the task-done toggle, so a second click on the same task can
 // cancel it and show notes. Tracked by id, not Task* (a background sync can
@@ -767,8 +740,16 @@ static bool s_stop_at_midnight = false;
 static bool s_habit_streak_nudge = false;
 static int s_streak_nudge_day = -1;
 // "Log energy on Finish Day" (config.enableReflect, default off). Select on the
-// Finish Day row opens the Reflect window; long-Select still archives.
+// Finish Day row opens the Reflect window; long-Select still archives. State
+// for the window itself (declared here so dictation_status_callback can flip
+// s_reflect_note_set) - see the "reflect" section far below.
 static bool s_reflect_enabled = false;
+static Window *s_reflect_window = NULL;
+static MenuLayer *s_reflect_menu = NULL;
+static StatusBarLayer *s_reflect_status_bar = NULL;
+static int s_reflect_energy = 0;  // 0 unset, 1 Low .. 3 Good
+static int s_reflect_rating = 0;  // 0 unset, 1..4
+static bool s_reflect_note_set = false;
 // "Stats" page row (config.enableStats, default on) and the last
 // MSG_STATS_DATA payload - kept across visits so a re-open shows the previous
 // numbers immediately while a fresh request is in flight. Declared here (not
@@ -1292,9 +1273,6 @@ static void clear_persisted_caches(void) {
 #endif
   s_task_count = 0;
   s_habit_count = 0;
-#ifndef PBL_PLATFORM_APLITE
-  rebuild_habit_icons(); // free the icon GBitmaps now the list is empty
-#endif
 }
 
 static const uint32_t PERSIST_KEY_TRACKING_ID = 110;
@@ -2866,6 +2844,12 @@ static void send_pending_retry(void) {
     case MSG_METRIC_ENERGY:
       dict_write_int32(iter, KEY_METRIC_ENERGY, s_retry_int);
       break;
+    case MSG_METRIC_RATING:
+      dict_write_int32(iter, KEY_METRIC_RATING, s_retry_int);
+      break;
+    case MSG_METRIC_REFLECT:
+      dict_write_cstring(iter, KEY_METRIC_REFLECT_TEXT, s_retry_str);
+      break;
     case MSG_TASK_TOGGLE_TAG:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2); // the tag id
@@ -3038,8 +3022,14 @@ static void dictation_status_callback(DictationSession *session, DictationSessio
                                        char *transcription, void *context) {
   s_dictation_pending = false;
   if (status == DictationSessionStatusSuccess) {
-    if (s_dictation_is_note_append) {
+    if (s_dictation_target == DICT_NOTE_APPEND) {
       send_note_append(s_notes_overlay_subject_id, transcription, s_notes_overlay_is_project);
+    } else if (s_dictation_target == DICT_REFLECT) {
+      begin_send(MSG_METRIC_REFLECT, transcription, NULL, 0);
+      s_reflect_note_set = true;
+      if (s_reflect_menu) {
+        menu_layer_reload_data(s_reflect_menu);
+      }
     } else {
       send_task_add(transcription);
     }
@@ -3061,7 +3051,7 @@ static void start_add_task_dictation(void) {
     // session (shouldn't happen).
     return;
   }
-  s_dictation_is_note_append = false;
+  s_dictation_target = DICT_ADD_TASK;
   s_dictation_pending = true;
   dictation_session_start(s_dictation_session);
 }
@@ -3073,7 +3063,18 @@ static void start_note_append_dictation(void) {
   if (s_dictation_pending || !s_dictation_session) {
     return;
   }
-  s_dictation_is_note_append = true;
+  s_dictation_target = DICT_NOTE_APPEND;
+  s_dictation_pending = true;
+  dictation_session_start(s_dictation_session);
+}
+
+// Reflect window "improvement" row - dictate one thing to improve; the callback
+// routes it to MSG_METRIC_REFLECT (today's metric.reflections[0]).
+static void start_reflect_dictation(void) {
+  if (s_dictation_pending || !s_dictation_session) {
+    return;
+  }
+  s_dictation_target = DICT_REFLECT;
   s_dictation_pending = true;
   dictation_session_start(s_dictation_session);
 }
@@ -4327,19 +4328,12 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habits[idx].countdown_ms = tuple_int(iterator, KEY_HABIT_COUNTDOWN_MS, 0);
       s_habits[idx].streak = tuple_int(iterator, KEY_HABIT_STREAK, 0);
       s_habits[idx].best_streak = tuple_int(iterator, KEY_HABIT_BEST_STREAK, 0);
-      {
-        int32_t ic = tuple_int(iterator, KEY_HABIT_ICON, -1);
-        s_habits[idx].icon_idx = (ic >= 0 && ic < HABIT_ICON_COUNT) ? (int8_t)ic : -1;
-      }
 #endif
       break;
     }
     case MSG_HABIT_SYNC_END: {
       s_habit_count = s_habit_incoming_total;
       save_habits();
-#ifndef PBL_PLATFORM_APLITE
-      rebuild_habit_icons();
-#endif
       if (s_habits_menu_layer) {
         menu_layer_reload_data(s_habits_menu_layer);
       }
@@ -4973,20 +4967,6 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   fill_bg(ctx, bounds, bg);
   graphics_context_set_text_color(ctx, fg);
 
-  // Per-habit Material icon on the left (synced from the desktop, mapped to a
-  // bundled bitmap in habit_icons.h). Present ones push the title / subtitle
-  // right by x_off; the right-aligned streak badge stays put.
-  int16_t x_off = 0;
-#ifndef PBL_PLATFORM_APLITE
-  int habit_slot = (int)(habit - s_habits);
-  if (habit_slot >= 0 && habit_slot < MAX_HABITS && s_habit_icon_bmp[habit_slot]) {
-    graphics_context_set_compositing_mode(ctx, GCompOpSet);
-    graphics_draw_bitmap_in_rect(ctx, s_habit_icon_bmp[habit_slot],
-                                 GRect(TITLE_BOX_X, (bounds.size.h - 20) / 2, 20, 20));
-    x_off = 24;
-  }
-#endif
-
   // Non-emery: the fixed 30px top-aligned title box, unchanged. Emery: a
   // measured, vertically-centred block matching draw_task_row.
 #ifdef PBL_PLATFORM_EMERY
@@ -4994,12 +4974,12 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   GSize habit_line = graphics_text_layout_get_content_size(
       "Ag", habit_title_font, GRect(0, 0, 200, 100), GTextOverflowModeFill, GTextAlignmentLeft);
   int16_t habit_title_h = habit_line.h > 0 ? habit_line.h : HEADING_TITLE_H;
-  GRect title_box = GRect(TITLE_BOX_X + x_off, ROW_TITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
-                           bounds.size.w - TITLE_BOX_X * 2 - x_off, habit_title_h);
+  GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
+                           bounds.size.w - TITLE_BOX_X * 2, habit_title_h);
   graphics_draw_text(ctx, habit->title, habit_title_font, title_box,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 #else
-  GRect title_box = GRect(TITLE_BOX_X + x_off, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2 - x_off, 30);
+  GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
   draw_text(ctx, habit->title, TITLE_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
 #endif
 
@@ -5060,15 +5040,12 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   } else {
     snprintf(subtitle, sizeof(subtitle), "%d/%d", habit->value, habit->goal);
   }
-  // Shifted by x_off like the title so "value/goal" sits under it, not under
-  // the icon; width shrinks by the same so the right-aligned badge keeps its
-  // place at the row edge.
 #ifdef PBL_PLATFORM_EMERY
-  GRect subtitle_box = GRect(TITLE_BOX_X + x_off, ROW_SUBTITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
-                              bounds.size.w - TITLE_BOX_X * 2 - x_off, SUBTITLE_STRIP_H);
+  GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
+                              bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
 #else
-  GRect subtitle_box = GRect(TITLE_BOX_X + x_off, bounds.size.h - SUBTITLE_STRIP_H,
-                              bounds.size.w - TITLE_BOX_X * 2 - x_off, SUBTITLE_STRIP_H);
+  GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - SUBTITLE_STRIP_H,
+                              bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
 #endif
   GRect left_sub = subtitle_box;
 #ifndef PBL_PLATFORM_APLITE
@@ -6454,72 +6431,87 @@ static void push_value_picker(PickKind kind, const char *task_id, int current) {
   window_stack_push(s_pick_window, true);
 }
 
-// ---------- reflect (daily energy check-in) ----------
-// A tiny full-screen picker like the value picker: Up/Down cycle Low/OK/Good,
-// Select logs it (MSG_METRIC_ENERGY -> the phone's [Metric] Upsert Metric for
-// today), Back cancels. Reached with Select on the Finish Day row when
-// config.enableReflect is on; long-Select there still archives.
-static Window *s_reflect_window = NULL;
-static Layer *s_reflect_layer = NULL;
-static StatusBarLayer *s_reflect_status_bar = NULL;
-static int s_reflect_idx = 1; // 0 Low, 1 OK, 2 Good
+// ---------- reflect (before-Finish-Day retro) ----------
+// A 3-row menu reached with Select on the Finish Day row (config.enableReflect;
+// long-Select there still archives). Each row logs one field of today's metric
+// straight away (optimistic, phone does [Metric] Upsert Metric):
+//   Energy      - Select cycles Low/OK/Good        -> MSG_METRIC_ENERGY (1-3)
+//   Day rating  - Select cycles 1..4 (impactOfWork) -> MSG_METRIC_RATING (1-4)
+//   Improvement - Select dictates one thing to improve -> MSG_METRIC_REFLECT
+// Values start unset ("-") - the watch never fetches the existing metric.
+// State statics are declared up near s_reflect_enabled.
 
-static void reflect_layer_update(Layer *layer, GContext *ctx) {
-  GRect b = layer_get_bounds(layer);
-  fill_bg(ctx, b, GColorWhite);
-  graphics_context_set_text_color(ctx, GColorBlack);
-  int16_t cy = b.size.h / 2;
-  draw_text(ctx, "Energy today", CHROME_FONT_KEY,
-            GRect(0, cy - 44, b.size.w, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
-  draw_text(ctx, s_reflect_idx == 0 ? "Low" : s_reflect_idx == 2 ? "Good" : "OK",
-            FONT_KEY_GOTHIC_28_BOLD,
-            GRect(0, cy - 22, b.size.w, 34), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
-  draw_text(ctx, "Up/Down pick\nSelect to log", CHROME_FONT_KEY,
-            GRect(0, cy + 16, b.size.w, 40), GTextOverflowModeWordWrap, GTextAlignmentCenter);
+#define REFLECT_HAS_MIC PBL_IF_MICROPHONE_ELSE(true, false)
+
+static uint16_t reflect_num_rows(MenuLayer *ml, uint16_t section, void *ctx) {
+  return REFLECT_HAS_MIC ? 3 : 2;
 }
 
-static void reflect_step(int delta) {
-  int n = s_reflect_idx + delta;
-  if (n < 0) {
-    n = 0;
+static void reflect_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, void *c) {
+  char sub[20];
+  const char *title;
+  if (idx->row == 0) {
+    title = "Energy";
+    str_copy(sub, s_reflect_energy == 0 ? "-"
+                  : s_reflect_energy == 1 ? "Low"
+                  : s_reflect_energy == 2 ? "OK" : "Good", sizeof(sub));
+  } else if (idx->row == 1) {
+    title = "Day rating";
+    if (s_reflect_rating == 0) {
+      str_copy(sub, "-", sizeof(sub));
+    } else {
+      snprintf(sub, sizeof(sub), "%d of 4", s_reflect_rating);
+    }
+  } else {
+    title = "Improvement";
+    str_copy(sub, s_reflect_note_set ? "Logged" : "Say one thing", sizeof(sub));
   }
-  if (n > 2) {
-    n = 2;
-  }
-  if (n != s_reflect_idx) {
-    s_reflect_idx = n;
-    layer_mark_dirty(s_reflect_layer);
-    vibes_short_pulse();
-  }
+  menu_cell_basic_draw(ctx, cell, title, sub, NULL);
 }
-static void reflect_up_click(ClickRecognizerRef r, void *c) { backlight_touch(); reflect_step(1); }
-static void reflect_down_click(ClickRecognizerRef r, void *c) { backlight_touch(); reflect_step(-1); }
-static void reflect_select_click(ClickRecognizerRef r, void *c) {
+
+static void reflect_select(MenuLayer *ml, MenuIndex *idx, void *c) {
   backlight_touch();
-  begin_send(MSG_METRIC_ENERGY, "", NULL, s_reflect_idx + 1);
-  window_stack_pop(true);
+  if (idx->row == 0) {
+    s_reflect_energy = s_reflect_energy >= 3 ? 1 : s_reflect_energy + 1;
+    begin_send(MSG_METRIC_ENERGY, "", NULL, s_reflect_energy);
+  } else if (idx->row == 1) {
+    s_reflect_rating = s_reflect_rating >= 4 ? 1 : s_reflect_rating + 1;
+    begin_send(MSG_METRIC_RATING, "", NULL, s_reflect_rating);
+  } else {
+#ifndef PBL_PLATFORM_APLITE
+    start_reflect_dictation(); // reflect_note_set is flipped on the callback
+#endif
+    return;
+  }
+  menu_layer_reload_data(s_reflect_menu);
 }
-static void reflect_click_config_provider(void *context) {
-  window_single_click_subscribe(BUTTON_ID_UP, reflect_up_click);
-  window_single_click_subscribe(BUTTON_ID_DOWN, reflect_down_click);
-  window_single_click_subscribe(BUTTON_ID_SELECT, reflect_select_click);
-}
+
 static void reflect_window_load(Window *window) {
-  Layer *window_layer;
-  GRect content = window_chrome(window, &s_reflect_status_bar, &window_layer);
-  s_reflect_layer = layer_create(content);
-  layer_set_update_proc(s_reflect_layer, reflect_layer_update);
-  layer_add_child(window_layer, s_reflect_layer);
-  window_set_click_config_provider(window, reflect_click_config_provider);
+  Layer *wl;
+  GRect cb = window_chrome(window, &s_reflect_status_bar, &wl);
+  s_reflect_menu = menu_layer_create(cb);
+  menu_layer_set_callbacks(s_reflect_menu, NULL, (MenuLayerCallbacks) {
+    .get_num_rows = reflect_num_rows,
+    .draw_row = reflect_draw_row,
+    .select_click = reflect_select,
+  });
+  menu_layer_set_normal_colors(s_reflect_menu, GColorWhite, GColorBlack);
+  menu_layer_set_highlight_colors(s_reflect_menu, GColorVividCerulean, GColorWhite);
+  menu_layer_set_click_config_onto_window(s_reflect_menu, window);
+  layer_add_child(wl, menu_layer_get_layer(s_reflect_menu));
 }
+
 static void reflect_window_unload(Window *window) {
-  layer_destroy(s_reflect_layer);
-  s_reflect_layer = NULL;
+  menu_layer_destroy(s_reflect_menu);
+  s_reflect_menu = NULL;
   status_bar_layer_destroy(s_reflect_status_bar);
   s_reflect_status_bar = NULL;
 }
+
 static void push_reflect_window(void) {
-  s_reflect_idx = 1;
+  s_reflect_energy = 0;
+  s_reflect_rating = 0;
+  s_reflect_note_set = false;
   if (!s_reflect_window) {
     s_reflect_window = window_create();
     window_set_window_handlers(s_reflect_window, (WindowHandlers) {
@@ -7782,9 +7774,6 @@ static void window_unload(Window *window) {
   gbitmap_destroy(s_stats_white_bitmap);
   gbitmap_destroy(s_inbox_bitmap);
   gbitmap_destroy(s_inbox_white_bitmap);
-  for (int i = 0; i < MAX_HABITS; i++) {
-    gbitmap_destroy(s_habit_icon_bmp[i]);
-  }
 #endif
 #ifndef PBL_PLATFORM_APLITE
   dictation_session_destroy(s_dictation_session);
@@ -7981,7 +7970,6 @@ static void init(void) {
   load_habits();
   load_tracking();
 #ifndef PBL_PLATFORM_APLITE
-  rebuild_habit_icons(); // icon_idx is persisted; the GBitmaps are not
   load_habit_tracking();
   load_focus();
   // Drop a stale session: focus needs a live local track, and a session

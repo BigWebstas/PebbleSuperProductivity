@@ -11,7 +11,6 @@ var sha256lib = require('./lib/sha256.js');
 var presence = require('./lib/presence-client.js');
 var opQueue = require('./lib/op-queue.js');
 var timeline = require('./lib/timeline.js');
-var habitIconMap = require('./lib/habit-icon-map.js');
 
 // Keep in sync with the enums at the top of src/c/main.c.
 var MSG_TASK_SYNC_START = 1;
@@ -92,8 +91,10 @@ var MSG_TASK_MOVE_PROJECT = 49;     // watch -> phone: TASK_ID + PROJECT_ID (tar
 var MSG_WIPE_CACHE = 50;            // phone -> watch: (no keys)
 // Toggle the Nth "- [ ]" / "- [x]" checklist line in a task's notes markdown.
 var MSG_TASK_TOGGLE_CHECK = 51;    // watch -> phone: TASK_ID + CHECK_INDEX + CHECK_VALUE (1 checked / 0 not)
-// Today's energy check-in from the watch's Reflect window (Select on Finish Day).
+// The watch's Reflect window (Select on Finish Day) - today's metric fields.
 var MSG_METRIC_ENERGY = 52;        // watch -> phone: METRIC_ENERGY (1 low / 2 ok / 3 good)
+var MSG_METRIC_RATING = 53;        // watch -> phone: METRIC_RATING (impactOfWork 1-4)
+var MSG_METRIC_REFLECT = 54;       // watch -> phone: METRIC_REFLECT_TEXT (dictated improvement)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -456,8 +457,9 @@ function sendStatus(code, message) {
     // "Nudge me in the evening about unfinished streaks" - watch-side
     // (main.c's minute_tick_handler), app-open only, non-aplite.
     HABIT_STREAK_NUDGE: config.habitStreakNudge ? 1 : 0,
-    // "Log energy on Finish Day" (default off). Select on the Finish Day row
-    // opens the Reflect window -> MSG_METRIC_ENERGY. Non-aplite.
+    // "Day review on Finish Day" (default off). Select on the Finish Day row
+    // opens the Reflect menu (energy / rating / improvement -> MSG_METRIC_*).
+    // Non-aplite.
     REFLECT_ENABLED: config.enableReflect ? 1 : 0,
   };
   if (message) {
@@ -674,13 +676,6 @@ function sendHabitAt(habits, index) {
   // "best N" as a target when you've dropped below your record.
   if (h.bestStreak && h.bestStreak > (h.streak || 0)) {
     dict.HABIT_BEST_STREAK = Math.min(h.bestStreak, 9999);
-  }
-  // Material icon: the watch bundles a curated subset as bitmaps and indexes
-  // them by wire position (habit-icon-map.js). Names outside the set are
-  // dropped. A leading "outline"/"round" style prefix is not used by SP's
-  // stored value, so the bare name is the key.
-  if (h.icon && habitIconMap[h.icon] != null) {
-    dict.HABIT_ICON = habitIconMap[h.icon];
   }
   sendWithRetry(dict, function () {
     sendHabitAt(habits, index + 1);
@@ -2029,23 +2024,21 @@ function buildMetricUpsertOp(metric, clientId) {
   };
 }
 
-// Watch Reflect window: today's energy check-in (1 low / 2 ok / 3 good ->
-// metric.energyCheckin, the same 1-3 scale the desktop's evaluation sheet
-// uses). Merges onto today's metric so a desktop reflection note is kept.
-function handleMetricEnergy(energy) {
+// Watch Reflect window (before-Finish-Day retro). Each row merges one field
+// onto today's metric and upserts it, so a value set on the desktop for another
+// field survives. energyCheckin (1-3) and impactOfWork (1-4) are the desktop's
+// own evaluation-sheet scales; reflections is [{ text, created }] (the desktop
+// keeps only reflections[0], preserving its `created`).
+function metricUpsert(changes, label) {
   var config = loadConfig();
   if (!config || !config.jwt) {
     sendStatus(STATUS_NOT_PAIRED);
     return;
   }
-  var e = energy | 0;
-  if (e < 1 || e > 3) {
-    return;
-  }
   var state = loadState();
   var today = store.todayStr();
   var metrics = state.metric || (state.metric = {});
-  var metric = Object.assign({}, metrics[today] || { id: today }, { energyCheckin: e });
+  var metric = Object.assign({}, metrics[today] || { id: today }, changes);
   metrics[today] = metric;
   saveState(state);
 
@@ -2054,12 +2047,38 @@ function handleMetricEnergy(energy) {
   uploadOps([buildMetricUpsertOp(metric, clientId)], config, clientId)
     .catch(function (err) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
-      console.log('[pkjs] failed to upload energy check-in: ' + failureMsg);
+      console.log('[pkjs] failed to upload ' + label + ': ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
     })
     .then(function () {
       runAutoSyncAfterOp(config, failureMsg);
     });
+}
+
+function handleMetricEnergy(energy) {
+  var e = energy | 0;
+  if (e >= 1 && e <= 3) {
+    metricUpsert({ energyCheckin: e }, 'energy check-in');
+  }
+}
+
+function handleMetricRating(rating) {
+  var r = rating | 0;
+  if (r >= 1 && r <= 4) {
+    metricUpsert({ impactOfWork: r }, 'day rating');
+  }
+}
+
+function handleMetricReflect(text) {
+  var t = String(text || '').trim();
+  var today = store.todayStr();
+  var state = loadState();
+  var prev = state.metric && state.metric[today] && state.metric[today].reflections &&
+             state.metric[today].reflections[0];
+  var reflections = t
+    ? [{ text: t.slice(0, 500), created: (prev && prev.created) || Date.now() }]
+    : [];
+  metricUpsert({ reflections: reflections }, 'reflection');
 }
 
 // Projects browser: long-Select toggled a task's backlog membership.
@@ -3230,6 +3249,12 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_METRIC_ENERGY:
       handleMetricEnergy(payload.METRIC_ENERGY | 0);
+      break;
+    case MSG_METRIC_RATING:
+      handleMetricRating(payload.METRIC_RATING | 0);
+      break;
+    case MSG_METRIC_REFLECT:
+      handleMetricReflect(payload.METRIC_REFLECT_TEXT || '');
       break;
     case MSG_PRESENCE_STOP:
       if (presenceClient && presenceLastSessionId) {
