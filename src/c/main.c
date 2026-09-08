@@ -623,9 +623,25 @@ static bool s_habit_countdown_paused = false;
 static int s_habit_countdown_frozen_elapsed_ms = 0;
 #endif
 
+// The Task double-buffer. emery keeps both on the heap permanently
+// (alloc_heap_lists). basalt/chalk/diorite hit the same 64 KB virtual-size
+// ceiling but have too little heap for a permanent copy, so s_incoming there is
+// malloc'd only for the span of one sync batch (MSG_TASK_SYNC_START..END) and
+// freed after - reclaiming ~9 KB of .bss. On malloc failure it points at
+// s_tasks and the batch is parsed in place (a brief torn list, like s_habits
+// already accepts). aplite has the .bss room but not the heap, so it keeps the
+// plain static pair.
+#if !HEAP_BACKED_LISTS && !defined(PBL_PLATFORM_APLITE)
+#define INCOMING_MALLOCED 1
+#else
+#define INCOMING_MALLOCED 0
+#endif
 #if HEAP_BACKED_LISTS
 static Task *s_tasks;             // calloc'd in alloc_heap_lists()
 static Task *s_incoming;          // calloc'd in alloc_heap_lists()
+#elif INCOMING_MALLOCED
+static Task s_tasks[MAX_TASKS];
+static Task *s_incoming = NULL;   // malloc'd per sync, freed at SYNC_END
 #else
 static Task s_tasks[MAX_TASKS];
 static Task s_incoming[MAX_TASKS];
@@ -3922,6 +3938,16 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (s_incoming_total > MAX_TASKS) {
         s_incoming_total = MAX_TASKS;
       }
+#if INCOMING_MALLOCED
+      // A previous batch that never reached SYNC_END would have leaked it.
+      if (s_incoming && s_incoming != s_tasks) {
+        free(s_incoming);
+      }
+      s_incoming = malloc(sizeof(Task) * MAX_TASKS);
+      if (!s_incoming) {
+        s_incoming = s_tasks; // OOM: parse in place, accept a brief torn list
+      }
+#endif
       set_status_code(STATUS_SYNCING);
       break;
     }
@@ -3932,6 +3958,11 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (!idx_tuple || !id_tuple || !title_tuple) {
         break;
       }
+#if INCOMING_MALLOCED
+      if (!s_incoming) {
+        break; // an ITEM with no preceding SYNC_START (stale batch)
+      }
+#endif
       int idx = idx_tuple->value->int32;
       if (idx < 0 || idx >= MAX_TASKS) {
         break;
@@ -3952,8 +3983,21 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     }
     case MSG_TASK_SYNC_END: {
       int count = s_incoming_total < MAX_TASKS ? s_incoming_total : MAX_TASKS;
+#if INCOMING_MALLOCED
+      bool committed = (s_incoming == s_tasks); // OOM path parsed in place
+      if (s_incoming && s_incoming != s_tasks) {
+        memcpy(s_tasks, s_incoming, sizeof(Task) * (size_t)count);
+        free(s_incoming);
+        committed = true;
+      }
+      s_incoming = NULL;
+      if (committed) {
+        s_task_count = count; // a stale END with no active batch leaves the list alone
+      }
+#else
       memcpy(s_tasks, s_incoming, sizeof(Task) * (size_t)count);
       s_task_count = count;
+#endif
       set_status_code(STATUS_OK);
       recompute_groups();
       save_tasks();
