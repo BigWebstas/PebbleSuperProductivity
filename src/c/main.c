@@ -549,12 +549,14 @@ static char s_pending_toggle_task_id[MAX_ID_LEN] = "";
 #define DOUBLE_CLICK_WINDOW_MS 300
 
 // Long-press Up (unschedule) and long-press Down / swipe-left (move to tomorrow)
-// each open a 3s cancel window on the selected task, reusing the pending-toggle
+// each open a 5s cancel window on the selected task, reusing the pending-toggle
 // pattern above: the row's subtitle shows "Moving to tomorrow..." / "Un-
 // Scheduling..." and a single Select cancels before the timer commits. Tracked
-// by id for the same background-sync reason. aplite-excluded for RAM (like the
-// send-retry buffer) - and the swipe half is PBL_TOUCH-only regardless.
-#define RESCHEDULE_WINDOW_MS 3000
+// by id for the same background-sync reason. The same window fronts the action
+// menu's schedule rows (today / tomorrow / at an hour / unschedule) and the
+// done-toggle ("Marking done..."). aplite-excluded for RAM (like the send-retry
+// buffer) - and the swipe half is PBL_TOUCH-only regardless.
+#define RESCHEDULE_WINDOW_MS 5000
 // Below the SDK's 500ms default so a deliberate hold commits before UP/DOWN's
 // repeat-scroll walks the selection too far off the intended row.
 #define RESCHEDULE_LONGPRESS_MS 400
@@ -566,19 +568,27 @@ typedef enum {
   // Projects-browser only: move the task into / out of its project's backlog.
   RESCHEDULE_TO_BACKLOG,
   RESCHEDULE_FROM_BACKLOG,
+  // Action menu "Schedule at...": commit is send_task_set_due_time, hour in
+  // s_pending_reschedule_at_hour.
+  RESCHEDULE_AT,
 } RescheduleKind;
 static AppTimer *s_pending_reschedule_timer = NULL;
 static char s_pending_reschedule_task_id[MAX_ID_LEN] = "";
 static RescheduleKind s_pending_reschedule_kind = RESCHEDULE_NONE;
 // Frame ticks (one per scroll_timer_callback, SCROLL_INTERVAL_MS apart) since
 // the pending-reschedule window opened - drives the shrinking countdown bar
-// under its subtitle. Also: the row index + tick count for the matching
-// "Marking done..." bar shown the moment a task commits to done. Both keep the
-// scroll timer alive via refresh_scroll_state.
+// under its subtitle. Kept alive via refresh_scroll_state.
 static int s_pending_reschedule_tick = 0;
-#define DONE_CHECK_MS 500
-static int s_done_check_idx = -1;
-static int s_done_check_tick = 0;
+// RESCHEDULE_AT's target hour (0-23) - see send path in the commit callback.
+static int s_pending_reschedule_at_hour = 0;
+// The done-toggle gets its own copy of the same cancel window: mark a task done
+// and its subtitle shows "Marking done..." with the shrinking bar for
+// DONE_WINDOW_MS, a Select cancels, the timer commits. Un-completing a task is
+// immediate (no window). By id, like the reschedule window.
+#define DONE_WINDOW_MS 5000
+static AppTimer *s_pending_done_timer = NULL;
+static char s_pending_done_task_id[MAX_ID_LEN] = "";
+static int s_pending_done_tick = 0;
 // Set when the gesture came from the Projects browser task view - the phone
 // uses it to move a scheduled backlog task into the regular list and re-push
 // that view. Empty for a today-list reschedule.
@@ -1579,6 +1589,9 @@ static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
 static void begin_pending_reschedule(RescheduleKind kind);
+static void pending_done_commit_callback(void *data);
+static void begin_pending_done(const char *task_id);
+static void cancel_pending_done(void);
 static void send_task_reschedule(const char *task_id, RescheduleKind kind, const char *project_id);
 static TaskGroup *resolve_project_row_at(MenuIndex index);
 #endif
@@ -2234,11 +2247,8 @@ static void scroll_timer_callback(void *data) {
   if (s_pending_reschedule_kind != RESCHEDULE_NONE) {
     s_pending_reschedule_tick++;
   }
-  if (s_done_check_idx >= 0) {
-    s_done_check_tick++;
-    if (s_done_check_tick * SCROLL_INTERVAL_MS >= DONE_CHECK_MS + 150) {
-      s_done_check_idx = -1; // bar emptied, brief hold, then back to "Done"
-    }
+  if (s_pending_done_task_id[0] != '\0') {
+    s_pending_done_tick++;
   }
 #endif
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
@@ -2344,7 +2354,7 @@ static void refresh_scroll_state(bool reset_offset) {
   bool needs_scroll = selected && title_natural_width(selected->title) > available;
 #ifndef PBL_PLATFORM_APLITE
   // Keep the repaint timer alive while a transient row animation is running.
-  if (s_pending_reschedule_kind != RESCHEDULE_NONE || s_done_check_idx >= 0) {
+  if (s_pending_reschedule_kind != RESCHEDULE_NONE || s_pending_done_task_id[0] != '\0') {
     needs_scroll = true;
   }
   if (!needs_scroll && selected && !selected->done) {
@@ -2479,58 +2489,64 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
                               bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
 
 #ifndef PBL_PLATFORM_APLITE
-  // Pending reschedule: takes over the whole subtitle line (over "Done" and the
-  // due/time text) for the 3s cancel window - see begin_pending_reschedule.
-  if (s_pending_reschedule_kind != RESCHEDULE_NONE &&
-      strncmp(s_pending_reschedule_task_id, task->id, MAX_ID_LEN) == 0) {
-    const char *pending_msg = s_pending_reschedule_kind == RESCHEDULE_TOMORROW ? "Moving to tomorrow..."
-                              : s_pending_reschedule_kind == RESCHEDULE_TODAY ? "Scheduling for today..."
-                              : s_pending_reschedule_kind == RESCHEDULE_TO_BACKLOG ? "Moving to backlog..."
-                              : s_pending_reschedule_kind == RESCHEDULE_FROM_BACKLOG ? "Moving to list..."
-                              : "Un-Scheduling...";
-    draw_text(ctx, pending_msg, SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
-    // A thin bar under the message, centre-anchored, that shrinks as the 3s
-    // cancel window runs out - a visible countdown to the commit.
-    int rs_rem_ms = RESCHEDULE_WINDOW_MS - s_pending_reschedule_tick * SCROLL_INTERVAL_MS;
-    if (rs_rem_ms < 0) {
-      rs_rem_ms = 0;
+  // A pending reschedule or a pending done-toggle takes over the whole subtitle
+  // line (over "Done" and the due/time text) with a centred message and a
+  // centre-anchored bar that shrinks as the cancel window runs out - a Select
+  // commits early / cancels. See begin_pending_reschedule / begin_pending_done.
+  {
+    const char *pending_msg = NULL;
+    int pend_total_ms = 0, pend_tick = 0;
+    if (s_pending_reschedule_kind != RESCHEDULE_NONE &&
+        strncmp(s_pending_reschedule_task_id, task->id, MAX_ID_LEN) == 0) {
+      static char at_msg[28];
+      if (s_pending_reschedule_kind == RESCHEDULE_AT) {
+        int h = s_pending_reschedule_at_hour;
+        if (clock_is_24h_style()) {
+          snprintf(at_msg, sizeof(at_msg), "Scheduling %d:00...", h);
+        } else {
+          int h12 = h % 12;
+          if (h12 == 0) {
+            h12 = 12;
+          }
+          snprintf(at_msg, sizeof(at_msg), "Scheduling %d %s...", h12, h < 12 ? "AM" : "PM");
+        }
+        pending_msg = at_msg;
+      } else {
+        pending_msg = s_pending_reschedule_kind == RESCHEDULE_TOMORROW ? "Moving to tomorrow..."
+                      : s_pending_reschedule_kind == RESCHEDULE_TODAY ? "Scheduling for today..."
+                      : s_pending_reschedule_kind == RESCHEDULE_TO_BACKLOG ? "Moving to backlog..."
+                      : s_pending_reschedule_kind == RESCHEDULE_FROM_BACKLOG ? "Moving to list..."
+                      : "Un-Scheduling...";
+      }
+      pend_total_ms = RESCHEDULE_WINDOW_MS;
+      pend_tick = s_pending_reschedule_tick;
+    } else if (s_pending_done_task_id[0] != '\0' &&
+               strncmp(s_pending_done_task_id, task->id, MAX_ID_LEN) == 0) {
+      pending_msg = "Marking done...";
+      pend_total_ms = DONE_WINDOW_MS;
+      pend_tick = s_pending_done_tick;
     }
-    int rs_full_w = subtitle_box.size.w;
-    int rs_bar_w = rs_full_w * rs_rem_ms / RESCHEDULE_WINDOW_MS;
-    graphics_context_set_fill_color(ctx, fg);
-    graphics_fill_rect(ctx,
-                       GRect(subtitle_box.origin.x + (rs_full_w - rs_bar_w) / 2,
-                             subtitle_box.origin.y + subtitle_box.size.h - 3, rs_bar_w, 2),
-                       0, GCornerNone);
-    return;
+    if (pending_msg) {
+      GColor pend_crisp = is_selected ? GColorWhite : GColorBlack;
+      graphics_context_set_text_color(ctx, pend_crisp);
+      draw_text(ctx, pending_msg, SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+      int rem_ms = pend_total_ms - pend_tick * SCROLL_INTERVAL_MS;
+      if (rem_ms < 0) {
+        rem_ms = 0;
+      }
+      int full_w = subtitle_box.size.w;
+      int bar_w = full_w * rem_ms / pend_total_ms;
+      graphics_context_set_fill_color(ctx, pend_crisp);
+      graphics_fill_rect(ctx,
+                         GRect(subtitle_box.origin.x + (full_w - bar_w) / 2,
+                               subtitle_box.origin.y + subtitle_box.size.h - 3, bar_w, 2),
+                         0, GCornerNone);
+      return;
+    }
   }
 #endif
 
   if (task->done) {
-#ifndef PBL_PLATFORM_APLITE
-    // Just committed to done: the subtitle line shows "Marking done..." with a
-    // centre-anchored shrinking bar for DONE_CHECK_MS - the same treatment a
-    // pending reschedule gets - then reverts to plain "Done".
-    if (s_done_check_idx >= 0 && task >= s_tasks && task < s_tasks + MAX_TASKS &&
-        (int)(task - s_tasks) == s_done_check_idx) {
-      GColor dc_crisp = is_selected ? GColorWhite : GColorBlack;
-      graphics_context_set_text_color(ctx, dc_crisp);
-      draw_text(ctx, "Marking done...", SUBTITLE_FONT_KEY, subtitle_box,
-                GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
-      int dc_rem_ms = DONE_CHECK_MS - s_done_check_tick * SCROLL_INTERVAL_MS;
-      if (dc_rem_ms < 0) {
-        dc_rem_ms = 0;
-      }
-      int dc_full_w = subtitle_box.size.w;
-      int dc_bar_w = dc_full_w * dc_rem_ms / DONE_CHECK_MS;
-      graphics_context_set_fill_color(ctx, dc_crisp);
-      graphics_fill_rect(ctx,
-                         GRect(subtitle_box.origin.x + (dc_full_w - dc_bar_w) / 2,
-                               subtitle_box.origin.y + subtitle_box.size.h - 3, dc_bar_w, 2),
-                         0, GCornerNone);
-      return;
-    }
-#endif
     draw_text(ctx, "Done", SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
     return;
   }
@@ -3608,12 +3624,25 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
   }
 #endif
 #ifndef PBL_PLATFORM_APLITE
-  // A pending move-to-tomorrow / unschedule is cancelled by a physical Select
-  // during its window - checked before the normal row handling so the press
-  // only cancels (no toggle, no notes).
+  // A pending move-to-tomorrow / unschedule / "Marking done..." is cancelled by
+  // a physical Select during its window - checked before the normal row handling
+  // so the press only cancels (no toggle, no notes).
   if (s_pending_reschedule_kind != RESCHEDULE_NONE) {
     cancel_pending_reschedule();
     return;
+  }
+  if (s_pending_done_task_id[0] != '\0') {
+    Task *pd_sel = resolve_selected_task();
+    if (pd_sel && strncmp(pd_sel->id, s_pending_done_task_id, MAX_ID_LEN) == 0) {
+      cancel_pending_done(); // Select on the same row within the window = undo
+      return;
+    }
+    // Selection has moved on - commit the pending one now and let this press
+    // fall through to start the newly-selected row's own toggle.
+    if (s_pending_done_timer) {
+      app_timer_cancel(s_pending_done_timer);
+      pending_done_commit_callback(NULL);
+    }
   }
   // The over-estimate banner is a plain layer on the menu - a Select while
   // it's up just dismisses it, like the error overlay.
@@ -4121,18 +4150,70 @@ static void pending_toggle_timer_callback(void *data) {
   if (!task) {
     return; // The list changed underneath the pending click - nothing to commit.
   }
-  task->done = !task->done;
 #ifndef PBL_PLATFORM_APLITE
-  if (task->done && task >= s_tasks && task < s_tasks + MAX_TASKS) {
-    s_done_check_idx = (int)(task - s_tasks);
-    s_done_check_tick = 0;
+  // Marking a task done opens its own 5s cancel window rather than committing
+  // now; un-completing one is immediate.
+  if (!task->done) {
+    begin_pending_done(task->id);
+    return;
   }
 #endif
+  task->done = !task->done;
   save_tasks();
   menu_layer_reload_data(s_menu_layer);
   send_task_toggle(task);
   refresh_scroll_state(false);
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// Opens (or restarts) the "Marking done..." cancel window for a task by id. The
+// task is not marked done until pending_done_commit_callback fires; a Select in
+// the meantime calls cancel_pending_done.
+static void begin_pending_done(const char *task_id) {
+  if (s_pending_done_timer) {
+    app_timer_cancel(s_pending_done_timer);
+  }
+  str_copy(s_pending_done_task_id, task_id, MAX_ID_LEN);
+  s_pending_done_tick = 0;
+  s_pending_done_timer = app_timer_register(DONE_WINDOW_MS, pending_done_commit_callback, NULL);
+  vibes_short_pulse();
+  if (s_menu_layer) {
+    menu_layer_reload_data(s_menu_layer);
+  }
+  refresh_scroll_state(false);
+}
+
+// Cancel window elapsed: mark the task done for real and sync it.
+static void pending_done_commit_callback(void *data) {
+  s_pending_done_timer = NULL;
+  Task *task = find_task_by_id(s_pending_done_task_id);
+  s_pending_done_task_id[0] = '\0';
+  s_pending_done_tick = 0;
+  if (task && !task->done) {
+    task->done = true;
+    save_tasks();
+    send_task_toggle(task);
+  }
+  if (s_menu_layer) {
+    menu_layer_reload_data(s_menu_layer);
+  }
+  refresh_scroll_state(false);
+}
+
+// Select pressed inside the window - drop it, the task stays not-done.
+static void cancel_pending_done(void) {
+  if (s_pending_done_timer) {
+    app_timer_cancel(s_pending_done_timer);
+    s_pending_done_timer = NULL;
+  }
+  s_pending_done_task_id[0] = '\0';
+  s_pending_done_tick = 0;
+  if (s_menu_layer) {
+    menu_layer_reload_data(s_menu_layer);
+  }
+  refresh_scroll_state(false);
+}
+#endif
 
 
 // The pending-reschedule subtitle rides draw_task_row, which both the today
@@ -4171,7 +4252,9 @@ static void pending_reschedule_timer_callback(void *data) {
   s_pending_reschedule_timer = NULL;
   RescheduleKind kind = s_pending_reschedule_kind;
   s_pending_reschedule_kind = RESCHEDULE_NONE;
-  if (kind != RESCHEDULE_NONE && s_pending_reschedule_task_id[0] != '\0') {
+  if (kind == RESCHEDULE_AT && s_pending_reschedule_task_id[0] != '\0') {
+    send_task_set_due_time(s_pending_reschedule_task_id, s_pending_reschedule_at_hour);
+  } else if (kind != RESCHEDULE_NONE && s_pending_reschedule_task_id[0] != '\0') {
     send_task_reschedule(s_pending_reschedule_task_id, kind, s_pending_reschedule_project_id);
   }
   s_pending_reschedule_task_id[0] = '\0';
@@ -4224,6 +4307,12 @@ static void begin_pending_reschedule(RescheduleKind kind) {
     app_timer_cancel(s_pending_toggle_timer);
     s_pending_toggle_timer = NULL;
     s_pending_toggle_task_id[0] = '\0';
+  }
+  if (s_pending_done_timer) {
+    app_timer_cancel(s_pending_done_timer);
+    s_pending_done_timer = NULL;
+    s_pending_done_task_id[0] = '\0';
+    s_pending_done_tick = 0;
   }
   if (s_pending_reschedule_timer) {
     app_timer_cancel(s_pending_reschedule_timer);
@@ -6602,6 +6691,14 @@ static void pick_select_click(ClickRecognizerRef r, void *c) {
     window_stack_pop(true);
     return;
   }
+  if (s_pick_kind == PICK_TIME) {
+    // Hand off to the shared cancel window - "Scheduling 3 PM..." + bar on the
+    // task row below, commit (send_task_set_due_time) after RESCHEDULE_WINDOW_MS.
+    s_pending_reschedule_at_hour = v;
+    window_stack_pop(true);
+    begin_pending_reschedule(RESCHEDULE_AT);
+    return;
+  }
   Task *t = find_task_by_id(s_pick_task_id);
   if (s_pick_kind == PICK_ESTIMATE) {
     int32_t ms = (int32_t)v * 60000;
@@ -6609,11 +6706,6 @@ static void pick_select_click(ClickRecognizerRef r, void *c) {
       t->time_estimate_ms = (int)ms;
     }
     send_task_set_estimate(s_pick_task_id, ms);
-  } else if (s_pick_kind == PICK_TIME) {
-    if (t) {
-      t->due_min = v * 60; // the phone decides today vs tomorrow
-    }
-    send_task_set_due_time(s_pick_task_id, v);
   } else {
     if (t) {
       t->deadline_days = (v < 0) ? DEADLINE_NONE : v;
@@ -8104,6 +8196,11 @@ static void window_unload(Window *window) {
   }
   s_pending_reschedule_kind = RESCHEDULE_NONE;
   s_pending_reschedule_task_id[0] = '\0';
+  if (s_pending_done_timer) {
+    app_timer_cancel(s_pending_done_timer);
+    s_pending_done_timer = NULL;
+  }
+  s_pending_done_task_id[0] = '\0';
 #endif
 #if defined(PBL_TOUCH)
   clear_tap_select_guard();
