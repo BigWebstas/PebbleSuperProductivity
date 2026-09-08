@@ -172,7 +172,9 @@
       "IS_TAGS",
       "TASK_DEADLINE_DAYS",
       "TASK_RECURS",
-      "HABIT_STREAK"
+      "HABIT_STREAK",
+      "HABIT_BEST_STREAK",
+      "HABIT_STREAK_NUDGE"
     ]
   }
 }

@@ -31,6 +31,8 @@
 #define KEY_HABIT_TYPE MESSAGE_KEY_HABIT_TYPE
 #define KEY_HABIT_COUNTDOWN_MS MESSAGE_KEY_HABIT_COUNTDOWN_MS
 #define KEY_HABIT_STREAK MESSAGE_KEY_HABIT_STREAK
+#define KEY_HABIT_BEST_STREAK MESSAGE_KEY_HABIT_BEST_STREAK
+#define KEY_HABIT_STREAK_NUDGE MESSAGE_KEY_HABIT_STREAK_NUDGE
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
 #define KEY_BACKLIGHT_MODE MESSAGE_KEY_BACKLIGHT_MODE
@@ -319,6 +321,9 @@ typedef struct {
   // Consecutive days (back from today, or yesterday if today's not met yet) the
   // count reached its goal. 0 = none; the phone omits the key then.
   int streak;
+  // Longest run of goal-met days ever, sent only when it beats `streak` (0
+  // otherwise). Shown as "best N" - a target once the current streak lapses.
+  int best_streak;
 #endif
 } Habit;
 
@@ -703,6 +708,12 @@ static int s_due_notified_min = -1;
 // gets a plain stop request. Catches a timer left running overnight the next
 // time the app is opened, not just at the stroke of midnight.
 static bool s_stop_at_midnight = false;
+// "Nudge me about unfinished streaks" (config.habitStreakNudge, default off).
+// From 18:00, once per local day, the MINUTE_UNIT tick vibrates a "Keep your
+// streak" banner if any habit with a 2+ day streak isn't done yet. App-open
+// only. s_streak_nudge_day latches on tm_yday so it fires at most once a day.
+static bool s_habit_streak_nudge = false;
+static int s_streak_nudge_day = -1;
 // "Stats" page row (config.enableStats, default on) and the last
 // MSG_STATS_DATA payload - kept across visits so a re-open shows the previous
 // numbers immediately while a fresh request is in flight. Declared here (not
@@ -4190,6 +4201,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habits[idx].is_countdown = habit_type == 2;
       s_habits[idx].countdown_ms = tuple_int(iterator, KEY_HABIT_COUNTDOWN_MS, 0);
       s_habits[idx].streak = tuple_int(iterator, KEY_HABIT_STREAK, 0);
+      s_habits[idx].best_streak = tuple_int(iterator, KEY_HABIT_BEST_STREAK, 0);
 #endif
       break;
     }
@@ -4412,6 +4424,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_focus_len_min = tuple_int(iterator, KEY_FOCUS_LEN_MIN, s_focus_len_min);
       // "Stop tracking at midnight" - absent-means-unchanged.
       s_stop_at_midnight = tuple_int(iterator, KEY_STOP_AT_MIDNIGHT, s_stop_at_midnight) != 0;
+      // "Nudge me about unfinished streaks" - absent-means-unchanged.
+      s_habit_streak_nudge = tuple_int(iterator, KEY_HABIT_STREAK_NUDGE, s_habit_streak_nudge) != 0;
 #endif
       // reload_data refreshes the Resync row's status subtitle;
       // update_empty_layer() handles the empty screen. Both no-op while the
@@ -4907,23 +4921,45 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
 #endif
   GRect left_sub = subtitle_box;
 #ifndef PBL_PLATFORM_APLITE
-  // Consecutive-days streak, right-aligned on the subtitle line. Only from 2 -
-  // "1 streak" reads oddly and a single day isn't much of a streak.
+  // Right-aligned streak label on the subtitle line. Current streak from 2 up
+  // ("1 streak" reads oddly); at 7+ it's a milestone - bold white-on-black
+  // rounded badge (black-on-white contrasts on the cerulean selected row too).
+  // Once the current streak lapses below 2, show "best N" instead as the
+  // record to chase, when there is one.
+  char st[16];
+  bool milestone = false;
   if (habit->streak >= 2) {
-    char st[16];
     snprintf(st, sizeof(st), "%d streak", habit->streak);
-    GFont sf = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+    milestone = habit->streak >= 7;
+  } else if (habit->best_streak >= 2) {
+    snprintf(st, sizeof(st), "best %d", habit->best_streak);
+  } else {
+    st[0] = '\0';
+  }
+  if (st[0]) {
+    GFont sf = fonts_get_system_font(milestone ? FONT_KEY_GOTHIC_14_BOLD : FONT_KEY_GOTHIC_14);
     GSize ss = graphics_text_layout_get_content_size(
         st, sf, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentRight);
     int16_t sw = ss.w;
     if (sw > subtitle_box.size.w / 2) {
       sw = subtitle_box.size.w / 2;
     }
-    graphics_draw_text(ctx, st, sf,
-        GRect(subtitle_box.origin.x + subtitle_box.size.w - sw, subtitle_box.origin.y + 2,
-              sw, subtitle_box.size.h - 2),
+    int16_t pad = milestone ? 3 : 0;
+    GRect text_box = GRect(subtitle_box.origin.x + subtitle_box.size.w - sw,
+                           subtitle_box.origin.y + 2, sw, subtitle_box.size.h - 2);
+    if (milestone) {
+      graphics_context_set_fill_color(ctx, GColorBlack);
+      graphics_fill_rect(ctx, GRect(text_box.origin.x - pad, subtitle_box.origin.y,
+                                    sw + pad * 2, subtitle_box.size.h),
+                         3, GCornersAll);
+      graphics_context_set_text_color(ctx, GColorWhite);
+    }
+    graphics_draw_text(ctx, st, sf, text_box,
         GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
-    left_sub.size.w -= (sw + 4);
+    if (milestone) {
+      graphics_context_set_text_color(ctx, fg);
+    }
+    left_sub.size.w -= (sw + 4 + pad * 2);
   }
 #endif
   draw_text(ctx, subtitle, SUBTITLE_FONT_KEY, left_sub, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
@@ -7406,6 +7442,37 @@ static void maybe_stop_at_midnight(struct tm *now_tm) {
   }
 }
 
+// From 18:00, once per local day: nudge if a habit with a 2+ day streak still
+// isn't done. s_streak_nudge_day latches on tm_yday. Undone means the streak
+// is measured behind today (it's still alive right now but breaks at midnight),
+// which is exactly what habitStreak sends as `streak` for a not-done habit.
+static void maybe_notify_streak_at_risk(struct tm *now_tm) {
+  if (!s_habit_streak_nudge || s_error_overlay_active || now_tm->tm_hour < 18 ||
+      s_streak_nudge_day == now_tm->tm_yday) {
+    return;
+  }
+  int at_risk = 0;
+  const char *one_title = NULL;
+  for (int i = 0; i < s_habit_count; i++) {
+    if (!s_habits[i].done && s_habits[i].streak >= 2) {
+      at_risk++;
+      one_title = s_habits[i].title;
+    }
+  }
+  if (at_risk == 0) {
+    return;
+  }
+  s_streak_nudge_day = now_tm->tm_yday;
+  if (at_risk == 1) {
+    snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
+             "Keep your streak\n%s", one_title);
+  } else {
+    snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
+             "Keep your streaks\n%d habits", at_risk);
+  }
+  show_top_banner(s_overtime_banner_text);
+}
+
 // MINUTE_UNIT tick: when s_due_reminder_min is set, fires the banner as the
 // soonest upcoming timed task comes within that window; also drives the idle
 // check above. App-open only.
@@ -7414,6 +7481,7 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
 #ifdef BREAK_REMINDER
   maybe_notify_idle();
 #endif
+  maybe_notify_streak_at_risk(now_tm);
   if (s_due_reminder_min <= 0 || s_error_overlay_active) {
     return;
   }

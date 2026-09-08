@@ -448,6 +448,9 @@ function sendStatus(code, message) {
     FOCUS_LEN_MIN: config.focusLenMin || 25,
     // "Stop tracking at midnight" - watch-side (main.c's maybe_stop_at_midnight).
     STOP_AT_MIDNIGHT: config.stopAtMidnight ? 1 : 0,
+    // "Nudge me in the evening about unfinished streaks" - watch-side
+    // (main.c's minute_tick_handler), app-open only, non-aplite.
+    HABIT_STREAK_NUDGE: config.habitStreakNudge ? 1 : 0,
   };
   if (message) {
     dict.STATUS_MSG = String(message).slice(0, 60);
@@ -647,6 +650,11 @@ function sendHabitAt(habits, index) {
   }
   if (h.streak) {
     dict.HABIT_STREAK = Math.min(h.streak, 9999);
+  }
+  // Only worth sending when it beats the current streak - the watch shows
+  // "best N" as a target when you've dropped below your record.
+  if (h.bestStreak && h.bestStreak > (h.streak || 0)) {
+    dict.HABIT_BEST_STREAK = Math.min(h.bestStreak, 9999);
   }
   sendWithRetry(dict, function () {
     sendHabitAt(habits, index + 1);
@@ -3176,6 +3184,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableTimeline: !!config.enableTimeline,
       focusLenMin: config.focusLenMin || 25,
       stopAtMidnight: !!config.stopAtMidnight,
+      habitStreakNudge: !!config.habitStreakNudge,
       appVersion: APP_VERSION,
     }
   );
@@ -3276,6 +3285,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableTimeline: !!result.enableTimeline,
     focusLenMin: parseInt(result.focusLenMin, 10) || 25,
     stopAtMidnight: !!result.stopAtMidnight,
+    habitStreakNudge: !!result.habitStreakNudge,
   };
   saveConfig(newConfig);
 

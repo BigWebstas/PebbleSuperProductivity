@@ -1125,7 +1125,7 @@ check('getActiveHabits includes an enabled click-counter, not done below goal', 
     state
   );
   const rows = habits(state);
-  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, isStopwatch: false, isCountdown: false, countdownMs: 0, streak: 0 }]);
+  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, isStopwatch: false, isCountdown: false, countdownMs: 0, streak: 0, bestStreak: 0 }]);
 });
 
 check('getActiveHabits marks done once today\'s count reaches goal', () => {
@@ -1252,6 +1252,31 @@ check('getActiveHabits streak counts consecutive goal-met days, unbroken through
   assert.strictEqual(rows.find((r) => r.id === 'h1').streak, 3);
   assert.strictEqual(rows.find((r) => r.id === 'h2').streak, 2);
   assert.strictEqual(rows.find((r) => r.id === 'h3').streak, 0);
+});
+
+check('getActiveHabits bestStreak is the longest goal-met run anywhere in history', () => {
+  const dayStr = (n) => {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    return store.dateToDateStr(d);
+  };
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      // current streak 1 (today only); an earlier 4-day run (days 4-7) is the record
+      addCounter({ id: 'h1', title: 'Run', isEnabled: true, type: 'ClickCounter', streakMinValue: 2,
+        countOnDay: { [dayStr(0)]: 2, [dayStr(2)]: 2, [dayStr(4)]: 2, [dayStr(5)]: 2, [dayStr(6)]: 2, [dayStr(7)]: 2 } }),
+      // never met goal -> bestStreak 0
+      addCounter({ id: 'h2', title: 'Read', isEnabled: true, type: 'ClickCounter', streakMinValue: 5,
+        countOnDay: { [dayStr(1)]: 1, [dayStr(2)]: 2 } }),
+    ],
+    state
+  );
+  const rows = habits(state);
+  assert.strictEqual(rows.find((r) => r.id === 'h1').streak, 1);
+  assert.strictEqual(rows.find((r) => r.id === 'h1').bestStreak, 4);
+  assert.strictEqual(rows.find((r) => r.id === 'h2').bestStreak, 0);
+  assert.strictEqual(store.habitBestStreak({ countOnDay: { [dayStr(0)]: 3, [dayStr(1)]: 3, [dayStr(2)]: 3 } }, 3), 3);
 });
 
 check('getActiveHabits sorts plain alphabetically by title, done and not-done interleaved', () => {

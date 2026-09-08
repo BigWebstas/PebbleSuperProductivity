@@ -27,6 +27,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var defaultTaskEstimateMin = options.defaultTaskEstimateMin || 0;
   var projects = options.projects || [];
   var enableHabits = options.enableHabits !== false;
+  var habitStreakNudge = !!options.habitStreakNudge;
   var enableAddTask = options.enableAddTask !== false;
   var enableProjects = options.enableProjects !== false;
   var enableStats = options.enableStats !== false;
@@ -414,6 +415,16 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="habitStreakNudge" type="checkbox"' + (habitStreakNudge ? ' checked' : '') + '>\n' +
+'    <label for="habitStreakNudge">Nudge me about unfinished streaks</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    From 6pm, once a day, vibrates a "Keep your streak" banner if a habit\n' +
+'    with a 2+ day streak still isn\'t done. Only fires while the watchapp is\n' +
+'    open. Not available on original Pebble/Pebble Steel (aplite).\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableProjects" type="checkbox"' + (enableProjects ? ' checked' : '') + '>\n' +
 '    <label for="enableProjects">Enable Projects</label>\n' +
 '  </div>\n' +
@@ -596,6 +607,7 @@ taskEstimateOptions + '\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
 '      defaultTaskEstimateMin: parseInt(document.getElementById(\'defaultTaskEstimateMin\').value, 10) || 0,\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
+'      habitStreakNudge: document.getElementById(\'habitStreakNudge\').checked,\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
 '      enableProjects: document.getElementById(\'enableProjects\').checked,\n' +
 '      enableStats: document.getElementById(\'enableStats\').checked,\n' +

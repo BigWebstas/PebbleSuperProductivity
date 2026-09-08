@@ -1451,6 +1451,38 @@ function habitStreak(c, goal) {
   return n;
 }
 
+// The longest run of consecutive goal-met days anywhere in this counter's
+// whole history - the record the current streak (habitStreak) is measured
+// against. countOnDay is date-string keyed ("YYYY-MM-DD"); a day absent or
+// below goal breaks a run. The watch shows this as "best N" when the current
+// streak has fallen behind it.
+function habitBestStreak(c, goal) {
+  var on = (c && c.countOnDay) || {};
+  var days = [];
+  for (var k in on) {
+    if (!on.hasOwnProperty(k) || (on[k] || 0) < goal) {
+      continue;
+    }
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k);
+    if (m) {
+      days.push(Math.round(Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000));
+    }
+  }
+  if (!days.length) {
+    return 0;
+  }
+  days.sort(function (a, b) { return a - b; });
+  var best = 1;
+  var run = 1;
+  for (var i = 1; i < days.length; i++) {
+    run = days[i] === days[i - 1] + 1 ? run + 1 : 1;
+    if (run > best) {
+      best = run;
+    }
+  }
+  return best;
+}
+
 function getActiveHabits(state, limit) {
   var counters = state.simpleCounter || {};
   var today = todayStr();
@@ -1471,6 +1503,7 @@ function getActiveHabits(state, limit) {
         isCountdown: isCountdown,
         countdownMs: isCountdown ? (c.countdownDuration || 0) : 0,
         streak: habitStreak(c, goal),
+        bestStreak: habitBestStreak(c, goal),
       };
     });
   rows.sort(function (a, b) { return titleCompare(a.title, b.title); });
@@ -1815,6 +1848,8 @@ module.exports = {
   applyOperations: applyOperations,
   getActiveTasks: getActiveTasks,
   getActiveHabits: getActiveHabits,
+  habitStreak: habitStreak,
+  habitBestStreak: habitBestStreak,
   getProjectList: getProjectList,
   getProjectTasks: getProjectTasks,
   getTagList: getTagList,
