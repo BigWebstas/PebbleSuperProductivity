@@ -2240,6 +2240,73 @@ static bool selected_row_is_presence_title(void) {
 
 // Starts/stops the marquee timer to match whether the selected row needs it,
 // optionally resetting the scroll position. Called on selection or list change.
+// Assembles a task row's subtitle: issue key, then the deadline marker, the
+// due time, and spent/estimate - each appended with a separator only when
+// something's already there. Shared by draw_task_row and refresh_scroll_state
+// (which needs the text to decide whether to run the marquee timer). Does NOT
+// cover the "Done" / pending-reschedule cases - draw_task_row handles those
+// before calling here, and they never need to scroll.
+static void build_task_subtitle(Task *task, char *out, size_t cap) {
+  out[0] = '\0';
+  bool is_tracking_this = s_tracking_task_id[0] != '\0' &&
+                           strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
+  int effective_ms = task->time_spent_ms;
+  if (is_tracking_this) {
+    time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
+    if (elapsed_s > 0) {
+      effective_ms += (int)elapsed_s * 1000;
+    }
+  }
+#ifndef PBL_PLATFORM_APLITE
+  if (task->issue_key[0] != '\0') {
+    str_copy(out, task->issue_key, cap);
+  }
+#endif
+  if (task->deadline_days != DEADLINE_NONE) {
+    char dl_text[16];
+    if (task->deadline_days < 0) {
+      str_copy(dl_text, "! overdue", sizeof(dl_text));
+    } else if (task->deadline_days == 0) {
+      str_copy(dl_text, "! today", sizeof(dl_text));
+    } else {
+      snprintf(dl_text, sizeof(dl_text), "! %dd", task->deadline_days);
+    }
+    size_t n = strlen(out);
+    if (n > 0) {
+      snprintf(out + n, cap - n, "  %s", dl_text);
+    } else {
+      str_copy(out, dl_text, cap);
+    }
+  }
+  if (task->due_min >= 0) {
+    char due_text[16];
+    format_due_time(task->due_min, due_text, sizeof(due_text));
+    size_t n = strlen(out);
+    if (n > 0) {
+      snprintf(out + n, cap - n, "  %s", due_text);
+    } else {
+      str_copy(out, due_text, cap);
+    }
+  }
+  if (effective_ms > 0 || is_tracking_this) {
+    char time_text[20];
+    format_duration_ms(effective_ms, is_tracking_this, time_text, sizeof(time_text));
+    if (task->time_estimate_ms > 0) {
+      char estimate_text[20];
+      format_duration_ms(task->time_estimate_ms, false, estimate_text, sizeof(estimate_text));
+      char combined[48];
+      snprintf(combined, sizeof(combined), "%s / %s", time_text, estimate_text);
+      str_copy(time_text, combined, sizeof(time_text));
+    }
+    size_t n = strlen(out);
+    if (n > 0) {
+      snprintf(out + n, cap - n, "%s%s", is_tracking_this ? "  " : " - ", time_text);
+    } else {
+      str_copy(out, time_text, cap);
+    }
+  }
+}
+
 static void refresh_scroll_state(bool reset_offset) {
   if (reset_offset) {
     s_scroll_offset_px = 0;
@@ -2248,6 +2315,16 @@ static void refresh_scroll_state(bool reset_offset) {
   GRect menu_bounds = layer_get_bounds(menu_layer_get_layer(s_menu_layer));
   int16_t available = menu_bounds.size.w - TITLE_BOX_X * 2;
   bool needs_scroll = selected && title_natural_width(selected->title) > available;
+#ifndef PBL_PLATFORM_APLITE
+  if (!needs_scroll && selected && !selected->done) {
+    char sub[56];
+    build_task_subtitle(selected, sub, sizeof(sub));
+    if (sub[0] != '\0' &&
+        title_natural_width_font(sub, fonts_get_system_font(SUBTITLE_FONT_KEY)) > available) {
+      needs_scroll = true;
+    }
+  }
+#endif
 #ifndef PBL_PLATFORM_APLITE
   if (!needs_scroll && selected_row_is_presence_title()) {
     needs_scroll = title_natural_width(s_presence_task) > available;
@@ -2390,71 +2467,8 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
     return;
   }
 
-  bool is_tracking_this = s_tracking_task_id[0] != '\0' &&
-                           strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
-  int effective_ms = task->time_spent_ms;
-  if (is_tracking_this) {
-    time_t elapsed_s = time(NULL) - s_tracking_start_epoch;
-    if (elapsed_s > 0) {
-      effective_ms += (int)elapsed_s * 1000;
-    }
-  }
-
-  char subtitle[56] = "";
-  // Issue-tracker key first ("PROJ-123" / "#42"), then the deadline marker -
-  // both stay visible when the line clips. Each later part appends with a
-  // separator only when something's already there.
-#ifndef PBL_PLATFORM_APLITE
-  if (task->issue_key[0] != '\0') {
-    str_copy(subtitle, task->issue_key, sizeof(subtitle));
-  }
-#endif
-  // Deadline marker. "!" reads as urgency; overdue / today spelled out, else
-  // "! Nd".
-  if (task->deadline_days != DEADLINE_NONE) {
-    char dl_text[16];
-    if (task->deadline_days < 0) {
-      str_copy(dl_text, "! overdue", sizeof(dl_text));
-    } else if (task->deadline_days == 0) {
-      str_copy(dl_text, "! today", sizeof(dl_text));
-    } else {
-      snprintf(dl_text, sizeof(dl_text), "! %dd", task->deadline_days);
-    }
-    size_t dll = strlen(subtitle);
-    if (dll > 0) {
-      snprintf(subtitle + dll, sizeof(subtitle) - dll, "  %s", dl_text);
-    } else {
-      str_copy(subtitle, dl_text, sizeof(subtitle));
-    }
-  }
-  if (task->due_min >= 0) {
-    char due_text[16];
-    format_due_time(task->due_min, due_text, sizeof(due_text));
-    size_t dl = strlen(subtitle);
-    if (dl > 0) {
-      snprintf(subtitle + dl, sizeof(subtitle) - dl, "  %s", due_text);
-    } else {
-      str_copy(subtitle, due_text, sizeof(subtitle));
-    }
-  }
-  if (effective_ms > 0 || is_tracking_this) {
-    char time_text[20];
-    format_duration_ms(effective_ms, is_tracking_this, time_text, sizeof(time_text));
-    if (task->time_estimate_ms > 0) {
-      char estimate_text[20];
-      format_duration_ms(task->time_estimate_ms, false, estimate_text, sizeof(estimate_text));
-      char combined[48];
-      snprintf(combined, sizeof(combined), "%s / %s", time_text, estimate_text);
-      str_copy(time_text, combined, sizeof(time_text));
-    }
-    size_t existing_len = strlen(subtitle);
-    if (existing_len > 0) {
-      const char *separator = is_tracking_this ? "  " : " - ";
-      snprintf(subtitle + existing_len, sizeof(subtitle) - existing_len, "%s%s", separator, time_text);
-    } else {
-      str_copy(subtitle, time_text, sizeof(subtitle));
-    }
-  }
+  char subtitle[56];
+  build_task_subtitle(task, subtitle, sizeof(subtitle));
 
   GRect left_box = subtitle_box;
 #ifndef PBL_PLATFORM_APLITE
@@ -2479,7 +2493,17 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
 #endif
 
   if (subtitle[0] != '\0') {
+#ifndef PBL_PLATFORM_APLITE
+    GFont sf = fonts_get_system_font(SUBTITLE_FONT_KEY);
+    // Marquee the subtitle on the selected row when it overflows - same
+    // two-copy scroll the title uses, sharing s_scroll_offset_px. Not on the
+    // pinned row (its right-aligned project name already claims half the line).
+    bool sub_marquee = is_selected && !show_project &&
+                        title_natural_width_font(subtitle, sf) > left_box.size.w;
+    draw_marquee_title(ctx, left_box, subtitle, sf, sub_marquee);
+#else
     draw_text(ctx, subtitle, SUBTITLE_FONT_KEY, left_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+#endif
   }
 }
 
