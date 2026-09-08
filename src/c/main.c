@@ -2380,12 +2380,57 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
     if (kind == SECTION0_ROW_HABITS) {
       // Navigates to the habits (SimpleCounter) page. Icon matches the real
-      // app's "heart_check" icon. GCompOpSet (inside draw_nav_row) lets the
-      // bitmap's transparent background take effect.
+      // app's "heart_check" icon; GCompOpSet lets its transparent background
+      // through.
+#ifdef PBL_PLATFORM_APLITE
+      // aplite has no RAM headroom for the progress layout below - plain row.
       GRect ic = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
                        ROW_ICON_SIZE, ROW_ICON_SIZE);
       draw_nav_row(ctx, bounds, is_selected, GColorVividCerulean, "Habits",
                    s_heart_bitmap, s_heart_white_bitmap, ic);
+#else
+      // Title + a "N left today" / "All done today" progress subtitle, laid out
+      // like the Resync row below. The all-done state gets a small check drawn
+      // ahead of its subtitle.
+      int habits_left = 0;
+      for (int i = 0; i < s_habit_count; i++) {
+        if (!s_habits[i].done) {
+          habits_left++;
+        }
+      }
+      bool all_done = s_habit_count > 0 && habits_left == 0;
+      GColor fg = is_selected ? GColorWhite : GColorBlack;
+      fill_bg(ctx, bounds, GColorVividCerulean);
+      graphics_context_set_text_color(ctx, fg);
+      draw_text(ctx, "Habits", HEADING_FONT_KEY,
+                GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
+                      bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H),
+                GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      if (s_habit_count > 0) {
+        int16_t sub_x = TITLE_BOX_X;
+        int16_t sub_y = ROW_SUBTITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H);
+        char hsub[22];
+        if (all_done) {
+          graphics_context_set_stroke_color(ctx, fg);
+          graphics_draw_line(ctx, GPoint(sub_x, sub_y + 8), GPoint(sub_x + 3, sub_y + 11));
+          graphics_draw_line(ctx, GPoint(sub_x + 3, sub_y + 11), GPoint(sub_x + 9, sub_y + 4));
+          sub_x += 13;
+          str_copy(hsub, "All done today", sizeof(hsub));
+        } else {
+          snprintf(hsub, sizeof(hsub), "%d left today", habits_left);
+        }
+        draw_text(ctx, hsub, CHROME_FONT_KEY,
+                  GRect(sub_x, sub_y, bounds.size.w - sub_x - TITLE_BOX_X, CHROME_STRIP_H),
+                  GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      }
+      GRect ic = GRect(bounds.size.w - ROW_ICON_SIZE - 10,
+                       s_habit_count > 0
+                         ? ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H) + 2
+                         : (bounds.size.h - ROW_ICON_SIZE) / 2,
+                       ROW_ICON_SIZE, ROW_ICON_SIZE);
+      graphics_context_set_compositing_mode(ctx, GCompOpSet);
+      graphics_draw_bitmap_in_rect(ctx, is_selected ? s_heart_white_bitmap : s_heart_bitmap, ic);
+#endif
       return;
     }
 
@@ -4924,6 +4969,7 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // Right-aligned streak label on the subtitle line. Current streak from 2 up
   // ("1 streak" reads oddly); at 7+ it's a milestone - bold white-on-black
   // rounded badge (black-on-white contrasts on the cerulean selected row too).
+  // Milestone tiers 7 / 30 / 100 add 1 / 2 / 3 white pips inside the badge.
   // Once the current streak lapses below 2, show "best N" instead as the
   // record to chase, when there is one.
   char st[16];
@@ -4944,14 +4990,23 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     if (sw > subtitle_box.size.w / 2) {
       sw = subtitle_box.size.w / 2;
     }
+    int tier = habit->streak >= 100 ? 3 : habit->streak >= 30 ? 2 : milestone ? 1 : 0;
+    int16_t pips_w = tier ? tier * 4 + 1 : 0; // tier 3px pips, 1px apart, +2px lead
     int16_t pad = milestone ? 3 : 0;
-    GRect text_box = GRect(subtitle_box.origin.x + subtitle_box.size.w - sw,
-                           subtitle_box.origin.y + 2, sw, subtitle_box.size.h - 2);
+    int16_t badge_w = sw + pad * 2 + pips_w;
+    int16_t badge_x = subtitle_box.origin.x + subtitle_box.size.w - badge_w;
+    GRect text_box = GRect(badge_x + pad + pips_w, subtitle_box.origin.y + 2,
+                           sw, subtitle_box.size.h - 2);
     if (milestone) {
       graphics_context_set_fill_color(ctx, GColorBlack);
-      graphics_fill_rect(ctx, GRect(text_box.origin.x - pad, subtitle_box.origin.y,
-                                    sw + pad * 2, subtitle_box.size.h),
+      graphics_fill_rect(ctx, GRect(badge_x, subtitle_box.origin.y, badge_w, subtitle_box.size.h),
                          3, GCornersAll);
+      graphics_context_set_fill_color(ctx, GColorWhite);
+      for (int p = 0; p < tier; p++) {
+        graphics_fill_rect(ctx, GRect(badge_x + 3 + p * 4,
+                                      subtitle_box.origin.y + subtitle_box.size.h / 2 - 1, 3, 3),
+                           0, GCornerNone);
+      }
       graphics_context_set_text_color(ctx, GColorWhite);
     }
     graphics_draw_text(ctx, st, sf, text_box,
@@ -4959,7 +5014,7 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     if (milestone) {
       graphics_context_set_text_color(ctx, fg);
     }
-    left_sub.size.w -= (sw + 4 + pad * 2);
+    left_sub.size.w -= (badge_w + 4);
   }
 #endif
   draw_text(ctx, subtitle, SUBTITLE_FONT_KEY, left_sub, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
