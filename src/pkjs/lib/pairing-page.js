@@ -516,6 +516,14 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '  <button id="clearDataBtn" class="danger">Clear all data &amp; resync</button>\n' +
 '\n' +
+'  <p class="hint">\n' +
+'    Wipes only the watch\'s stored copy of the task, habit, and project\n' +
+'    lists - what it shows when the phone is out of range. The watch\n' +
+'    re-downloads them from the phone straight away. Use this if the watch\n' +
+'    keeps showing a stale list after a resync.\n' +
+'  </p>\n' +
+'  <button id="wipeWatchCacheBtn" class="danger">Wipe watch cache</button>\n' +
+'\n' +
 '  <button id="saveBtn">Save &amp; sync</button>\n' +
 '  <button id="cancelBtn" class="secondary">Cancel</button>\n' +
 '\n' +
@@ -616,6 +624,13 @@ taskEstimateOptions + '\n' +
 '      return;\n' +
 '    }\n' +
 '    returnToWatchApp({ clearData: true });\n' +
+'  });\n' +
+'\n' +
+'  document.getElementById(\'wipeWatchCacheBtn\').addEventListener(\'click\', function () {\n' +
+'    if (!window.confirm(\'Wipe the watch\\\'s stored task, habit and project lists? The watch re-downloads them from the phone right away. This does not touch your account or the phone\\\'s data.\')) {\n' +
+'      return;\n' +
+'    }\n' +
+'    returnToWatchApp({ wipeWatchCache: true });\n' +
 '  });\n' +
 '\n' +
 '  document.getElementById(\'cancelBtn\').addEventListener(\'click\', function () {\n' +

@@ -86,6 +86,9 @@ var MSG_TASK_SET_DEADLINE = 46;     // watch -> phone: TASK_ID + TASK_DEADLINE_D
 var MSG_TASK_TOGGLE_TAG = 47;       // watch -> phone: TASK_ID + PROJECT_ID (tag id) + PROJECT_TASK_BACKLOG (1 add / 0 remove)
 var MSG_TASK_SET_DUE_TIME = 48;     // watch -> phone: TASK_ID + TASK_DUE_MIN (hour*60; phone picks today/tomorrow)
 var MSG_TASK_MOVE_PROJECT = 49;     // watch -> phone: TASK_ID + PROJECT_ID (target project)
+// Danger-zone "Wipe watch cache" (pairing page). No keys - the watch drops its
+// persisted task/habit/project-list blobs and pulls a fresh copy.
+var MSG_WIPE_CACHE = 50;            // phone -> watch: (no keys)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -3210,6 +3213,19 @@ Pebble.addEventListener('webviewclosed', function (e) {
     localStorage.removeItem('sp_last_seq');
     localStorage.removeItem('sp_vector_clock');
     localStorage.removeItem('sp_last_synced_at');
+    doSync();
+    return;
+  }
+
+  // Danger-zone "Wipe watch cache" - tell the watch to drop its persisted
+  // task / habit / project-list blobs (main.c's clear_persisted_caches). The
+  // phone's own replay cache and credentials are left alone; the watch pulls a
+  // fresh list itself right after, and the doSync() here is the belt-and-braces
+  // refresh in case that request is dropped.
+  if (result.wipeWatchCache) {
+    sendWithRetry({ MSG_TYPE: MSG_WIPE_CACHE }, function () {}, function (e) {
+      console.log('[pkjs] MSG_WIPE_CACHE send failed: ' + JSON.stringify(e));
+    });
     doSync();
     return;
   }

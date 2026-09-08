@@ -175,6 +175,9 @@ enum {
   // opens a project picker, Select sends this. Replays as [Task Shared]
   // moveToOtherProject.
   MSG_TASK_MOVE_PROJECT = 49,       // watch -> phone: TASK_ID + PROJECT_ID (target)
+  // "Wipe watch cache" from the pairing page's danger zone. No keys - drop the
+  // persisted task/habit/project-list blobs and pull a fresh list.
+  MSG_WIPE_CACHE = 50,              // phone -> watch: (no keys)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -1197,6 +1200,33 @@ static void load_habits(void) {
   s_habit_count = load_blob_cache(121, 260, (uint8_t *)s_habits, MAX_HABITS, sizeof(Habit));
 }
 #endif
+
+// Danger-zone "Wipe watch cache" (pairing page -> MSG_WIPE_CACHE): drop every
+// persisted list blob - tasks, habits, and the project list - so the next
+// offline open starts empty instead of from a stale snapshot. In-memory counts
+// are zeroed too; the caller pulls a fresh list from the phone right after.
+// Credentials, feature toggles, and tracking/focus state are left alone - those
+// aren't "the cache".
+static void clear_persisted_caches(void) {
+#ifdef PBL_PLATFORM_APLITE
+  // aplite only ever persists the small single-blob habit list.
+  persist_delete(PERSIST_KEY_HABITS);
+  persist_delete(PERSIST_KEY_HABITS + 1);
+#else
+  persist_delete(100); // legacy single-blob task key (pre-chunk builds)
+  save_blob_cache(101, 200, NULL, 0, sizeof(Task), (size_t)MAX_TASKS * sizeof(Task));
+  persist_delete(PERSIST_KEY_HABITS); // legacy single-blob habit key
+  save_blob_cache(121, 260, NULL, 0, sizeof(Habit), (size_t)MAX_HABITS * sizeof(Habit));
+#if PROJECTS_CACHE
+  persist_delete(PERSIST_KEY_BROWSE_PROJECTS); // legacy single-blob key
+  save_blob_cache(PERSIST_KEY_BROWSE_PROJECTS + 1, 280, NULL, 0, sizeof(BrowseProject),
+                  (size_t)MAX_BROWSE_PROJECTS * sizeof(BrowseProject));
+  s_browse_project_count = 0;
+#endif
+#endif
+  s_task_count = 0;
+  s_habit_count = 0;
+}
 
 static const uint32_t PERSIST_KEY_TRACKING_ID = 110;
 static const uint32_t PERSIST_KEY_TRACKING_START = 111;
@@ -4391,6 +4421,17 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (s_status_code == STATUS_ERROR) {
         show_error_overlay();
       }
+      break;
+    }
+    case MSG_WIPE_CACHE: {
+      // Pairing page "Wipe watch cache": forget the persisted lists, show the
+      // now-empty list, and pull a fresh copy from the phone.
+      clear_persisted_caches();
+      if (s_menu_layer) {
+        menu_layer_reload_data(s_menu_layer);
+      }
+      update_empty_layer();
+      request_sync();
       break;
     }
 #ifndef PBL_PLATFORM_APLITE
