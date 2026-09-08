@@ -878,6 +878,19 @@ function applyTimeTrackingAction(op, actionPayload, state) {
   byCtx[date] = Object.assign({}, byCtx[date], data);
 }
 
+// globalConfig sync (global-config.actions.ts): "[Global Config] Update Global
+// Config Section", entityId = the section key, actionPayload = { sectionKey,
+// sectionCfg (a Partial<section>) }. Merged into state.globalConfig[section].
+// The watch only reads the `pomodoro` section (focus-mode timing).
+function applyGlobalConfigAction(op, actionPayload, state) {
+  if (!actionPayload || !actionPayload.sectionKey) {
+    return;
+  }
+  var gc = state.globalConfig || (state.globalConfig = {});
+  gc[actionPayload.sectionKey] = Object.assign(
+    {}, gc[actionPayload.sectionKey], actionPayload.sectionCfg || {});
+}
+
 // Applies one SuperSync operation to `state` in place. `crypto` is the
 // object returned by supersync-client.js's createCrypto(password) if E2EE is
 // on, or null/undefined otherwise. Never throws - a single malformed/
@@ -973,6 +986,10 @@ function applyOperation(entry, state, crypto) {
       applyTimeTrackingAction(op, payload && payload.actionPayload, state);
       return;
     }
+    if (entityType === 'global_config') {
+      applyGlobalConfigAction(op, payload && payload.actionPayload, state);
+      return;
+    }
 
     // Everything else (GLOBAL_CONFIG, PLUGIN_USER_DATA, ...) is unused by
     // the watch's task list - kept as a best-effort flat CRUD merge (this
@@ -1037,6 +1054,16 @@ function applyOperation(entry, state, crypto) {
         }
         if (payload && payload.taskRepeatCfg && payload.taskRepeatCfg.entities) {
           state.taskRepeatCfg = payload.taskRepeatCfg.entities;
+        }
+        if (payload && payload.metric && payload.metric.entities) {
+          state.metric = payload.metric.entities;
+        }
+        // globalConfig / timeTracking are plain objects, not NgRx EntityState.
+        if (payload && payload.globalConfig) {
+          state.globalConfig = payload.globalConfig;
+        }
+        if (payload && payload.timeTracking) {
+          state.timeTracking = payload.timeTracking;
         }
         break;
       default:

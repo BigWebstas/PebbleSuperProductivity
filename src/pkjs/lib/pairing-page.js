@@ -50,6 +50,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var stopAtMidnight = !!options.stopAtMidnight;
   var enableTimeline = !!options.enableTimeline;
   var focusLenMin = options.focusLenMin || 25;
+  var usePomodoroCfg = !!options.usePomodoroCfg;
   var appVersion = options.appVersion || '';
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
@@ -371,6 +372,16 @@ focusLenOptions + '\n' +
 '    focus mode. Not available on original Pebble/Pebble Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="usePomodoroCfg" type="checkbox"' + (usePomodoroCfg ? ' checked' : '') + '>\n' +
+'    <label for="usePomodoroCfg">Use desktop Pomodoro timing</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Focus sessions use your desktop Pomodoro work length instead of the\n' +
+'    dropdown above, and a completed session rolls straight into a break of\n' +
+'    the configured length before buzzing "Break over".\n' +
+'  </p>\n' +
+'\n' +
 '  <label for="backlightMode">Backlight</label>\n' +
 '  <select id="backlightMode">\n' +
 backlightOptions + '\n' +
@@ -652,6 +663,7 @@ taskEstimateOptions + '\n' +
 '      stopAtMidnight: document.getElementById(\'stopAtMidnight\').checked,\n' +
 '      enableTimeline: document.getElementById(\'enableTimeline\').checked,\n' +
 '      focusLenMin: parseInt(document.getElementById(\'focusLenMin\').value, 10) || 25,\n' +
+'      usePomodoroCfg: document.getElementById(\'usePomodoroCfg\').checked,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +
 '  });\n' +

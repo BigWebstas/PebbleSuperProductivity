@@ -102,7 +102,8 @@ var MSG_NOTESPAGE_DATA = 56;       // phone -> watch: NOTESPAGE_TEXT
 // Task action menu "Repeat" row - fetched on open, toggled with the pause msg.
 var MSG_TASK_REPEAT_REQUEST = 57;  // watch -> phone: TASK_ID
 var MSG_TASK_REPEAT_DATA = 58;     // phone -> watch: TASK_ID + TASK_REPEAT_TEXT + TASK_REPEAT_PAUSED
-var MSG_TASK_REPEAT_PAUSE = 59;    // watch -> phone: TASK_ID + TASK_REPEAT_PAUSED (1 pause / 0 resume)
+var MSG_TASK_REPEAT_PAUSE = 59;    // watch -> phone: TASK_ID + TASK_REPEAT_PAUSED
+var MSG_POMODORO_CFG = 60;         // phone -> watch: POMODORO_WORK_MIN + POMODORO_BREAK_MIN (1 pause / 0 resume)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -463,6 +464,9 @@ function sendStatus(code, message) {
     // Focus-mode session length in minutes (watch-local pomodoro on the
     // full-screen tracking page - main.c's s_focus_len_min). Default 25.
     FOCUS_LEN_MIN: config.focusLenMin || 25,
+    // Inherit the desktop's Pomodoro work/break timing for focus mode instead
+    // of FOCUS_LEN_MIN, and chain a break after each session.
+    USE_POMODORO_CFG: config.usePomodoroCfg ? 1 : 0,
     // "Stop tracking at midnight" - watch-side (main.c's maybe_stop_at_midnight).
     STOP_AT_MIDNIGHT: config.stopAtMidnight ? 1 : 0,
     // "Nudge me in the evening about unfinished streaks" - watch-side
@@ -1089,7 +1093,26 @@ function pushCachedStateToWatch(config) {
     var habits = store.getActiveHabits(state, MAX_HABITS);
     sendHabitListToWatch(habits);
   }
+  sendPomodoroCfg(state);
   sendStatus(STATUS_OK);
+}
+
+// Push globalConfig.pomodoro's work/break lengths (ms -> whole minutes) so the
+// watch's focus mode can inherit them (main.c's s_pomodoro_*). Harmless when
+// config.usePomodoroCfg is off - the watch just stores the numbers.
+function sendPomodoroCfg(state) {
+  var p = (state.globalConfig && state.globalConfig.pomodoro) || {};
+  var toMin = function (ms, dflt) {
+    var m = Math.round((ms || 0) / 60000);
+    return (m > 0 && m < 600) ? m : dflt;
+  };
+  Pebble.sendAppMessage({
+    MSG_TYPE: MSG_POMODORO_CFG,
+    POMODORO_WORK_MIN: toMin(p.duration, 25),
+    POMODORO_BREAK_MIN: toMin(p.breakDuration, 5),
+  }, function () {}, function (e) {
+    console.log('[pkjs] pomodoro cfg send failed: ' + JSON.stringify(e));
+  });
 }
 
 function doSync() {
@@ -3492,6 +3515,7 @@ Pebble.addEventListener('showConfiguration', function () {
       liveTracking: !!config.liveTracking,
       enableTimeline: !!config.enableTimeline,
       focusLenMin: config.focusLenMin || 25,
+      usePomodoroCfg: !!config.usePomodoroCfg,
       stopAtMidnight: !!config.stopAtMidnight,
       habitStreakNudge: !!config.habitStreakNudge,
       enableReflect: !!config.enableReflect,
@@ -3595,6 +3619,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     liveTracking: !!result.liveTracking,
     enableTimeline: !!result.enableTimeline,
     focusLenMin: parseInt(result.focusLenMin, 10) || 25,
+    usePomodoroCfg: !!result.usePomodoroCfg,
     stopAtMidnight: !!result.stopAtMidnight,
     habitStreakNudge: !!result.habitStreakNudge,
     enableReflect: !!result.enableReflect,
