@@ -85,6 +85,7 @@ var MSG_TASK_SET_ESTIMATE = 45;     // watch -> phone: TASK_ID + TASK_TIME_ESTIM
 var MSG_TASK_SET_DEADLINE = 46;     // watch -> phone: TASK_ID + TASK_DEADLINE_DAYS (days from today, <0 clears)
 var MSG_TASK_TOGGLE_TAG = 47;       // watch -> phone: TASK_ID + PROJECT_ID (tag id) + PROJECT_TASK_BACKLOG (1 add / 0 remove)
 var MSG_TASK_SET_DUE_TIME = 48;     // watch -> phone: TASK_ID + TASK_DUE_MIN (hour*60; phone picks today/tomorrow)
+var MSG_TASK_MOVE_PROJECT = 49;     // watch -> phone: TASK_ID + PROJECT_ID (target project)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -1476,6 +1477,37 @@ function buildBacklogToRegularOp(projectId, taskId, clientId) {
   };
 }
 
+// "[Task Shared] moveToOtherProject" (task-shared.actions.ts). Replay
+// (task-store.js) reads task.id, task.subTaskIds and targetProjectId; the real
+// desktop reducer also uses prevProjectId to splice the task out of the old
+// project's taskIds, so send that too.
+function buildMoveToProjectOp(taskId, targetProjectId, prevProjectId, subTaskIds, clientId) {
+  var crypto = getCrypto();
+  var payload = {
+    actionPayload: {
+      task: { id: taskId, subTaskIds: subTaskIds || [] },
+      targetProjectId: targetProjectId,
+      prevProjectId: prevProjectId || null,
+    },
+    entityChanges: [],
+  };
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  return {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[Task Shared] moveToOtherProject',
+    entityType: 'TASK',
+    entityId: taskId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+}
+
 // "[Project] Move Task from regular to backlog" - the mirror of
 // buildBacklogToRegularOp above, same payload shape. task-store's replay only
 // reads actionPayload.taskId for either direction; afterTaskId null drops it at
@@ -1718,6 +1750,52 @@ function handleTaskSetDueTime(taskId, dueMin) {
     .catch(function (err) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload due-time change: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, failureMsg);
+    });
+}
+
+// Watch "Move to project": reassign the task (and its subtasks) to
+// targetProjectId. NO_PROJECT_ID / empty clears the project (plain updateTask);
+// a real target uses moveToOtherProject so the desktop reconciles taskIds too.
+function handleMoveToProject(taskId, targetProjectId) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task) {
+    return;
+  }
+  var toNone = !targetProjectId || targetProjectId === store.NO_PROJECT_ID;
+  var newPid = toNone ? null : targetProjectId;
+  if ((task.projectId || null) === newPid) {
+    return; // already there
+  }
+  var subIds = (task.subTaskIds || []).slice();
+  var ids = [taskId].concat(subIds);
+  ids.forEach(function (id) {
+    if (state.task[id]) {
+      state.task[id] = Object.assign({}, state.task[id],
+        { projectId: newPid || undefined, __inBacklog: false });
+    }
+  });
+  saveState(state);
+  sendTaskListToWatch(watchTaskList(state, config));
+
+  var clientId = getOrCreateClientId();
+  var op = toNone
+    ? buildTaskUpdateOp(taskId, { projectId: null }, clientId)
+    : buildMoveToProjectOp(taskId, targetProjectId, task.projectId || null, subIds, clientId);
+  var failureMsg = null;
+  uploadOps([op], config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload project move: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
     })
     .then(function () {
@@ -2995,6 +3073,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_SET_DUE_TIME:
       handleTaskSetDueTime(payload.TASK_ID, payload.TASK_DUE_MIN);
+      break;
+    case MSG_TASK_MOVE_PROJECT:
+      handleMoveToProject(payload.TASK_ID, payload.PROJECT_ID);
       break;
     case MSG_PRESENCE_STOP:
       if (presenceClient && presenceLastSessionId) {

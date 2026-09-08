@@ -170,6 +170,10 @@ enum {
   // minutes since midnight; the phone sets dueWithTime to the next occurrence
   // of that time (today if still future, else tomorrow).
   MSG_TASK_SET_DUE_TIME = 48,       // watch -> phone: TASK_ID + TASK_DUE_MIN
+  // Move a task (+ its subtasks) to another project - the "Move to project" row
+  // opens a project picker, Select sends this. Replays as [Task Shared]
+  // moveToOtherProject.
+  MSG_TASK_MOVE_PROJECT = 49,       // watch -> phone: TASK_ID + PROJECT_ID (target)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -794,13 +798,17 @@ static int s_browse_level = 0;              // 0 = project list, 1 = one project
 // Which flavour this window is showing. Set before push_browse_window / any
 // request; the *_REQUEST sends carry IS_TAGS off it, and the draw / long-press
 // paths branch on it (tags have no backlog, no notes, no offline cache).
-// BROWSE_TAG_EDIT is level-0-only: the tag list with a checkbox per tag, Select
-// toggles that tag on s_browse_edit_task_id. Reached from a task's notes overlay.
-typedef enum { BROWSE_PROJECTS, BROWSE_TAGS, BROWSE_TAG_EDIT } BrowseMode;
+// BROWSE_TAG_EDIT / BROWSE_MOVE are level-0-only pickers driven from the task
+// action menu, both keyed off s_browse_edit_task_id: TAG_EDIT toggles a tag on
+// it (checkbox list), MOVE reassigns its project (plain project list).
+typedef enum { BROWSE_PROJECTS, BROWSE_TAGS, BROWSE_TAG_EDIT, BROWSE_MOVE } BrowseMode;
 static BrowseMode s_browse_mode = BROWSE_PROJECTS;
-static char s_browse_edit_task_id[MAX_ID_LEN] = ""; // the task BROWSE_TAG_EDIT tags
-// Any tag-flavoured mode (list request carries IS_TAGS; no notes/backlog/cache).
-static bool browse_wants_tags(void) { return s_browse_mode != BROWSE_PROJECTS; }
+static char s_browse_edit_task_id[MAX_ID_LEN] = ""; // the task TAG_EDIT / MOVE acts on
+// Tag-flavoured modes want the TAG list (IS_TAGS) and have no notes/backlog/
+// cache. BROWSE_MOVE is NOT one - it uses the plain project list.
+static bool browse_wants_tags(void) {
+  return s_browse_mode == BROWSE_TAGS || s_browse_mode == BROWSE_TAG_EDIT;
+}
 static Window *s_browse_window = NULL;
 static MenuLayer *s_browse_menu = NULL;
 static StatusBarLayer *s_browse_status_bar = NULL;
@@ -2696,6 +2704,10 @@ static void send_pending_retry(void) {
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_int32(iter, KEY_TASK_DUE_MIN, s_retry_int);
       break;
+    case MSG_TASK_MOVE_PROJECT:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2); // target project
+      break;
     case MSG_TASK_TOGGLE_TAG:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2); // the tag id
@@ -2831,6 +2843,10 @@ static void send_toggle_tag(const char *task_id, const char *tag_id, int32_t ass
 // Schedule a task at `hour`:00 (the phone picks the day).
 static void send_task_set_due_time(const char *task_id, int hour) {
   begin_send(MSG_TASK_SET_DUE_TIME, task_id, NULL, hour * 60);
+}
+
+static void send_move_to_project(const char *task_id, const char *project_id) {
+  begin_send(MSG_TASK_MOVE_PROJECT, task_id, project_id, 0);
 }
 #endif
 
@@ -5252,6 +5268,11 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
       send_toggle_tag(s_browse_edit_task_id, p->id, p->task_count);
       return;
     }
+    if (s_browse_mode == BROWSE_MOVE) {
+      send_move_to_project(s_browse_edit_task_id, p->id);
+      window_stack_pop(true); // back to whatever opened the picker
+      return;
+    }
 #endif
     browse_descend(p->id);
     return;
@@ -5279,8 +5300,8 @@ static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell
   backlight_touch();
   if (s_browse_level == 0) {
 #ifndef PBL_PLATFORM_APLITE
-    if (browse_wants_tags()) {
-      return; // a tag has no notes
+    if (browse_wants_tags() || s_browse_mode == BROWSE_MOVE) {
+      return; // a tag has no notes; the MOVE picker has no long-press
     }
 #endif
     BrowseProject *p = resolve_browse_project_at(*cell_index);
@@ -5423,8 +5444,10 @@ static void push_browse_window(const char *jump_to_project) {
   s_browse_project_count = 0;
   s_browse_project_incoming = 0;
 #if PROJECTS_CACHE
-  if (s_browse_mode == BROWSE_PROJECTS) {
-    load_browse_projects();  // instant render from the cache; the fetch below refreshes it. Tags aren't cached.
+  if (!browse_wants_tags()) {
+    // PROJECTS and the MOVE picker both show the project list - render the cache
+    // instantly, the fetch below refreshes it. Tags aren't cached.
+    load_browse_projects();
   }
 #endif
   bool jumping = jump_to_project && jump_to_project[0] != '\0';
@@ -5994,20 +6017,23 @@ static void push_value_picker(PickKind kind, const char *task_id, int current) {
 // Long-Select on a task row - today list OR a Projects/Tags browser task view -
 // opens this. The one home for per-task actions. Each row pops this menu, then
 // launches its target, so Back from the target returns to the list.
-// ACT_BACKLOG only shows for a Projects-browser task (ACTX_PROJECT).
 enum {
-  ACT_TRACK,
-  ACT_TODAY,
-  ACT_TOMORROW,
-  ACT_AT,
-  ACT_UNSCHEDULE,
-  ACT_NOTES,
-  ACT_TAGS,
-  ACT_ESTIMATE,
-  ACT_DEADLINE,
-  ACT_BACKLOG,   // must stay last before ACT_COUNT (num_rows drops it otherwise)
-  ACT_COUNT,
+  ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
+  ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG,
 };
+// The visible rows, in order, per context. Tags / Move open the browse window
+// as a picker, so they're only offered from the today list (from the browser
+// that window is already on the stack). Backlog is a project-task concept.
+static const int s_act_rows_today[] = {
+  ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
+  ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE };
+static const int s_act_rows_project[] = {
+  ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
+  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG };
+static const int s_act_rows_tag[] = {
+  ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
+  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE };
+
 // ActionCtx declared with the forward decls.
 static Window *s_action_window = NULL;
 static MenuLayer *s_action_menu = NULL;
@@ -6015,6 +6041,14 @@ static StatusBarLayer *s_action_status_bar = NULL;
 static char s_action_task_id[MAX_ID_LEN] = "";
 static ActionCtx s_action_ctx = ACTX_TODAY;
 static bool s_action_in_backlog = false;
+
+static const int *act_rows(int *count) {
+  switch (s_action_ctx) {
+    case ACTX_PROJECT: *count = ARRLEN(s_act_rows_project); return s_act_rows_project;
+    case ACTX_TAG:     *count = ARRLEN(s_act_rows_tag);     return s_act_rows_tag;
+    default:           *count = ARRLEN(s_act_rows_today);   return s_act_rows_today;
+  }
+}
 
 static bool action_task_is_tracked(void) {
   return s_tracking_task_id[0] != '\0' &&
@@ -6037,12 +6071,19 @@ static Task *resolve_action_task(void) {
 }
 
 static uint16_t action_get_num_rows(MenuLayer *ml, uint16_t section, void *ctx) {
-  return s_action_ctx == ACTX_PROJECT ? ACT_COUNT : ACT_COUNT - 1;
+  int n;
+  act_rows(&n);
+  return (uint16_t)n;
 }
 
 static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, void *c) {
+  int n;
+  const int *rows = act_rows(&n);
+  if ((int)idx->row >= n) {
+    return;
+  }
   const char *label = "";
-  switch (idx->row) {
+  switch (rows[idx->row]) {
     case ACT_TRACK:      label = action_task_is_tracked() ? "Stop tracking" : "Start tracking"; break;
     case ACT_TODAY:      label = "Schedule today"; break;
     case ACT_TOMORROW:   label = "Schedule tomorrow"; break;
@@ -6050,6 +6091,7 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
     case ACT_UNSCHEDULE: label = "Unschedule"; break;
     case ACT_NOTES:      label = "Notes"; break;
     case ACT_TAGS:       label = "Edit tags"; break;
+    case ACT_MOVE:       label = "Move to project"; break;
     case ACT_ESTIMATE:   label = "Set estimate"; break;
     case ACT_DEADLINE:   label = "Set deadline"; break;
     case ACT_BACKLOG:    label = s_action_in_backlog ? "Move to list" : "Move to backlog"; break;
@@ -6059,7 +6101,12 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
 
 static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
   backlight_touch();
-  uint16_t row = idx->row;
+  int n;
+  const int *rows = act_rows(&n);
+  if ((int)idx->row >= n) {
+    return;
+  }
+  int row = rows[idx->row];
   Task *t = resolve_action_task();
   window_stack_pop(true); // close the menu; targets push onto the list below it
   switch (row) {
@@ -6108,6 +6155,13 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
     case ACT_TAGS:
 #if PROJECTS_BROWSER
       s_browse_mode = BROWSE_TAG_EDIT;
+      str_copy(s_browse_edit_task_id, s_action_task_id, sizeof(s_browse_edit_task_id));
+      push_browse_window(NULL);
+#endif
+      break;
+    case ACT_MOVE:
+#if PROJECTS_BROWSER
+      s_browse_mode = BROWSE_MOVE;
       str_copy(s_browse_edit_task_id, s_action_task_id, sizeof(s_browse_edit_task_id));
       push_browse_window(NULL);
 #endif
