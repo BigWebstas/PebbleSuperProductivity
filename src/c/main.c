@@ -1401,7 +1401,9 @@ static void show_notes_overlay(Task *task);
 static void show_project_notes_overlay(TaskGroup *group);
 static void hide_notes_overlay(void);
 static void push_notes_window(void);
-typedef enum { PICK_ESTIMATE, PICK_DEADLINE } PickKind;
+typedef enum { PICK_ESTIMATE, PICK_DEADLINE, PICK_HABIT } PickKind;
+// task_id is a habit id for PICK_HABIT. current: ms (estimate) / days-from-today
+// or DEADLINE_NONE (deadline) / the counter's value (habit).
 static void push_value_picker(PickKind kind, const char *task_id, int current);
 static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
@@ -4867,6 +4869,32 @@ static void habits_menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_i
 }
 #endif
 
+#ifndef PBL_PLATFORM_APLITE
+// Long-Up on a plain ClickCounter habit opens the value picker (Select +1 and
+// long-Select -1 are unchanged; a timer habit has no set-value action). Wraps
+// the MenuLayer's own provider the same way the main / browse windows do.
+static ClickConfigProvider s_habits_menu_ccp = NULL;
+
+static void habits_value_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (!s_habits_menu_layer) {
+    return;
+  }
+  Habit *h = resolve_habit_at(menu_layer_get_selected_index(s_habits_menu_layer));
+  if (!h || h->is_stopwatch || h->is_countdown) {
+    return;
+  }
+  backlight_touch();
+  push_value_picker(PICK_HABIT, h->id, h->value);
+}
+
+static void habits_menu_click_config_provider(void *context) {
+  if (s_habits_menu_ccp) {
+    s_habits_menu_ccp(context);
+  }
+  window_long_click_subscribe(BUTTON_ID_UP, 0, habits_value_long_click_handler, NULL);
+}
+#endif
+
 static void habits_window_load(Window *window) {
   Layer *window_layer;
   GRect content_bounds = window_chrome(window, &s_habits_status_bar, &window_layer);
@@ -4883,6 +4911,11 @@ static void habits_window_load(Window *window) {
 #endif
   });
   menu_layer_set_click_config_onto_window(s_habits_menu_layer, window);
+#ifndef PBL_PLATFORM_APLITE
+  s_habits_menu_ccp = window_get_click_config_provider(window);
+  window_set_click_config_provider_with_context(window, habits_menu_click_config_provider,
+                                                window_get_click_config_context(window));
+#endif
   layer_add_child(window_layer, menu_layer_get_layer(s_habits_menu_layer));
 
   s_habits_empty_layer = make_text_layer(window_layer, content_bounds,
@@ -4908,6 +4941,9 @@ static void habits_window_unload(Window *window) {
   stop_habit_tracking_tick();
 #endif
   menu_layer_destroy(s_habits_menu_layer);
+#ifndef PBL_PLATFORM_APLITE
+  s_habits_menu_ccp = NULL;
+#endif
   text_layer_destroy(s_habits_empty_layer);
   status_bar_layer_destroy(s_habits_status_bar);
 }
@@ -5670,6 +5706,9 @@ static void push_notes_window(void) {
 // with -1 as the "None" (clear) rung.
 static const int s_est_ladder_min[] = { 0, 15, 30, 45, 60, 90, 120, 180, 240, 300, 360, 480 };
 static const int s_dl_ladder_days[] = { -1, 0, 1, 2, 3, 7, 14, 30 };
+// Habit counter value - a spread that covers small daily counters and the
+// odd big one. Sent as a delta off the current value (MSG_HABIT_ADJUST).
+static const int s_habit_ladder[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 40, 50, 75, 100 };
 #define ARRLEN(a) (int)(sizeof(a) / sizeof((a)[0]))
 static Window *s_pick_window = NULL;
 static Layer *s_pick_layer = NULL;
@@ -5679,15 +5718,23 @@ static PickKind s_pick_kind = PICK_ESTIMATE;
 static int s_pick_idx = 0;
 
 static int pick_ladder_len(void) {
-  return s_pick_kind == PICK_ESTIMATE ? ARRLEN(s_est_ladder_min) : ARRLEN(s_dl_ladder_days);
+  return s_pick_kind == PICK_ESTIMATE ? ARRLEN(s_est_ladder_min)
+       : s_pick_kind == PICK_DEADLINE ? ARRLEN(s_dl_ladder_days)
+       : ARRLEN(s_habit_ladder);
 }
 static int pick_ladder_val(int i) {
-  return s_pick_kind == PICK_ESTIMATE ? s_est_ladder_min[i] : s_dl_ladder_days[i];
+  return s_pick_kind == PICK_ESTIMATE ? s_est_ladder_min[i]
+       : s_pick_kind == PICK_DEADLINE ? s_dl_ladder_days[i]
+       : s_habit_ladder[i];
 }
 
 // The value string for the current rung.
 static void pick_format(char *out, size_t len) {
   int v = pick_ladder_val(s_pick_idx);
+  if (s_pick_kind == PICK_HABIT) {
+    snprintf(out, len, "%d", v);
+    return;
+  }
   if (s_pick_kind == PICK_ESTIMATE) {
     if (v <= 0) {
       str_copy(out, "None", len);
@@ -5742,7 +5789,9 @@ static void pick_layer_update_proc(Layer *layer, GContext *ctx) {
   fill_bg(ctx, b, GColorWhite);
   graphics_context_set_text_color(ctx, GColorBlack);
   int16_t cy = b.size.h / 2;
-  draw_text(ctx, s_pick_kind == PICK_ESTIMATE ? "Estimate" : "Deadline", CHROME_FONT_KEY,
+  draw_text(ctx, s_pick_kind == PICK_ESTIMATE ? "Estimate"
+                 : s_pick_kind == PICK_DEADLINE ? "Deadline" : "Count",
+            CHROME_FONT_KEY,
             GRect(0, cy - 44, b.size.w, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
   char val[16];
   pick_format(val, sizeof(val));
@@ -5773,6 +5822,23 @@ static void pick_down_click(ClickRecognizerRef r, void *c) { backlight_touch(); 
 static void pick_select_click(ClickRecognizerRef r, void *c) {
   backlight_touch();
   int v = pick_ladder_val(s_pick_idx);
+  if (s_pick_kind == PICK_HABIT) {
+    Habit *h = find_habit_by_id(s_pick_task_id);
+    if (h) {
+      int32_t delta = v - h->value;
+      if (delta != 0) {
+        h->value = v;
+        h->done = h->value >= h->goal;
+        save_habits();
+        send_habit_adjust(h, delta); // phone replaces countOnDay[today] with the sum
+        if (s_habits_menu_layer) {
+          menu_layer_reload_data(s_habits_menu_layer);
+        }
+      }
+    }
+    window_stack_pop(true);
+    return;
+  }
   Task *t = find_task_by_id(s_pick_task_id);
   if (s_pick_kind == PICK_ESTIMATE) {
     int32_t ms = (int32_t)v * 60000;
@@ -5827,8 +5893,10 @@ static void push_value_picker(PickKind kind, const char *task_id, int current) {
   s_pick_kind = kind;
   if (kind == PICK_ESTIMATE) {
     s_pick_idx = pick_nearest_idx(current / 60000);
-  } else {
+  } else if (kind == PICK_DEADLINE) {
     s_pick_idx = (current == DEADLINE_NONE) ? 0 : pick_nearest_idx(current);
+  } else {
+    s_pick_idx = pick_nearest_idx(current); // habit value
   }
   if (!s_pick_window) {
     s_pick_window = window_create();
