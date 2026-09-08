@@ -85,15 +85,23 @@ function taskDeadlineDays(t) {
 
 // Short issue-tracker key for a task linked to an issue (Jira/GitHub/...). Jira
 // etc. store the key itself in issueId ("PROJ-123"); GitHub/GitLab/Gitea store
-// a plain number, shown as "#123". Long/opaque ids (CalDAV uids) are dropped -
-// no useful badge. undefined when the task has no issue.
+// a plain number, shown as "#123". Story points, when set, follow as " 3p".
+// Long/opaque ids (CalDAV uids) are dropped - no useful badge. undefined when
+// the task has no issue.
 function taskIssueKey(t) {
   if (!t || !t.issueId) {
     return undefined;
   }
   var id = String(t.issueId);
   var label = /^\d+$/.test(id) ? '#' + id : id;
-  return label.length <= 13 ? label : undefined;
+  if (label.length > 13) {
+    return undefined;
+  }
+  var pts = t.issuePoints;
+  if (typeof pts === 'number' && isFinite(pts) && pts > 0) {
+    label += ' ' + (Math.round(pts * 10) / 10) + 'p';
+  }
+  return label;
 }
 
 // state: { task: { [id]: {id, title, isDone, parentId?, projectId?,

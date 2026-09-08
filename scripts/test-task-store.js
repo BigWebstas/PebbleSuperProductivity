@@ -295,6 +295,8 @@ check('getActiveTasks issueKey: Jira key as-is, numeric issue as #N, opaque drop
       addTask({ id: 'b', title: 'GH task', isDone: false, dueDay: today, issueId: '42', issueType: 'GITHUB' }),
       addTask({ id: 'c', title: 'CalDAV task', isDone: false, dueDay: today, issueId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890', issueType: 'CALDAV' }),
       addTask({ id: 'd', title: 'Plain task', isDone: false, dueDay: today }),
+      addTask({ id: 'e', title: 'Pointed', isDone: false, dueDay: today, issueId: 'PROJ-9', issueType: 'JIRA', issuePoints: 5 }),
+      addTask({ id: 'f', title: 'Half point', isDone: false, dueDay: today, issueId: '7', issueType: 'GITLAB', issuePoints: 0.5 }),
     ],
     state
   );
@@ -303,6 +305,8 @@ check('getActiveTasks issueKey: Jira key as-is, numeric issue as #N, opaque drop
   assert.strictEqual(rows.find((t) => t.id === 'b').issueKey, '#42');
   assert.strictEqual(rows.find((t) => t.id === 'c').issueKey, undefined);
   assert.strictEqual(rows.find((t) => t.id === 'd').issueKey, undefined);
+  assert.strictEqual(rows.find((t) => t.id === 'e').issueKey, 'PROJ-9 5p');
+  assert.strictEqual(rows.find((t) => t.id === 'f').issueKey, '#7 0.5p');
 });
 
 check('getActiveTasks carries remindAt through to the watch row', () => {

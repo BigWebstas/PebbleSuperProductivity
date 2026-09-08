@@ -280,9 +280,10 @@ typedef struct {
   // Comma-joined tag names, '' if untagged - shown above the notes text in the
   // notes overlay. aplite-gated (no margin for another MAX_TASKS*2 field).
   char tags[MAX_TASK_TAGS_LEN];
-  // Short issue-tracker key ("PROJ-123" / "#42"), '' when the task isn't linked
-  // to an issue. Drawn as a badge at the start of the subtitle line.
-  char issue_key[14];
+  // Short issue-tracker key + optional story points ("PROJ-123 3p" / "#42"),
+  // '' when the task isn't linked to an issue. Drawn at the start of the
+  // subtitle line.
+  char issue_key[18];
 #endif
   bool done;
   bool recurs; // has a repeat config - draws a small ↻ glyph on the row
