@@ -40,6 +40,8 @@
 #define KEY_HABIT_BEST_STREAK MESSAGE_KEY_HABIT_BEST_STREAK
 #define KEY_HABIT_STREAK_NUDGE MESSAGE_KEY_HABIT_STREAK_NUDGE
 #define KEY_HABIT_ICON MESSAGE_KEY_HABIT_ICON
+#define KEY_CHECK_INDEX MESSAGE_KEY_CHECK_INDEX
+#define KEY_CHECK_VALUE MESSAGE_KEY_CHECK_VALUE
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
 #define KEY_BACKLIGHT_MODE MESSAGE_KEY_BACKLIGHT_MODE
@@ -187,6 +189,9 @@ enum {
   // "Wipe watch cache" from the pairing page's danger zone. No keys - drop the
   // persisted task/habit/project-list blobs and pull a fresh list.
   MSG_WIPE_CACHE = 50,              // phone -> watch: (no keys)
+  // Toggle the CHECK_INDEX-th "- [ ]" / "- [x]" checklist line in a task's
+  // notes markdown. Opened from the notes window (Select) when it has any.
+  MSG_TASK_TOGGLE_CHECK = 51,       // watch -> phone: TASK_ID + CHECK_INDEX + CHECK_VALUE
 };
 
 // STATUS_CODE values sent from the phone.
@@ -1517,6 +1522,7 @@ static void show_notes_overlay(Task *task);
 static void show_project_notes_overlay(TaskGroup *group);
 static void hide_notes_overlay(void);
 static void push_notes_window(void);
+static bool try_open_checklist(void);
 typedef enum { PICK_ESTIMATE, PICK_DEADLINE, PICK_HABIT, PICK_TIME } PickKind;
 // task_id is a habit id for PICK_HABIT. current: ms (estimate) / days-from-today
 // or DEADLINE_NONE (deadline) / the counter's value (habit) / hour 0-23 (time).
@@ -2845,6 +2851,11 @@ static void send_pending_retry(void) {
     case MSG_TASK_MOVE_PROJECT:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2); // target project
+      break;
+    case MSG_TASK_TOGGLE_CHECK:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_int32(iter, KEY_CHECK_INDEX, s_retry_int >> 1); // index<<1 | checked
+      dict_write_int32(iter, KEY_CHECK_VALUE, s_retry_int & 1);
       break;
     case MSG_TASK_TOGGLE_TAG:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
@@ -5701,6 +5712,11 @@ static void push_browse_window(const char *jump_to_project) {
 // Select dismisses the notes window; Back also does, for free, via Pebble's
 // default pop behavior.
 static void notes_window_select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  // A task note with "- [ ]" lines: Select opens the interactive checklist.
+  // Otherwise it dismisses (Back always dismisses).
+  if (try_open_checklist()) {
+    return;
+  }
   hide_notes_overlay();
 }
 
@@ -6005,6 +6021,178 @@ static void push_notes_window(void) {
     });
   }
   window_stack_push(s_notes_window, true);
+}
+
+// ---------- notes checklist ----------
+// The "- [ ]" / "- [x]" lines in a task's notes markdown, shown as a tickable
+// list. Reached with Select from the notes window (which sits below this in the
+// stack, keeping s_notes_full_text alive) when the fetched notes have any.
+// A toggle flips the row locally and sends MSG_TASK_TOGGLE_CHECK (index = the
+// row's position among checklist lines); the phone rewrites that one line and
+// pushes a plain updateTask. On close, a re-fetch refreshes the notes text.
+#define MAX_CHECKLIST 32
+#define CHECKLIST_LABELS_CAP 1024
+typedef struct { int label_off; int label_len; bool checked; } ChecklistItem;
+static ChecklistItem s_checklist[MAX_CHECKLIST];
+static int s_checklist_count = 0;
+// malloc'd only while the checklist window is open - basalt heap has no room to
+// spare it permanently.
+static char *s_checklist_labels = NULL;
+static int s_checklist_labels_len = 0;
+static bool s_checklist_dirty = false;
+static Window *s_checklist_window = NULL;
+static MenuLayer *s_checklist_menu = NULL;
+static StatusBarLayer *s_checklist_status_bar = NULL;
+
+// Rebuild s_checklist from s_notes_full_text. A checklist line is optional
+// indent, "-" or "*", " [", one of " xX", "]", then the label. Labels are
+// snapshotted into s_checklist_labels so a later notes re-fetch can't dangle
+// them.
+static void parse_checklist(void) {
+  s_checklist_count = 0;
+  s_checklist_labels_len = 0;
+  const char *buf = s_notes_full_text;
+  if (!buf || !s_checklist_labels) {
+    return;
+  }
+  const char *p = buf;
+  while (*p && s_checklist_count < MAX_CHECKLIST) {
+    const char *q = p;
+    while (*q == ' ' || *q == '\t') {
+      q++;
+    }
+    if ((q[0] == '-' || q[0] == '*') && q[1] == ' ' && q[2] == '[' && q[3] &&
+        (q[3] == ' ' || q[3] == 'x' || q[3] == 'X') && q[4] == ']') {
+      const char *lbl = q + 5;
+      if (*lbl == ' ') {
+        lbl++;
+      }
+      const char *le = lbl;
+      while (*le && *le != '\n') {
+        le++;
+      }
+      int len = (int)(le - lbl);
+      if (len > CHECKLIST_LABELS_CAP - 1 - s_checklist_labels_len) {
+        len = CHECKLIST_LABELS_CAP - 1 - s_checklist_labels_len;
+      }
+      if (len < 0) {
+        len = 0;
+      }
+      ChecklistItem *it = &s_checklist[s_checklist_count++];
+      it->label_off = s_checklist_labels_len;
+      it->label_len = len;
+      it->checked = (q[3] == 'x' || q[3] == 'X');
+      memcpy(s_checklist_labels + s_checklist_labels_len, lbl, (size_t)len);
+      s_checklist_labels_len += len;
+      s_checklist_labels[s_checklist_labels_len++] = '\0';
+    }
+    while (*p && *p != '\n') {
+      p++;
+    }
+    if (*p == '\n') {
+      p++;
+    }
+  }
+}
+
+static uint16_t checklist_num_rows(MenuLayer *ml, uint16_t section, void *ctx) {
+  return (uint16_t)s_checklist_count;
+}
+
+static void checklist_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, void *c) {
+  if ((int)idx->row >= s_checklist_count || !s_checklist_labels) {
+    return;
+  }
+  ChecklistItem *it = &s_checklist[idx->row];
+  GRect b = layer_get_bounds(cell);
+  bool sel = menu_layer_get_selected_index(s_checklist_menu).row == idx->row;
+  GColor fg = sel ? GColorWhite : GColorBlack;
+  GRect box = GRect(b.origin.x + 6, b.origin.y + (b.size.h - 16) / 2, 16, 16);
+  graphics_context_set_stroke_color(ctx, fg);
+  graphics_draw_rect(ctx, box);
+  if (it->checked) {
+    graphics_context_set_fill_color(ctx, fg);
+    graphics_fill_rect(ctx, GRect(box.origin.x + 4, box.origin.y + 4, 8, 8), 0, GCornerNone);
+  }
+  graphics_context_set_text_color(ctx, fg);
+  GRect tb = GRect(box.origin.x + 26, b.origin.y, b.size.w - (box.origin.x + 26) - 4, b.size.h);
+  draw_text(ctx, s_checklist_labels + it->label_off, FONT_KEY_GOTHIC_18,
+            tb, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+}
+
+static void checklist_select(MenuLayer *ml, MenuIndex *idx, void *c) {
+  if ((int)idx->row >= s_checklist_count) {
+    return;
+  }
+  backlight_touch();
+  ChecklistItem *it = &s_checklist[idx->row];
+  it->checked = !it->checked;
+  s_checklist_dirty = true;
+  menu_layer_reload_data(s_checklist_menu);
+  // s_notes_overlay_subject_id is the task id - try_open_checklist bars the
+  // project-notes case.
+  begin_send(MSG_TASK_TOGGLE_CHECK, s_notes_overlay_subject_id, NULL,
+             ((int32_t)idx->row << 1) | (it->checked ? 1 : 0));
+}
+
+static void checklist_window_load(Window *window) {
+  Layer *wl;
+  GRect cb = window_chrome(window, &s_checklist_status_bar, &wl);
+  s_checklist_menu = menu_layer_create(cb);
+  menu_layer_set_callbacks(s_checklist_menu, NULL, (MenuLayerCallbacks) {
+    .get_num_rows = checklist_num_rows,
+    .draw_row = checklist_draw_row,
+    .select_click = checklist_select,
+  });
+  menu_layer_set_normal_colors(s_checklist_menu, GColorWhite, GColorBlack);
+  menu_layer_set_highlight_colors(s_checklist_menu, GColorVividCerulean, GColorWhite);
+  menu_layer_set_click_config_onto_window(s_checklist_menu, window);
+  layer_add_child(wl, menu_layer_get_layer(s_checklist_menu));
+}
+
+static void checklist_window_unload(Window *window) {
+  menu_layer_destroy(s_checklist_menu);
+  s_checklist_menu = NULL;
+  status_bar_layer_destroy(s_checklist_status_bar);
+  free(s_checklist_labels);
+  s_checklist_labels = NULL;
+  s_checklist_count = 0;
+  // Re-pull the notes so the text under us reflects the toggles (the phone
+  // rewrote the markdown). Only if something changed.
+  if (s_checklist_dirty && s_notes_overlay_active && !s_notes_overlay_is_project) {
+    s_checklist_dirty = false;
+    reset_notes_full_buffer();
+    s_notes_display_text = NOTES_LOADING_TEXT;
+    s_notes_is_loading = true;
+    request_notes_full(s_notes_overlay_subject_id, false);
+    render_notes_overlay_content();
+  }
+}
+
+static bool try_open_checklist(void) {
+  if (s_notes_overlay_is_project || s_notes_is_loading || s_checklist_labels) {
+    return false;
+  }
+  s_checklist_labels = malloc(CHECKLIST_LABELS_CAP);
+  if (!s_checklist_labels) {
+    return false;
+  }
+  parse_checklist();
+  if (s_checklist_count == 0) {
+    free(s_checklist_labels);
+    s_checklist_labels = NULL;
+    return false;
+  }
+  s_checklist_dirty = false;
+  if (!s_checklist_window) {
+    s_checklist_window = window_create();
+    window_set_window_handlers(s_checklist_window, (WindowHandlers) {
+      .load = checklist_window_load,
+      .unload = checklist_window_unload,
+    });
+  }
+  window_stack_push(s_checklist_window, true);
+  return true;
 }
 
 // ---------- value picker (estimate / deadline) ----------

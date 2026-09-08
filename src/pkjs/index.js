@@ -89,6 +89,8 @@ var MSG_TASK_MOVE_PROJECT = 49;     // watch -> phone: TASK_ID + PROJECT_ID (tar
 // Danger-zone "Wipe watch cache" (pairing page). No keys - the watch drops its
 // persisted task/habit/project-list blobs and pulls a fresh copy.
 var MSG_WIPE_CACHE = 50;            // phone -> watch: (no keys)
+// Toggle the Nth "- [ ]" / "- [x]" checklist line in a task's notes markdown.
+var MSG_TASK_TOGGLE_CHECK = 51;    // watch -> phone: TASK_ID + CHECK_INDEX + CHECK_VALUE (1 checked / 0 not)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -1933,6 +1935,58 @@ function handleTaskSetDeadline(taskId, days) {
     });
 }
 
+// Matches a markdown checklist line: optional indent, "-" or "*", "[ ]" / "[x]"
+// / "[X]", a space, the rest is the label. Group 1 is the leading run up to and
+// including "[", group 2 the check char, group 3 the trailing "]...".
+var CHECKLIST_LINE_RE = /^(\s*[-*] \[)([ xX])(\].*)$/;
+
+// The watch toggled the `index`-th checklist line in this task's notes. Rewrite
+// that one line's check char and push a plain updateTask, exactly as ticking
+// the box in the desktop's task detail does.
+function handleTaskToggleCheck(taskId, index, checked) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task || typeof task.notes !== 'string') {
+    return;
+  }
+  var lines = task.notes.split('\n');
+  var seen = -1;
+  var hit = -1;
+  for (var i = 0; i < lines.length; i++) {
+    if (CHECKLIST_LINE_RE.test(lines[i])) {
+      seen++;
+      if (seen === index) {
+        hit = i;
+        break;
+      }
+    }
+  }
+  if (hit < 0) {
+    return; // watch and phone disagree on the list - next notes fetch resyncs it
+  }
+  lines[hit] = lines[hit].replace(CHECKLIST_LINE_RE, '$1' + (checked ? 'x' : ' ') + '$3');
+  var notes = lines.join('\n');
+  state.task[taskId] = Object.assign({}, task, { notes: notes });
+  saveState(state);
+
+  var clientId = getOrCreateClientId();
+  var failureMsg = null;
+  uploadOps([buildTaskUpdateOp(taskId, { notes: notes }, clientId)], config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload checklist toggle: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, failureMsg);
+    });
+}
+
 // Projects browser: long-Select toggled a task's backlog membership.
 // toBacklog picks the direction. Only touches membership - not dueDay - so it
 // stays in step with task-store's replay of the same actions.
@@ -3095,6 +3149,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_MOVE_PROJECT:
       handleMoveToProject(payload.TASK_ID, payload.PROJECT_ID);
+      break;
+    case MSG_TASK_TOGGLE_CHECK:
+      handleTaskToggleCheck(payload.TASK_ID, payload.CHECK_INDEX | 0, !!payload.CHECK_VALUE);
       break;
     case MSG_PRESENCE_STOP:
       if (presenceClient && presenceLastSessionId) {

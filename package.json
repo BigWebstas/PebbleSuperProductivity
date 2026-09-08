@@ -573,7 +573,9 @@
       "HABIT_STREAK",
       "HABIT_BEST_STREAK",
       "HABIT_STREAK_NUDGE",
-      "HABIT_ICON"
+      "HABIT_ICON",
+      "CHECK_INDEX",
+      "CHECK_VALUE"
     ]
   }
 }
