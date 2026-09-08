@@ -1400,6 +1400,52 @@ check('getActiveTasks skips a tag id with no matching TAG entity', () => {
   assert.strictEqual(tasks.find((t) => t.id === 't1').tags, 'urgent');
 });
 
+// ---- getTagList / getTagTasks (the optional Tags page) ----
+
+check('getTagList: real tags sorted by title, each with its open main-task count', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tg1', title: 'urgent' } }),
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tg2', title: 'home' } }),
+      tagEntry('[Tag] Add Tag', { tag: { id: 'TODAY', title: 'Today' } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      addTask({ id: 'a', title: 'open + urgent', projectId: 'p1', tagIds: ['tg1'] }),
+      addTask({ id: 'b', title: 'open + urgent + home, other project', tagIds: ['tg1', 'tg2'] }),
+      addTask({ id: 'c', title: 'done + urgent', isDone: true, tagIds: ['tg1'] }),
+      addTask({ id: 's', title: 'subtask + urgent', parentId: 'a', tagIds: ['tg1'] }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(store.getTagList(state), [
+    { id: 'tg2', title: 'home', color: 0, taskCount: 1 },   // b
+    { id: 'tg1', title: 'urgent', color: 0, taskCount: 2 },  // a, b (not done c, not subtask s)
+  ]); // 'TODAY' excluded
+});
+
+check('getTagTasks: a tag\'s open mains from any project, project name on each row, no backlog split', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tg1', title: 'urgent' } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p2', title: 'Life' } }),
+      addTask({ id: 'a', title: 'in Work', projectId: 'p1', tagIds: ['tg1'] }),
+      addTask({ id: 'b', title: 'in Life, backlogged', projectId: 'p2', tagIds: ['tg1'] }),
+      addTask({ id: 'c', title: 'untagged', projectId: 'p1' }),
+    ],
+    state
+  );
+  store.applyOperations(
+    [taskEntry('[Task Shared] scheduleTaskWithTime', { task: { id: 'b' }, dueWithTime: Date.now(), isMoveToBacklog: true })],
+    state
+  );
+  const rows = store.getTagTasks(state, 'tg1', 40, true);
+  assert.deepStrictEqual(rows.map((r) => r.id).sort(), ['a', 'b']); // backlogged b still listed
+  assert.strictEqual(rows.find((r) => r.id === 'a').project, 'Work');
+  assert.strictEqual(rows.find((r) => r.id === 'b').project, 'Life');
+});
+
 // ---- getProjectList / getProjectTasks (the Projects browser) ----
 
 check('getProjectList returns non-archived projects sorted by title, with theme colour', () => {

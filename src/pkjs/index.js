@@ -58,11 +58,11 @@ var MSG_PRESENCE_STOP_LOCAL = 30; // phone -> watch: a remote device stopped the
 // replies are START / ITEM* / END sequences, same retrying send pattern as
 // the task/habit lists. Project-task ITEMs reuse the TASK_* keys plus
 // PROJECT_TASK_BACKLOG (0 = regular list, 1 = that project's backlog).
-var MSG_PROJECT_LIST_REQUEST = 31;  // watch -> phone: (no keys)
+var MSG_PROJECT_LIST_REQUEST = 31;  // watch -> phone: IS_TAGS (0 projects, 1 tags)
 var MSG_PROJECT_LIST_START = 32;    // phone -> watch: PROJECT_TOTAL
 var MSG_PROJECT_LIST_ITEM = 33;     // phone -> watch: PROJECT_INDEX, PROJECT_ID, PROJECT_TITLE, PROJECT_COLOR
 var MSG_PROJECT_LIST_END = 34;      // phone -> watch: (no keys)
-var MSG_PROJECT_TASKS_REQUEST = 35; // watch -> phone: PROJECT_ID
+var MSG_PROJECT_TASKS_REQUEST = 35; // watch -> phone: PROJECT_ID (+ IS_TAGS: PROJECT_ID is a tag id)
 var MSG_PROJECT_TASKS_START = 36;   // phone -> watch: PROJECT_ID, TASK_TOTAL
 var MSG_PROJECT_TASKS_ITEM = 37;    // phone -> watch: PROJECT_ID, TASK_INDEX, TASK_*, PROJECT_TASK_BACKLOG
 var MSG_PROJECT_TASKS_END = 38;     // phone -> watch: PROJECT_ID
@@ -382,6 +382,11 @@ function sendStatus(code, message) {
     // Upcoming page row (default on). Drives main.c's s_upcoming_enabled /
     // SECTION0_ROW_UPCOMING - future-dated tasks grouped by day.
     UPCOMING_ENABLED: config.enableUpcoming !== false ? 1 : 0,
+    // Tags page row - default OFF (unlike the others). Drives main.c's
+    // s_tags_enabled / SECTION0_ROW_TAGS: every tag with its open-task count,
+    // drill in for that tag's tasks. Reuses the projects-browser plumbing with
+    // an IS_TAGS flag on the list / tasks requests.
+    TAGS_ENABLED: config.enableTags === true ? 1 : 0,
     // "Yesterday's stats" toggle - long Up/Down on the Stats page flips it to
     // yesterday's worked time / completed count. Default off (main.c).
     YESTERDAY_STATS_ENABLED: config.yesterdayStats ? 1 : 0,
@@ -639,17 +644,20 @@ function sendHabitAt(habits, index) {
 // as the task/habit list sends. Read-only - no server call, just the
 // replayed op-log state the phone already holds. A give-up leaves the watch
 // showing whatever it had; the watch can re-request on the next open.
-function handleProjectListRequest() {
+// isTags: the same request with IS_TAGS=1 asks for the TAG list instead (the
+// Tags page reuses this whole path; a tag entry has the same id/title/color/
+// count shape a project entry does).
+function handleProjectListRequest(isTags) {
   var config = loadConfig();
   if (!config || !config.jwt) {
     sendStatus(STATUS_NOT_PAIRED);
     return;
   }
-  if (config.enableProjects === false) {
+  if (isTags ? config.enableTags !== true : config.enableProjects === false) {
     return;
   }
-  var projects = store.getProjectList(loadState());
-  sendWithRetry({ MSG_TYPE: MSG_PROJECT_LIST_START, PROJECT_TOTAL: projects.length }, function () {
+  var projects = isTags ? store.getTagList(loadState()) : store.getProjectList(loadState());
+  sendWithRetry({ MSG_TYPE: MSG_PROJECT_LIST_START, PROJECT_TOTAL: projects.length, IS_TAGS: isTags ? 1 : 0 }, function () {
     sendProjectListAt(projects, 0);
   }, function (e) {
     console.log('[pkjs] giving up on PROJECT_LIST_START after retries: ' + JSON.stringify(e));
@@ -689,28 +697,36 @@ function sendProjectListAt(projects, index) {
 // draw the backlog as its own divided section. PROJECT_ID rides every
 // message so a reply the watch has already navigated away from is easy to
 // ignore. Each list is capped at MAX_TASKS (matching the watch's buffer).
-function handleProjectTasksRequest(projectId) {
+function handleProjectTasksRequest(projectId, isTags) {
   var config = loadConfig();
   if (!config || !config.jwt) {
     sendStatus(STATUS_NOT_PAIRED);
     return;
   }
-  if (config.enableProjects === false) {
+  if (isTags ? config.enableTags !== true : config.enableProjects === false) {
     return;
   }
   if (projectId === undefined || projectId === null) {
     return;
   }
-  sendProjectTasks(String(projectId), loadState(), config);
+  sendProjectTasks(String(projectId), loadState(), config, isTags);
 }
 
 // Pushes one project's task list to the watch (regular rows then backlog rows).
 // Also called after a reschedule that pulled a task out of that project's
 // backlog, so the browser's task view updates in place.
-function sendProjectTasks(pid, state, config) {
-  var split = store.getProjectTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks);
-  var rows = split.regular.map(function (t) { return { t: t, backlog: 0 }; })
-    .concat(split.backlog.map(function (t) { return { t: t, backlog: 1 }; }));
+// isTags: `pid` is a tag id - send that tag's tasks instead (no backlog split;
+// every row PROJECT_TASK_BACKLOG=0). Shares the same START/ITEM/END messages.
+function sendProjectTasks(pid, state, config, isTags) {
+  var rows;
+  if (isTags) {
+    rows = store.getTagTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks)
+      .map(function (t) { return { t: t, backlog: 0 }; });
+  } else {
+    var split = store.getProjectTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks);
+    rows = split.regular.map(function (t) { return { t: t, backlog: 0 }; })
+      .concat(split.backlog.map(function (t) { return { t: t, backlog: 1 }; }));
+  }
   var idField = pid.slice(0, 31);
   sendWithRetry({ MSG_TYPE: MSG_PROJECT_TASKS_START, PROJECT_ID: idField, TASK_TOTAL: rows.length }, function () {
     sendProjectTaskAt(idField, rows, 0);
@@ -2810,10 +2826,10 @@ Pebble.addEventListener('appmessage', function (e) {
       handleProjectNoteRequest(payload.PROJECT_ID);
       break;
     case MSG_PROJECT_LIST_REQUEST:
-      handleProjectListRequest();
+      handleProjectListRequest(payload.IS_TAGS === 1);
       break;
     case MSG_PROJECT_TASKS_REQUEST:
-      handleProjectTasksRequest(payload.PROJECT_ID);
+      handleProjectTasksRequest(payload.PROJECT_ID, payload.IS_TAGS === 1);
       break;
     case MSG_STATS_REQUEST:
       handleStatsRequest();
@@ -2863,6 +2879,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableStats: config.enableStats !== false,
       enableSchedule: config.enableSchedule !== false,
       enableUpcoming: config.enableUpcoming !== false,
+      enableTags: config.enableTags === true,
       yesterdayStats: !!config.yesterdayStats,
       backlightMode: config.backlightMode || 0,
       touchNav: !!config.touchNav,

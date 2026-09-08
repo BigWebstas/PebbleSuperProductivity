@@ -46,6 +46,8 @@
 #define KEY_PROJECT_TOTAL MESSAGE_KEY_PROJECT_TOTAL
 #define KEY_PROJECT_TASK_BACKLOG MESSAGE_KEY_PROJECT_TASK_BACKLOG
 #define KEY_PROJECTS_ENABLED MESSAGE_KEY_PROJECTS_ENABLED
+#define KEY_TAGS_ENABLED MESSAGE_KEY_TAGS_ENABLED
+#define KEY_IS_TAGS MESSAGE_KEY_IS_TAGS
 #define KEY_TASK_TAGS MESSAGE_KEY_TASK_TAGS
 #define KEY_TOUCH_NAV_ENABLED MESSAGE_KEY_TOUCH_NAV_ENABLED
 #define KEY_OVERTIME_NOTIFY_ENABLED MESSAGE_KEY_OVERTIME_NOTIFY_ENABLED
@@ -125,11 +127,15 @@ enum {
   // reuses the TASK_* keys plus PROJECT_TASK_BACKLOG (0 = the project's
   // regular list, 1 = its backlog). Every tasks message carries PROJECT_ID so
   // a reply for a project the watch has navigated away from is ignored.
-  MSG_PROJECT_LIST_REQUEST = 31,    // watch -> phone: (no keys)
-  MSG_PROJECT_LIST_START = 32,      // phone -> watch: PROJECT_TOTAL
+  // IS_TAGS on the two *_REQUEST messages makes this whole path serve the
+  // optional Tags page instead: LIST returns each tag (PROJECT_ID = tag id,
+  // PROJECT_TASK_COUNT = open-task count), TASKS returns that tag's tasks from
+  // every project (all PROJECT_TASK_BACKLOG = 0). See s_browse_mode.
+  MSG_PROJECT_LIST_REQUEST = 31,    // watch -> phone: IS_TAGS
+  MSG_PROJECT_LIST_START = 32,      // phone -> watch: PROJECT_TOTAL + IS_TAGS
   MSG_PROJECT_LIST_ITEM = 33,       // phone -> watch: PROJECT_INDEX + PROJECT_ID + PROJECT_TITLE + PROJECT_TASK_COUNT
   MSG_PROJECT_LIST_END = 34,        // phone -> watch: (no keys)
-  MSG_PROJECT_TASKS_REQUEST = 35,   // watch -> phone: PROJECT_ID
+  MSG_PROJECT_TASKS_REQUEST = 35,   // watch -> phone: PROJECT_ID + IS_TAGS
   MSG_PROJECT_TASKS_START = 36,     // phone -> watch: PROJECT_ID + TASK_TOTAL
   MSG_PROJECT_TASKS_ITEM = 37,      // phone -> watch: PROJECT_ID + TASK_INDEX + TASK_* + PROJECT_TASK_BACKLOG
   MSG_PROJECT_TASKS_END = 38,       // phone -> watch: PROJECT_ID
@@ -676,6 +682,11 @@ static int s_stats_done_yesterday = 0;
 static bool s_upcoming_enabled = true;
 static char s_upcoming_text[640] = "";
 static bool s_upcoming_have_data = false;
+// "Tags" page row (config.enableTags) - default OFF, unlike every other
+// optional row. Reuses the Projects-browser window (s_browse_*) with
+// s_browse_mode == BROWSE_TAGS; see TAGS_ROW_ACTIVE(). aplite-excluded with the
+// browser it borrows.
+static bool s_tags_enabled = false;
 #endif
 
 // The Projects browser is built on every platform except aplite (too little
@@ -741,6 +752,11 @@ static bool s_browse_tasks_loading = false;
 // id is stale and ignored.
 static char s_browse_project_id[MAX_PROJECT_ID_LEN] = "";
 static int s_browse_level = 0;              // 0 = project list, 1 = one project's tasks
+// Which flavour this window is showing. Set before push_browse_window / any
+// request; the *_REQUEST sends carry IS_TAGS off it, and the draw / long-press
+// paths branch on it (tags have no backlog, no notes, no offline cache).
+typedef enum { BROWSE_PROJECTS, BROWSE_TAGS } BrowseMode;
+static BrowseMode s_browse_mode = BROWSE_PROJECTS;
 static Window *s_browse_window = NULL;
 static MenuLayer *s_browse_menu = NULL;
 static StatusBarLayer *s_browse_status_bar = NULL;
@@ -1392,6 +1408,7 @@ typedef enum {
   SECTION0_ROW_RESYNC,
   SECTION0_ROW_HABITS,
   SECTION0_ROW_PROJECTS, // projects browser, between Habits and Add Task (non-aplite)
+  SECTION0_ROW_TAGS,     // tags page, right after Projects, opt-in / default off (non-aplite)
   SECTION0_ROW_STATS,    // stats page, between Projects and Add Task (non-aplite)
   SECTION0_ROW_SCHEDULE, // schedule page, between Stats and Add Task (non-aplite)
   SECTION0_ROW_UPCOMING, // upcoming page, between Schedule and Add Task (non-aplite)
@@ -1410,11 +1427,19 @@ typedef enum {
 #endif
 
 // Whether the "Projects" row sits in section 0. Compile-time false where the
-// browser isn't built (aplite, emery - see PROJECTS_BROWSER).
+// browser isn't built (aplite - see PROJECTS_BROWSER).
 #if PROJECTS_BROWSER
 #define PROJECTS_ROW_ACTIVE() (s_projects_enabled)
 #else
 #define PROJECTS_ROW_ACTIVE() false
+#endif
+
+// Whether the "Tags" row sits in section 0 - opt-in (default off) and only
+// where the browser it reuses is built.
+#if PROJECTS_BROWSER
+#define TAGS_ROW_ACTIVE() (s_tags_enabled)
+#else
+#define TAGS_ROW_ACTIVE() false
 #endif
 
 // Whether the "Stats" row sits in section 0. Compile-time false on aplite.
@@ -1454,6 +1479,9 @@ static int section0_row_count(void) {
   if (PROJECTS_ROW_ACTIVE()) {
     count++;
   }
+  if (TAGS_ROW_ACTIVE()) {
+    count++;
+  }
   if (STATS_ROW_ACTIVE()) {
     count++;
   }
@@ -1486,6 +1514,12 @@ static Section0RowKind section0_row_kind(int row) {
   if (PROJECTS_ROW_ACTIVE()) {
     if (row == next) {
       return SECTION0_ROW_PROJECTS;
+    }
+    next++;
+  }
+  if (TAGS_ROW_ACTIVE()) {
+    if (row == next) {
+      return SECTION0_ROW_TAGS;
     }
     next++;
   }
@@ -2229,6 +2263,26 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
                    s_project_bitmap, s_project_white_bitmap, ic);
       return;
     }
+
+    if (kind == SECTION0_ROW_TAGS) {
+      // Opens the Tags page (Projects browser reused in BROWSE_TAGS mode).
+      // Limerick (dark gold) - distinct from every other section-0 row. A "#"
+      // hash glyph on the right, from primitives, black / white on select.
+      GColor icon = is_selected ? GColorWhite : GColorBlack;
+      fill_bg(ctx, bounds, GColorLimerick);
+      graphics_context_set_text_color(ctx, icon);
+      GRect tags_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                                    bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+      draw_text(ctx, "Tags", HEADING_FONT_KEY, tags_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      int16_t hx = bounds.size.w - ROW_ICON_SIZE - 4;
+      int16_t hy = bounds.size.h / 2;
+      graphics_context_set_stroke_color(ctx, icon);
+      graphics_draw_line(ctx, GPoint(hx + 2, hy - 6), GPoint(hx, hy + 6));       // "#" left bar
+      graphics_draw_line(ctx, GPoint(hx + 8, hy - 6), GPoint(hx + 6, hy + 6));   // "#" right bar
+      graphics_draw_line(ctx, GPoint(hx - 2, hy - 2), GPoint(hx + 10, hy - 2));  // "#" top bar
+      graphics_draw_line(ctx, GPoint(hx - 3, hy + 3), GPoint(hx + 9, hy + 3));   // "#" bottom bar
+      return;
+    }
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
@@ -2557,8 +2611,11 @@ static void send_pending_retry(void) {
 #if PROJECTS_BROWSER
     case MSG_PROJECT_TASKS_REQUEST:
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
+      dict_write_int32(iter, KEY_IS_TAGS, s_retry_int);
       break;
     case MSG_PROJECT_LIST_REQUEST:
+      dict_write_int32(iter, KEY_IS_TAGS, s_retry_int);
+      break;
 #endif
     case MSG_FINISH_DAY:
     case MSG_REQUEST_SYNC:
@@ -3091,6 +3148,10 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
       push_habits_window();
 #if PROJECTS_BROWSER
     } else if (kind == SECTION0_ROW_PROJECTS) {
+      s_browse_mode = BROWSE_PROJECTS;
+      push_browse_window(NULL);
+    } else if (kind == SECTION0_ROW_TAGS) {
+      s_browse_mode = BROWSE_TAGS;
       push_browse_window(NULL);
 #endif
 #ifndef PBL_PLATFORM_APLITE
@@ -3122,6 +3183,7 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
   TaskGroup *project_row = resolve_project_row_at(*cell_index);
   if (project_row) {
 #if PROJECTS_BROWSER
+    s_browse_mode = BROWSE_PROJECTS;
     push_browse_window(project_row->project_id);
 #endif
     return;
@@ -3605,6 +3667,12 @@ static void begin_pending_reschedule(RescheduleKind kind) {
   s_pending_reschedule_project_id[0] = '\0';
 #if PROJECTS_BROWSER
   if (window_stack_get_top_window() == s_browse_window && s_browse_level == 1 && s_browse_menu) {
+    // Tags mode: the browsed id is a tag, not a project - the phone's
+    // reschedule handler would re-push an empty "that project's" list and
+    // blank the view. Reschedule isn't offered from the tag task list.
+    if (s_browse_mode == BROWSE_TAGS) {
+      return;
+    }
     Task *bt = resolve_browse_task_at(menu_layer_get_selected_index(s_browse_menu));
     if (bt) {
       task_id = bt->id;
@@ -3739,12 +3807,14 @@ static void send_presence_stop(void) {
 // Projects browser: ask the phone for the project list / one project's task
 // list. Both replies are chunked (START / ITEM* / END) - see the MSG_PROJECT_*
 // handlers in inbox_received_handler.
+// int_val carries IS_TAGS (1 in BROWSE_TAGS mode) - see send_pending_retry and
+// the phone's handleProjectListRequest / handleProjectTasksRequest.
 static void request_project_list(void) {
-  begin_send(MSG_PROJECT_LIST_REQUEST, NULL, NULL, 0);
+  begin_send(MSG_PROJECT_LIST_REQUEST, NULL, NULL, s_browse_mode == BROWSE_TAGS ? 1 : 0);
 }
 
 static void request_project_tasks(const char *project_id) {
-  begin_send(MSG_PROJECT_TASKS_REQUEST, project_id, NULL, 0);
+  begin_send(MSG_PROJECT_TASKS_REQUEST, project_id, NULL, s_browse_mode == BROWSE_TAGS ? 1 : 0);
 }
 #endif
 
@@ -3924,6 +3994,11 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (!s_browse_projects) {
         break;
       }
+      // Drop a reply for the other mode (the user switched Projects<->Tags
+      // while this list was in flight).
+      if ((tuple_int(iterator, KEY_IS_TAGS, 0) != 0) != (s_browse_mode == BROWSE_TAGS)) {
+        break;
+      }
       s_browse_project_incoming = tuple_int(iterator, KEY_PROJECT_TOTAL, 0);
       if (s_browse_project_incoming > MAX_BROWSE_PROJECTS) {
         s_browse_project_incoming = MAX_BROWSE_PROJECTS;
@@ -3957,7 +4032,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_browse_project_count = s_browse_project_incoming;
       s_browse_projects_loading = false;
 #if PROJECTS_CACHE
-      save_browse_projects();
+      if (s_browse_mode == BROWSE_PROJECTS) {
+        save_browse_projects(); // the tag list isn't cached - always fetched
+      }
 #endif
       if (s_browse_menu && s_browse_level == 0) {
         menu_layer_reload_data(s_browse_menu);
@@ -4001,6 +4078,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       Task *bt = &s_browse_tasks[idx];
       memset(bt, 0, sizeof(Task));
       parse_common_task_fields(iterator, bt, id_tuple, title_tuple);
+      // Project display name - shown right-aligned in the Tags view (a tag's
+      // tasks span projects); redundant but harmless in the Projects view.
+      str_copy(bt->project, tuple_str(iterator, KEY_TASK_PROJECT, ""), MAX_PROJECT_LEN);
       if (tuple_int(iterator, KEY_PROJECT_TASK_BACKLOG, 0) != 0 && idx < s_browse_backlog_start) {
         s_browse_backlog_start = idx;
       }
@@ -4060,6 +4140,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_stats_enabled = tuple_int(iterator, KEY_STATS_ENABLED, s_stats_enabled) != 0;
       s_schedule_enabled = tuple_int(iterator, KEY_SCHEDULE_ENABLED, s_schedule_enabled) != 0;
       s_upcoming_enabled = tuple_int(iterator, KEY_UPCOMING_ENABLED, s_upcoming_enabled) != 0;
+      s_tags_enabled = tuple_int(iterator, KEY_TAGS_ENABLED, s_tags_enabled) != 0;
       s_yesterday_stats_enabled = tuple_int(iterator, KEY_YESTERDAY_STATS_ENABLED, s_yesterday_stats_enabled) != 0;
 #endif
       // Only re-applied when the value actually changed - this field is sent on
@@ -4864,10 +4945,17 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
       return;
     }
     // Green with bold black text - the same treatment the today view gives a
-    // project group header (menu_draw_header). The selected row darkens to
-    // GColorIslamicGreen with white text so it stands out (a bare text-colour
-    // flip on the bright green barely read).
-    fill_bg(ctx, bounds, is_selected ? GColorIslamicGreen : GColorGreen);
+    // project group header (menu_draw_header). The selected row darkens with
+    // white text so it stands out (a bare text-colour flip on the bright fill
+    // barely read). Tags mode uses the Limerick of its nav row instead of green.
+#ifndef PBL_PLATFORM_APLITE
+    if (s_browse_mode == BROWSE_TAGS) {
+      fill_bg(ctx, bounds, is_selected ? GColorArmyGreen : GColorLimerick);
+    } else
+#endif
+    {
+      fill_bg(ctx, bounds, is_selected ? GColorIslamicGreen : GColorGreen);
+    }
     // The Inbox glyph for the default project, else the project's theme colour
     // as a swatch (draw_project_marker, shared with the today view). The phone
     // already packed the colour to a GColor8.
@@ -4896,7 +4984,13 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // draw_task_row reads the same fields the today list draws; a browsed task
   // isn't in s_tasks but the struct is identical, so this reuses it wholesale
   // (including the live-ticking "spent / estimate" when it's the tracked one).
-  draw_task_row(ctx, bounds, bt, is_selected, false);
+  // Tags mode passes show_project so each row names its project (a tag's tasks
+  // span projects).
+  bool show_project = false;
+#ifndef PBL_PLATFORM_APLITE
+  show_project = (s_browse_mode == BROWSE_TAGS);
+#endif
+  draw_task_row(ctx, bounds, bt, is_selected, show_project);
 }
 
 // Switch to level 1 for `project_id` and fetch its tasks. Shared by a
@@ -4957,8 +5051,15 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
 // between the regular list and the backlog - the direction is set by which
 // section the row is in (a regular row -> backlog, a backlog row -> regular),
 // through the same 3s-cancel pending window as the Up/Down reschedule.
+// Both are no-ops in tags mode: a tag has no notes, and its tasks span
+// projects so "the backlog" is ambiguous.
 static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
+#ifndef PBL_PLATFORM_APLITE
+  if (s_browse_mode == BROWSE_TAGS) {
+    return;
+  }
+#endif
   if (s_browse_level == 0) {
     BrowseProject *p = resolve_browse_project_at(*cell_index);
     if (!p) {
@@ -4983,12 +5084,18 @@ static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell
 static void browse_update_empty(void) {
   bool empty;
   const char *msg;
+  bool tags = false;
+#ifndef PBL_PLATFORM_APLITE
+  tags = (s_browse_mode == BROWSE_TAGS);
+#endif
   if (s_browse_level == 0) {
     empty = s_browse_project_count == 0;
-    msg = s_browse_projects_loading ? "Loading projects..." : "No projects.";
+    msg = s_browse_projects_loading ? (tags ? "Loading tags..." : "Loading projects...")
+                                    : (tags ? "No tags." : "No projects.");
   } else {
     empty = s_browse_task_count == 0;
-    msg = s_browse_tasks_loading ? "Loading..." : "No tasks in this project.";
+    msg = s_browse_tasks_loading ? "Loading..."
+                                 : (tags ? "No tasks for this tag." : "No tasks in this project.");
   }
   text_layer_set_text(s_browse_empty, msg);
   layer_set_hidden(text_layer_get_layer(s_browse_empty), !empty);
@@ -5106,7 +5213,9 @@ static void push_browse_window(const char *jump_to_project) {
   s_browse_project_count = 0;
   s_browse_project_incoming = 0;
 #if PROJECTS_CACHE
-  load_browse_projects();  // instant render from the cache; the fetch below refreshes it
+  if (s_browse_mode == BROWSE_PROJECTS) {
+    load_browse_projects();  // instant render from the cache; the fetch below refreshes it. Tags aren't cached.
+  }
 #endif
   bool jumping = jump_to_project && jump_to_project[0] != '\0';
   // Only one begin_send() may be in flight (single outbox slot). A jump sends

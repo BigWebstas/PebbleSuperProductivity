@@ -1110,6 +1110,62 @@ function getProjectTasks(state, projectId, limit, hideDone) {
   return { regular: regular.slice(0, limit), backlog: backlog.slice(0, limit) };
 }
 
+// Count of a tag's OPEN (undone) main tasks - across every project, backlog
+// included, since a tag isn't project-scoped. Shown right-aligned on each row
+// of the optional Tags page.
+function tagOpenTaskCount(state, tagId) {
+  var allTasks = state.task || {};
+  var n = 0;
+  Object.keys(allTasks).forEach(function (id) {
+    var t = allTasks[id];
+    if (t && t.title && isMainTask(t) && !t.isDone &&
+        (t.tagIds || []).indexOf(tagId) !== -1) {
+      n++;
+    }
+  });
+  return n;
+}
+
+// The Tags page's level-0 list: every real tag with its open-task count,
+// title-sorted. The virtual TODAY tag (id 'TODAY', membership derived from
+// dueDay not a stored list - see taskIsPlannedForToday) is skipped.
+function getTagList(state) {
+  var tags = state.tag || {};
+  return Object.keys(tags)
+    .map(function (id) { return tags[id]; })
+    .filter(function (tg) { return tg && tg.id && tg.title && tg.id !== 'TODAY'; })
+    .map(function (tg) {
+      return {
+        id: tg.id,
+        title: tg.title,
+        color: projectColorRgb(tg),
+        taskCount: tagOpenTaskCount(state, tg.id),
+      };
+    })
+    .sort(function (a, b) { return titleCompare(a.title, b.title); });
+}
+
+// One tag's open main tasks (subtasks nested under their parent, as elsewhere),
+// from any project. Each row's `project` is its own task's project title so the
+// watch can show it. No backlog split - a tag spans projects. Done tasks still
+// obey hideDone's grace period. Capped at `limit` rows.
+function getTagTasks(state, tagId, limit, hideDone) {
+  var allTasks = state.task || {};
+  var mains = Object.keys(allTasks)
+    .map(function (id) { return allTasks[id]; })
+    .filter(function (t) { return t && t.title && isMainTask(t); })
+    .filter(function (t) { return !isHiddenDone(t, hideDone); })
+    .filter(function (t) { return (t.tagIds || []).indexOf(tagId) !== -1; })
+    .sort(withinGroupSort);
+  var rows = [];
+  mains.forEach(function (t) {
+    var proj = t.projectId && state.project && state.project[t.projectId];
+    pushTaskAndSubtasks(rows, state, allTasks, t, projectTitleFor(state, t),
+                        t.projectId || undefined, proj ? projectColorRgb(proj) : undefined, hideDone);
+  });
+  return rows.slice(0, limit);
+}
+
 // Returns up to `limit` rows: main tasks that are not sitting in a
 // project's backlog (see the top-of-file comment - no date filtering),
 // each immediately followed by its own subtasks (indented), regardless of
@@ -1701,6 +1757,8 @@ module.exports = {
   getActiveHabits: getActiveHabits,
   getProjectList: getProjectList,
   getProjectTasks: getProjectTasks,
+  getTagList: getTagList,
+  getTagTasks: getTagTasks,
   computeStats: computeStats,
   computeUpcoming: computeUpcoming,
   repeatOccurrences: repeatOccurrences,

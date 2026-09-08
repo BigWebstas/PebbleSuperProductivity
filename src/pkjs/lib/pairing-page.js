@@ -33,6 +33,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var yesterdayStats = !!options.yesterdayStats;
   var enableSchedule = options.enableSchedule !== false;
   var enableUpcoming = options.enableUpcoming !== false;
+  var enableTags = options.enableTags === true; // default off, unlike the others
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
   var overtimeRepeat = !!options.overtimeRepeat;
@@ -463,6 +464,15 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableTags" type="checkbox"' + (enableTags ? ' checked' : '') + '>\n' +
+'    <label for="enableTags">Enable Tags</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Shows a Tags row on the watch: every tag with its open-task count.\n' +
+'    Select a tag to see its tasks, from any project. Off by default.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableAddTask" type="checkbox"' + (enableAddTask ? ' checked' : '') + '>\n' +
 '    <label for="enableAddTask">Enable Add Task (voice)</label>\n' +
 '  </div>\n' +
@@ -584,6 +594,7 @@ taskEstimateOptions + '\n' +
 '      yesterdayStats: document.getElementById(\'yesterdayStats\').checked,\n' +
 '      enableSchedule: document.getElementById(\'enableSchedule\').checked,\n' +
 '      enableUpcoming: document.getElementById(\'enableUpcoming\').checked,\n' +
+'      enableTags: document.getElementById(\'enableTags\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +
