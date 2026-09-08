@@ -1371,6 +1371,26 @@ check('[Tag] Delete Tag / Delete multiple Tags removes tags', () => {
   assert.deepStrictEqual(state.tag, {});
 });
 
+check('getActiveTasks: deadlineDays is whole days from today, negative when overdue, absent otherwise', () => {
+  const state = store.emptyState();
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return iso(d); };
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'due in 3', isDone: false, deadlineDay: plus(3) }),
+      addTask({ id: 'b', title: 'overdue', isDone: false, deadlineDay: plus(-2) }),
+      addTask({ id: 'c', title: 'today', isDone: false, deadlineDay: plus(0) }),
+      addTask({ id: 'd', title: 'none', isDone: false }),
+    ],
+    state
+  );
+  const tasks = active(state);
+  assert.strictEqual(tasks.find((t) => t.id === 'a').deadlineDays, 3);
+  assert.strictEqual(tasks.find((t) => t.id === 'b').deadlineDays, -2);
+  assert.strictEqual(tasks.find((t) => t.id === 'c').deadlineDays, 0);
+  assert.strictEqual(tasks.find((t) => t.id === 'd').deadlineDays, undefined);
+});
+
 check('getActiveTasks resolves a task\'s tagIds to joined tag titles', () => {
   const state = store.emptyState();
   store.applyOperations(

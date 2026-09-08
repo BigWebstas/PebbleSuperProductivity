@@ -38,6 +38,7 @@
 #define KEY_NOTE_CHUNK_TEXT MESSAGE_KEY_NOTE_CHUNK_TEXT
 #define KEY_TASK_PROJECT_ID MESSAGE_KEY_TASK_PROJECT_ID
 #define KEY_TASK_PROJECT_COLOR MESSAGE_KEY_TASK_PROJECT_COLOR
+#define KEY_TASK_DEADLINE_DAYS MESSAGE_KEY_TASK_DEADLINE_DAYS
 #define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
 #define KEY_PROJECT_INDEX MESSAGE_KEY_PROJECT_INDEX
 #define KEY_PROJECT_TITLE MESSAGE_KEY_PROJECT_TITLE
@@ -157,6 +158,9 @@ enum {
   // Set a task's time estimate (the estimate picker, reached by long-Up on the
   // notes overlay). 0 clears it. Replays as a plain [Task Shared] updateTask.
   MSG_TASK_SET_ESTIMATE = 45,       // watch -> phone: TASK_ID + TASK_TIME_ESTIMATE_MS
+  // Set a task's deadline (long-Down on the notes overlay). The value is days
+  // from today; -1 clears it. Phone turns it into { deadlineDay } (or nulls).
+  MSG_TASK_SET_DEADLINE = 46,       // watch -> phone: TASK_ID + TASK_DEADLINE_DAYS
 };
 
 // STATUS_CODE values sent from the phone.
@@ -242,7 +246,11 @@ typedef struct {
   int due_min;       // minutes since local midnight, or -1 when the task has no dueWithTime
   int time_spent_ms; // total tracked time (all days, all devices), 0 if none
   int time_estimate_ms; // 0 if none
+  // Days from today to the task's deadlineDay (negative = overdue, 0 = today),
+  // or DEADLINE_NONE when it has none. The phone omits the key when absent.
+  int deadline_days;
 } Task;
+#define DEADLINE_NONE 0x40000000
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
 // pre-sorts by project when grouping is on). Grouping off = '' for every task =
@@ -1375,7 +1383,8 @@ static void show_notes_overlay(Task *task);
 static void show_project_notes_overlay(TaskGroup *group);
 static void hide_notes_overlay(void);
 static void push_notes_window(void);
-static void push_estimate_window(const char *task_id, int current_ms);
+typedef enum { PICK_ESTIMATE, PICK_DEADLINE } PickKind;
+static void push_value_picker(PickKind kind, const char *task_id, int current);
 static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
@@ -2186,8 +2195,26 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
   }
 
   char subtitle[56] = "";
+  // Deadline marker first, so it stays visible when the line clips. "!" reads
+  // as urgency; overdue / today spelled out, else "! Nd".
+  if (task->deadline_days != DEADLINE_NONE) {
+    if (task->deadline_days < 0) {
+      str_copy(subtitle, "! overdue", sizeof(subtitle));
+    } else if (task->deadline_days == 0) {
+      str_copy(subtitle, "! today", sizeof(subtitle));
+    } else {
+      snprintf(subtitle, sizeof(subtitle), "! %dd", task->deadline_days);
+    }
+  }
   if (task->due_min >= 0) {
-    format_due_time(task->due_min, subtitle, sizeof(subtitle));
+    char due_text[16];
+    format_due_time(task->due_min, due_text, sizeof(due_text));
+    size_t dl = strlen(subtitle);
+    if (dl > 0) {
+      snprintf(subtitle + dl, sizeof(subtitle) - dl, "  %s", due_text);
+    } else {
+      str_copy(subtitle, due_text, sizeof(subtitle));
+    }
   }
   if (effective_ms > 0 || is_tracking_this) {
     char time_text[20];
@@ -2610,6 +2637,10 @@ static void send_pending_retry(void) {
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_int32(iter, KEY_TASK_TIME_ESTIMATE_MS, s_retry_int);
       break;
+    case MSG_TASK_SET_DEADLINE:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_int32(iter, KEY_TASK_DEADLINE_DAYS, s_retry_int);
+      break;
     case MSG_PROJECT_NOTE_APPEND:
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
       dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str2);
@@ -2722,6 +2753,11 @@ static void send_task_reschedule(const char *task_id, RescheduleKind kind, const
 // plain updateTask op and pushes a fresh list back. int_val carries the ms.
 static void send_task_set_estimate(const char *task_id, int32_t ms) {
   begin_send(MSG_TASK_SET_ESTIMATE, task_id, NULL, ms);
+}
+
+// Set a task's deadline to `days` from today, or clear it (days < 0).
+static void send_task_set_deadline(const char *task_id, int32_t days) {
+  begin_send(MSG_TASK_SET_DEADLINE, task_id, NULL, days);
 }
 #endif
 
@@ -3869,6 +3905,7 @@ static void parse_common_task_fields(DictionaryIterator *it, Task *dst,
   dst->due_min = tuple_int(it, KEY_TASK_DUE_MIN, -1);
   dst->time_spent_ms = tuple_int(it, KEY_TASK_TIME_SPENT_MS, 0);
   dst->time_estimate_ms = tuple_int(it, KEY_TASK_TIME_ESTIMATE_MS, 0);
+  dst->deadline_days = tuple_int(it, KEY_TASK_DEADLINE_DAYS, DEADLINE_NONE);
 }
 
 static void inbox_received_handler(DictionaryIterator *iterator, void *context) {
@@ -5465,15 +5502,20 @@ static void apply_touch_nav(void) {
 }
 #endif  // PBL_TOUCH
 
-// Long-Up on a task's notes overlay opens the estimate picker. Up/Down are the
-// ScrollLayer's (single-click scroll); a long hold is free.
-static void notes_estimate_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+// Long-Up / long-Down on a task's notes overlay open the value picker (estimate
+// / deadline). Up/Down are the ScrollLayer's single-click scroll; a long hold
+// is free.
+static void notes_pick_long_click_handler(ClickRecognizerRef recognizer, void *context) {
   if (s_notes_overlay_is_project) {
-    return; // a project has no estimate
+    return; // a project has neither an estimate nor a deadline
   }
   backlight_touch();
   Task *t = find_task_by_id(s_notes_overlay_subject_id);
-  push_estimate_window(s_notes_overlay_subject_id, t ? t->time_estimate_ms : 0);
+  if (click_recognizer_get_button_id(recognizer) == BUTTON_ID_UP) {
+    push_value_picker(PICK_ESTIMATE, s_notes_overlay_subject_id, t ? t->time_estimate_ms : 0);
+  } else {
+    push_value_picker(PICK_DEADLINE, s_notes_overlay_subject_id, t ? t->deadline_days : DEADLINE_NONE);
+  }
 }
 
 // Installed onto the ScrollLayer (not the window) via
@@ -5482,7 +5524,8 @@ static void notes_estimate_long_click_handler(ClickRecognizerRef recognizer, voi
 static void notes_window_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, notes_window_select_click_handler);
   window_long_click_subscribe(BUTTON_ID_SELECT, 0, notes_window_select_long_click_handler, NULL);
-  window_long_click_subscribe(BUTTON_ID_UP, 0, notes_estimate_long_click_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_UP, 0, notes_pick_long_click_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_DOWN, 0, notes_pick_long_click_handler, NULL);
 }
 
 // Fills the layer with NOTES_TAGS_BG_COLOR and draws the bold "Tags:" label
@@ -5572,41 +5615,71 @@ static void push_notes_window(void) {
   window_stack_push(s_notes_window, true);
 }
 
-// ---------- estimate picker ----------
-// A tiny full-screen picker reached by long-Up on a task's notes overlay.
-// Up/Down step a fixed ladder of estimate values, Select sends it (a plain
-// updateTask, applied optimistically to the row too), Back cancels. 0 = "None"
-// clears the estimate.
+// ---------- value picker (estimate / deadline) ----------
+// One tiny full-screen picker window, reached from a task's notes overlay:
+// long-Up sets the time estimate, long-Down sets the deadline. Up/Down step a
+// fixed ladder, Select sends it (a plain updateTask, applied optimistically to
+// the row), Back cancels. PickKind is declared up with the forward decls.
+// Estimate ladder is minutes (0 = clear). Deadline ladder is days from today,
+// with -1 as the "None" (clear) rung.
 static const int s_est_ladder_min[] = { 0, 15, 30, 45, 60, 90, 120, 180, 240, 300, 360, 480 };
-#define EST_LADDER_LEN (int)(sizeof(s_est_ladder_min) / sizeof(s_est_ladder_min[0]))
-static Window *s_est_window = NULL;
-static Layer *s_est_layer = NULL;
-static StatusBarLayer *s_est_status_bar = NULL;
-static char s_est_task_id[MAX_ID_LEN] = "";
-static int s_est_idx = 0;
+static const int s_dl_ladder_days[] = { -1, 0, 1, 2, 3, 7, 14, 30 };
+#define ARRLEN(a) (int)(sizeof(a) / sizeof((a)[0]))
+static Window *s_pick_window = NULL;
+static Layer *s_pick_layer = NULL;
+static StatusBarLayer *s_pick_status_bar = NULL;
+static char s_pick_task_id[MAX_ID_LEN] = "";
+static PickKind s_pick_kind = PICK_ESTIMATE;
+static int s_pick_idx = 0;
 
-static void format_estimate(int min, char *out, size_t len) {
-  if (min <= 0) {
-    str_copy(out, "None", len);
+static int pick_ladder_len(void) {
+  return s_pick_kind == PICK_ESTIMATE ? ARRLEN(s_est_ladder_min) : ARRLEN(s_dl_ladder_days);
+}
+static int pick_ladder_val(int i) {
+  return s_pick_kind == PICK_ESTIMATE ? s_est_ladder_min[i] : s_dl_ladder_days[i];
+}
+
+// The value string for the current rung.
+static void pick_format(char *out, size_t len) {
+  int v = pick_ladder_val(s_pick_idx);
+  if (s_pick_kind == PICK_ESTIMATE) {
+    if (v <= 0) {
+      str_copy(out, "None", len);
+      return;
+    }
+    int h = v / 60, m = v % 60;
+    if (h && m) {
+      snprintf(out, len, "%dh %dm", h, m);
+    } else if (h) {
+      snprintf(out, len, "%dh", h);
+    } else {
+      snprintf(out, len, "%dm", m);
+    }
     return;
   }
-  int h = min / 60, m = min % 60;
-  if (h && m) {
-    snprintf(out, len, "%dh %dm", h, m);
-  } else if (h) {
-    snprintf(out, len, "%dh", h);
+  if (v < 0) {
+    str_copy(out, "None", len);
+  } else if (v == 0) {
+    str_copy(out, "Today", len);
+  } else if (v == 1) {
+    str_copy(out, "Tomorrow", len);
+  } else if (v == 7) {
+    str_copy(out, "1 week", len);
+  } else if (v == 14) {
+    str_copy(out, "2 weeks", len);
+  } else if (v == 30) {
+    str_copy(out, "1 month", len);
   } else {
-    snprintf(out, len, "%dm", m);
+    snprintf(out, len, "%d days", v);
   }
 }
 
-// Ladder index whose value is closest to `ms` - so the picker opens on (or
-// nearest to) the task's current estimate.
-static int est_nearest_idx(int ms) {
-  int target = ms / 60000;
+// Ladder index whose value is closest to `target` (minutes for estimate, days
+// for deadline; DEADLINE_NONE-equivalent handled by the caller).
+static int pick_nearest_idx(int target) {
   int best = 0, best_d = 1 << 30;
-  for (int i = 0; i < EST_LADDER_LEN; i++) {
-    int d = s_est_ladder_min[i] - target;
+  for (int i = 0; i < pick_ladder_len(); i++) {
+    int d = pick_ladder_val(i) - target;
     if (d < 0) {
       d = -d;
     }
@@ -5618,91 +5691,107 @@ static int est_nearest_idx(int ms) {
   return best;
 }
 
-static void est_layer_update_proc(Layer *layer, GContext *ctx) {
+static void pick_layer_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   fill_bg(ctx, b, GColorWhite);
   graphics_context_set_text_color(ctx, GColorBlack);
   int16_t cy = b.size.h / 2;
-  draw_text(ctx, "Estimate", CHROME_FONT_KEY,
+  draw_text(ctx, s_pick_kind == PICK_ESTIMATE ? "Estimate" : "Deadline", CHROME_FONT_KEY,
             GRect(0, cy - 44, b.size.w, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
   char val[16];
-  format_estimate(s_est_ladder_min[s_est_idx], val, sizeof(val));
+  pick_format(val, sizeof(val));
   draw_text(ctx, val, FONT_KEY_GOTHIC_28_BOLD,
             GRect(0, cy - 22, b.size.w, 34), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
   draw_text(ctx, "Up/Down pick\nSelect to set", CHROME_FONT_KEY,
             GRect(0, cy + 16, b.size.w, 40), GTextOverflowModeWordWrap, GTextAlignmentCenter);
 }
 
-static void est_step(int delta) {
-  int n = s_est_idx + delta;
+static void pick_step(int delta) {
+  int n = s_pick_idx + delta;
   if (n < 0) {
     n = 0;
   }
-  if (n >= EST_LADDER_LEN) {
-    n = EST_LADDER_LEN - 1;
+  if (n >= pick_ladder_len()) {
+    n = pick_ladder_len() - 1;
   }
-  if (n != s_est_idx) {
-    s_est_idx = n;
-    layer_mark_dirty(s_est_layer);
+  if (n != s_pick_idx) {
+    s_pick_idx = n;
+    layer_mark_dirty(s_pick_layer);
     vibes_short_pulse();
   }
 }
 
-static void est_up_click(ClickRecognizerRef r, void *c) { backlight_touch(); est_step(1); }
-static void est_down_click(ClickRecognizerRef r, void *c) { backlight_touch(); est_step(-1); }
+static void pick_up_click(ClickRecognizerRef r, void *c) { backlight_touch(); pick_step(1); }
+static void pick_down_click(ClickRecognizerRef r, void *c) { backlight_touch(); pick_step(-1); }
 
-static void est_select_click(ClickRecognizerRef r, void *c) {
+static void pick_select_click(ClickRecognizerRef r, void *c) {
   backlight_touch();
-  int32_t ms = (int32_t)s_est_ladder_min[s_est_idx] * 60000;
-  // Optimistic: update the today-list row now if the task is on it.
-  Task *t = find_task_by_id(s_est_task_id);
+  int v = pick_ladder_val(s_pick_idx);
+  Task *t = find_task_by_id(s_pick_task_id);
+  if (s_pick_kind == PICK_ESTIMATE) {
+    int32_t ms = (int32_t)v * 60000;
+    if (t) {
+      t->time_estimate_ms = (int)ms;
+    }
+    send_task_set_estimate(s_pick_task_id, ms);
+  } else {
+    if (t) {
+      t->deadline_days = (v < 0) ? DEADLINE_NONE : v;
+    }
+    send_task_set_deadline(s_pick_task_id, v);
+  }
   if (t) {
-    t->time_estimate_ms = (int)ms;
     save_tasks();
     if (s_menu_layer) {
       menu_layer_reload_data(s_menu_layer);
     }
   }
-  send_task_set_estimate(s_est_task_id, ms);
   window_stack_pop(true);
 }
 
-static void est_click_config_provider(void *context) {
-  window_single_click_subscribe(BUTTON_ID_UP, est_up_click);
-  window_single_click_subscribe(BUTTON_ID_DOWN, est_down_click);
-  window_single_click_subscribe(BUTTON_ID_SELECT, est_select_click);
+static void pick_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_UP, pick_up_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN, pick_down_click);
+  window_single_click_subscribe(BUTTON_ID_SELECT, pick_select_click);
 }
 
-static void est_window_load(Window *window) {
+static void pick_window_load(Window *window) {
   Layer *window_layer;
-  GRect content = window_chrome(window, &s_est_status_bar, &window_layer);
-  s_est_layer = layer_create(content);
-  layer_set_update_proc(s_est_layer, est_layer_update_proc);
-  layer_add_child(window_layer, s_est_layer);
-  window_set_click_config_provider(window, est_click_config_provider);
+  GRect content = window_chrome(window, &s_pick_status_bar, &window_layer);
+  s_pick_layer = layer_create(content);
+  layer_set_update_proc(s_pick_layer, pick_layer_update_proc);
+  layer_add_child(window_layer, s_pick_layer);
+  window_set_click_config_provider(window, pick_click_config_provider);
 }
 
-static void est_window_unload(Window *window) {
-  layer_destroy(s_est_layer);
-  s_est_layer = NULL;
-  status_bar_layer_destroy(s_est_status_bar);
-  s_est_status_bar = NULL;
+static void pick_window_unload(Window *window) {
+  layer_destroy(s_pick_layer);
+  s_pick_layer = NULL;
+  status_bar_layer_destroy(s_pick_status_bar);
+  s_pick_status_bar = NULL;
 }
 
-static void push_estimate_window(const char *task_id, int current_ms) {
+// current: ms for PICK_ESTIMATE; days-from-today for PICK_DEADLINE, or
+// DEADLINE_NONE for no deadline (opens on the "None" rung).
+static void push_value_picker(PickKind kind, const char *task_id, int current) {
   if (!task_id || task_id[0] == '\0') {
     return;
   }
-  str_copy(s_est_task_id, task_id, sizeof(s_est_task_id));
-  s_est_idx = est_nearest_idx(current_ms);
-  if (!s_est_window) {
-    s_est_window = window_create();
-    window_set_window_handlers(s_est_window, (WindowHandlers) {
-      .load = est_window_load,
-      .unload = est_window_unload,
+  str_copy(s_pick_task_id, task_id, sizeof(s_pick_task_id));
+  s_pick_kind = kind;
+  if (kind == PICK_ESTIMATE) {
+    s_pick_idx = pick_nearest_idx(current / 60000);
+  } else {
+    s_pick_idx = (current == DEADLINE_NONE) ? 0 : pick_nearest_idx(current);
+  }
+  if (!s_pick_window) {
+    s_pick_window = window_create();
+    window_set_window_handlers(s_pick_window, (WindowHandlers) {
+      .load = pick_window_load,
+      .unload = pick_window_unload,
     });
   }
-  window_stack_push(s_est_window, true);
+  window_stack_push(s_pick_window, true);
 }
 #endif
 

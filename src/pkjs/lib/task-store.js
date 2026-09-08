@@ -74,6 +74,15 @@ function msIsToday(ms) {
   return dateToDateStr(new Date(ms)) === todayStr();
 }
 
+// Whole days from today to a task's deadline (negative = overdue, 0 = today),
+// or undefined when it has none. deadlineDay ('YYYY-MM-DD') and deadlineWithTime
+// (epoch ms) are mutually exclusive in the real model - handle either.
+function taskDeadlineDays(t) {
+  var day = t.deadlineDay ||
+    (t.deadlineWithTime ? dateToDateStr(new Date(t.deadlineWithTime)) : null);
+  return day ? diffInDays(todayStr(), day) : undefined;
+}
+
 // state: { task: { [id]: {id, title, isDone, parentId?, projectId?,
 //                          tagIds?, __inBacklog?, ...} },
 //          project: { [id]: {id, title, ...} },
@@ -1385,11 +1394,11 @@ function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId
   // already fully available locally once TAG entities have replayed, so
   // there's no fetch round-trip worth avoiding the way there is for a
   // task's full notes text.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined });
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, deadlineDays: taskDeadlineDays(t) });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined });
+      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, deadlineDays: taskDeadlineDays(sub) });
     }
   });
 }

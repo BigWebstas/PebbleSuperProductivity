@@ -82,6 +82,7 @@ var MSG_UPCOMING_DATA = 43;         // phone -> watch: UPCOMING_TEXT
 // list. The watch picks the direction from the row's section.
 var MSG_TASK_SET_BACKLOG = 44;      // watch -> phone: TASK_ID + PROJECT_ID + PROJECT_TASK_BACKLOG
 var MSG_TASK_SET_ESTIMATE = 45;     // watch -> phone: TASK_ID + TASK_TIME_ESTIMATE_MS (0 clears)
+var MSG_TASK_SET_DEADLINE = 46;     // watch -> phone: TASK_ID + TASK_DEADLINE_DAYS (days from today, <0 clears)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -561,6 +562,11 @@ function fillTaskFields(dict, t) {
     // phone's local time (matching todayStr()'s own local-day convention).
     var dueDate = new Date(t.dueWithTime);
     dict.TASK_DUE_MIN = dueDate.getHours() * 60 + dueDate.getMinutes();
+  }
+  if (typeof t.deadlineDays === 'number') {
+    // Whole days from today (negative = overdue). Absent = no deadline; the
+    // watch defaults the field to its DEADLINE_NONE sentinel.
+    dict.TASK_DEADLINE_DAYS = Math.max(-999, Math.min(999, t.deadlineDays));
   }
   if (t.timeSpent) {
     // AppMessage ints are 32-bit signed - cap well under the ~24.8 days
@@ -1680,6 +1686,45 @@ function handleTaskSetEstimate(taskId, ms) {
     .catch(function (err) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload estimate change: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, failureMsg);
+    });
+}
+
+// Watch deadline picker: `days` from today, or < 0 to clear. Set as
+// { deadlineDay } ('YYYY-MM-DD'); deadlineWithTime is nulled alongside since
+// the real model keeps the two mutually exclusive. A plain updateTask op.
+function handleTaskSetDeadline(taskId, days) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task) {
+    return;
+  }
+  var changes;
+  if (typeof days !== 'number' || days < 0) {
+    changes = { deadlineDay: null, deadlineWithTime: null };
+  } else {
+    var d = new Date();
+    d.setDate(d.getDate() + days);
+    changes = { deadlineDay: store.dateToDateStr(d), deadlineWithTime: null };
+  }
+  state.task[taskId] = Object.assign({}, task, changes);
+  saveState(state);
+  sendTaskListToWatch(watchTaskList(state, config));
+
+  var clientId = getOrCreateClientId();
+  var failureMsg = null;
+  uploadOps([buildTaskUpdateOp(taskId, changes, clientId)], config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload deadline change: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
     })
     .then(function () {
@@ -2840,6 +2885,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_SET_ESTIMATE:
       handleTaskSetEstimate(payload.TASK_ID, payload.TASK_TIME_ESTIMATE_MS || 0);
+      break;
+    case MSG_TASK_SET_DEADLINE:
+      handleTaskSetDeadline(payload.TASK_ID, payload.TASK_DEADLINE_DAYS);
       break;
     case MSG_PRESENCE_STOP:
       if (presenceClient && presenceLastSessionId) {

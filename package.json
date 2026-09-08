@@ -169,7 +169,8 @@
       "YESTERDAY_STATS_ENABLED",
       "PROJECT_TASK_COUNT",
       "TAGS_ENABLED",
-      "IS_TAGS"
+      "IS_TAGS",
+      "TASK_DEADLINE_DAYS"
     ]
   }
 }
