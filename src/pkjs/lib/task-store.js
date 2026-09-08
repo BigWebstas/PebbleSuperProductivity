@@ -1429,56 +1429,184 @@ function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId
 // blocks, since a habit's position jumping around as soon as it crosses its
 // goal for the day makes a specific habit harder to find at a glance than a
 // fixed alphabetical spot does.
-// How many consecutive days up to and including today (or up to yesterday, if
-// today's goal isn't met yet) this counter hit its goal. countOnDay is keyed
-// by local date string; a missing/short day breaks the run. Capped at a year's
-// scan so a pathological history can't spin.
-function habitStreak(c, goal) {
-  var on = (c && c.countOnDay) || {};
-  var d = new Date();
-  if (((on[dateToDateStr(d)]) || 0) < goal) {
-    d.setDate(d.getDate() - 1); // today not done yet - count the run behind it
+// Streak handling mirrors the real app's get-simple-counter-streak-duration.ts.
+// A counter with no streakMinValue has no streak (returns 0). "specific-days"
+// mode counts only the weekdays flagged in streakWeekDays (SP's default counter
+// has Mon-Fri) and an unset streakWeekDays is treated as "not configured" -> 0,
+// exactly as SP does. "weekly-frequency" mode counts weeks (Mon-start) that hit
+// streakWeeklyFrequency goal-met days, returning the summed day count. Callers
+// gate all of this on isTrackStreaks (default true) - see getActiveHabits.
+
+function streakDayConsidered(streakWeekDays, d) {
+  return !!(streakWeekDays && streakWeekDays[d.getDay()]);
+}
+
+// Walk `d` backwards to the nearest weekday streakWeekDays counts (SP's
+// setDayToLastConsideredWeekday - 7-step failsafe against an all-false mask).
+function streakStepToConsidered(d, streakWeekDays) {
+  for (var i = 0; i <= 7 && !streakDayConsidered(streakWeekDays, d); i++) {
+    d.setDate(d.getDate() - 1);
   }
-  var n = 0;
-  for (var i = 0; i < 366; i++) {
-    if (((on[dateToDateStr(d)]) || 0) >= goal) {
-      n++;
-      d.setDate(d.getDate() - 1);
-    } else {
+}
+
+// Monday-anchored start of the week containing `date`, at local midnight.
+function streakWeekStart(date) {
+  var r = new Date(date);
+  var day = r.getDay();
+  r.setDate(r.getDate() - (day === 0 ? 6 : day - 1));
+  r.setHours(0, 0, 0, 0);
+  return r;
+}
+
+// Goal-met days in the 7 days from weekStart.
+function streakWeekMetCount(weekStart, on, min) {
+  var count = 0;
+  for (var i = 0; i < 7; i++) {
+    var d = new Date(weekStart);
+    d.setDate(d.getDate() + i);
+    if ((on[dateToDateStr(d)] || 0) >= min) {
+      count++;
+    }
+  }
+  return count;
+}
+
+function habitWeeklyFrequencyStreak(c) {
+  var min = c.streakMinValue;
+  var freq = c.streakWeeklyFrequency;
+  if (!freq || freq < 1) {
+    return 0;
+  }
+  var on = c.countOnDay || {};
+  var currentWeekStart = streakWeekStart(new Date());
+  var currentWeekCount = streakWeekMetCount(currentWeekStart, on, min);
+  var isCurrentWeekMet = currentWeekCount >= freq;
+  var weekStart = new Date(currentWeekStart);
+  if (!isCurrentWeekMet) {
+    weekStart.setDate(weekStart.getDate() - 7);
+  }
+  var total = 0;
+  for (var guard = 0; guard < 520; guard++) {
+    var wc = streakWeekMetCount(weekStart, on, min);
+    if (wc < freq) {
       break;
     }
+    total += wc;
+    weekStart.setDate(weekStart.getDate() - 7);
+  }
+  if (total > 0 && !isCurrentWeekMet) {
+    return total + currentWeekCount;
+  }
+  // SP intentionally shows the current week's progress when no full week has
+  // met the goal yet, as encouragement.
+  return total || currentWeekCount;
+}
+
+// Current streak. specific-days: consecutive considered weekdays meeting the
+// goal, counting behind today when today isn't met yet. weekly-frequency: see
+// habitWeeklyFrequencyStreak.
+function habitStreak(c) {
+  var min = c && c.streakMinValue;
+  if (!min) {
+    return 0;
+  }
+  if (c.streakMode === 'weekly-frequency') {
+    return habitWeeklyFrequencyStreak(c);
+  }
+  if (!c.streakWeekDays) {
+    return 0;
+  }
+  var on = c.countOnDay || {};
+  var today = todayStr();
+  var d = new Date();
+  streakStepToConsidered(d, c.streakWeekDays);
+  if (dateToDateStr(d) === today && (on[today] || 0) < min) {
+    d.setDate(d.getDate() - 1);
+    streakStepToConsidered(d, c.streakWeekDays);
+  }
+  var n = 0;
+  for (var guard = 0; guard < 2000 && (on[dateToDateStr(d)] || 0) >= min; guard++) {
+    n++;
+    d.setDate(d.getDate() - 1);
+    streakStepToConsidered(d, c.streakWeekDays);
   }
   return n;
 }
 
-// The longest run of consecutive goal-met days anywhere in this counter's
-// whole history - the record the current streak (habitStreak) is measured
-// against. countOnDay is date-string keyed ("YYYY-MM-DD"); a day absent or
-// below goal breaks a run. The watch shows this as "best N" when the current
-// streak has fallen behind it.
-function habitBestStreak(c, goal) {
-  var on = (c && c.countOnDay) || {};
-  var days = [];
+// Earliest local Date among "YYYY-MM-DD" countOnDay keys, or null.
+function streakEarliestDate(on) {
+  var best = null;
   for (var k in on) {
-    if (!on.hasOwnProperty(k) || (on[k] || 0) < goal) {
+    if (!on.hasOwnProperty(k)) {
       continue;
     }
     var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k);
     if (m) {
-      days.push(Math.round(Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000));
+      var t = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+      if (best === null || t < best) {
+        best = t;
+      }
     }
   }
-  if (!days.length) {
+  return best === null ? null : new Date(best);
+}
+
+// The record the current streak is measured against - the longest such run
+// anywhere in this counter's history. Same mode split as habitStreak; the
+// weekly-frequency variant sums met days over the longest run of consecutive
+// completed weeks (partial current week excluded).
+function habitBestStreak(c) {
+  var min = c && c.streakMinValue;
+  if (!min) {
     return 0;
   }
-  days.sort(function (a, b) { return a - b; });
-  var best = 1;
-  var run = 1;
-  for (var i = 1; i < days.length; i++) {
-    run = days[i] === days[i - 1] + 1 ? run + 1 : 1;
-    if (run > best) {
-      best = run;
+  var on = c.countOnDay || {};
+  var earliest = streakEarliestDate(on);
+  if (!earliest) {
+    return 0;
+  }
+  if (c.streakMode === 'weekly-frequency') {
+    var freq = c.streakWeeklyFrequency;
+    if (!freq || freq < 1) {
+      return 0;
     }
+    var w = streakWeekStart(earliest);
+    var currentWeekStart = streakWeekStart(new Date()).getTime();
+    var runSum = 0;
+    var wbest = 0;
+    for (var wg = 0; wg < 1200 && w.getTime() < currentWeekStart; wg++) {
+      var wc = streakWeekMetCount(w, on, min);
+      runSum = wc >= freq ? runSum + wc : 0;
+      if (runSum > wbest) {
+        wbest = runSum;
+      }
+      w.setDate(w.getDate() + 7);
+    }
+    return wbest;
+  }
+  if (!c.streakWeekDays) {
+    return 0;
+  }
+  var today = todayStr();
+  var d = new Date(earliest);
+  var run = 0;
+  var best = 0;
+  for (var g = 0; g < 4000; g++) {
+    var ds = dateToDateStr(d);
+    if (streakDayConsidered(c.streakWeekDays, d)) {
+      if ((on[ds] || 0) >= min) {
+        run++;
+        if (run > best) {
+          best = run;
+        }
+      } else if (ds !== today) {
+        run = 0; // an unmet considered day in the past breaks the run
+      }
+    }
+    if (ds === today) {
+      break;
+    }
+    d.setDate(d.getDate() + 1);
   }
   return best;
 }
@@ -1493,6 +1621,9 @@ function getActiveHabits(state, limit) {
       var goal = c.streakMinValue || 1;
       var value = (c.countOnDay && c.countOnDay[today]) || 0;
       var isCountdown = c.type === 'RepeatedCountdownReminder';
+      // isTrackStreaks defaults true (EMPTY_SIMPLE_COUNTER); when off, SP shows
+      // no streak, so neither do we.
+      var tracksStreak = c.isTrackStreaks !== false;
       return {
         id: c.id,
         title: c.title,
@@ -1502,8 +1633,8 @@ function getActiveHabits(state, limit) {
         isStopwatch: c.type === 'StopWatch',
         isCountdown: isCountdown,
         countdownMs: isCountdown ? (c.countdownDuration || 0) : 0,
-        streak: habitStreak(c, goal),
-        bestStreak: habitBestStreak(c, goal),
+        streak: tracksStreak ? habitStreak(c) : 0,
+        bestStreak: tracksStreak ? habitBestStreak(c) : 0,
         // Material icon name as SP stores it; the watch maps the ones it has a
         // bitmap for (src/c/habit_icons.h) and ignores the rest.
         icon: c.icon || '',

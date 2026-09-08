@@ -1242,23 +1242,30 @@ check('getActiveHabits defaults countdownMs to 0 for a ClickCounter/StopWatch ro
   assert.strictEqual(rows.find((r) => r.id === 'h2').countdownMs, 0);
 });
 
+// Every weekday counts - lets a day-offset test stay deterministic whatever
+// day it runs on. SP's real default is Mon-Fri.
+const ALL_WEEKDAYS = { 0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true };
+const dayStr = (n) => {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return store.dateToDateStr(d);
+};
+
 check('getActiveHabits streak counts consecutive goal-met days, unbroken through today', () => {
-  const dayStr = (n) => {
-    const d = new Date();
-    d.setDate(d.getDate() - n);
-    return store.dateToDateStr(d);
-  };
   const state = store.emptyState();
   store.applyOperations(
     [
       // met today, yesterday, 2 days ago; missed 3 days ago -> streak 3
       addCounter({ id: 'h1', title: 'Run', isEnabled: true, type: 'ClickCounter', streakMinValue: 2,
+        streakWeekDays: ALL_WEEKDAYS,
         countOnDay: { [dayStr(0)]: 2, [dayStr(1)]: 5, [dayStr(2)]: 2, [dayStr(3)]: 1, [dayStr(4)]: 9 } }),
       // today not met yet, but yesterday + day before were -> streak 2 (counts behind today)
       addCounter({ id: 'h2', title: 'Read', isEnabled: true, type: 'ClickCounter', streakMinValue: 1,
+        streakWeekDays: ALL_WEEKDAYS,
         countOnDay: { [dayStr(1)]: 1, [dayStr(2)]: 1 } }),
       // nothing -> streak 0
-      addCounter({ id: 'h3', title: 'New', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: {} }),
+      addCounter({ id: 'h3', title: 'New', isEnabled: true, type: 'ClickCounter', streakMinValue: 1,
+        streakWeekDays: ALL_WEEKDAYS, countOnDay: {} }),
     ],
     state
   );
@@ -1268,20 +1275,102 @@ check('getActiveHabits streak counts consecutive goal-met days, unbroken through
   assert.strictEqual(rows.find((r) => r.id === 'h3').streak, 0);
 });
 
-check('getActiveHabits bestStreak is the longest goal-met run anywhere in history', () => {
-  const dayStr = (n) => {
+check('getActiveHabits: no streak without streakMinValue or streakWeekDays', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      // no streakMinValue -> 0 (SP returns 0)
+      addCounter({ id: 'h1', title: 'Tally', isEnabled: true, type: 'ClickCounter',
+        streakWeekDays: ALL_WEEKDAYS, countOnDay: { [dayStr(0)]: 5, [dayStr(1)]: 5 } }),
+      // streakMinValue but no streakWeekDays -> 0 (SP's specific-days guard)
+      addCounter({ id: 'h2', title: 'Legacy', isEnabled: true, type: 'ClickCounter', streakMinValue: 1,
+        countOnDay: { [dayStr(0)]: 1, [dayStr(1)]: 1 } }),
+    ],
+    state
+  );
+  const rows = habits(state);
+  assert.strictEqual(rows.find((r) => r.id === 'h1').streak, 0);
+  assert.strictEqual(rows.find((r) => r.id === 'h1').bestStreak, 0);
+  assert.strictEqual(rows.find((r) => r.id === 'h2').streak, 0);
+  assert.strictEqual(rows.find((r) => r.id === 'h2').bestStreak, 0);
+});
+
+check('getActiveHabits: isTrackStreaks:false suppresses the streak', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Coffee', isEnabled: true, type: 'ClickCounter', streakMinValue: 1,
+        isTrackStreaks: false, streakWeekDays: ALL_WEEKDAYS,
+        countOnDay: { [dayStr(0)]: 3, [dayStr(1)]: 3, [dayStr(2)]: 3, [dayStr(3)]: 3 } }),
+    ],
+    state
+  );
+  const r = habits(state).find((x) => x.id === 'h1');
+  assert.strictEqual(r.streak, 0);
+  assert.strictEqual(r.bestStreak, 0);
+});
+
+check('getActiveHabits: specific-days streak skips the non-counted weekdays', () => {
+  // A run that spans a weekend: with Mon-Fri only, Sat/Sun gaps don't break it.
+  const state = store.emptyState();
+  const monFri = { 0: false, 1: true, 2: true, 3: true, 4: true, 5: true, 6: false };
+  // Build 14 days of history; count only on Mon-Fri.
+  const on = {};
+  for (let n = 0; n < 14; n++) {
     const d = new Date();
     d.setDate(d.getDate() - n);
-    return store.dateToDateStr(d);
-  };
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) {
+      on[store.dateToDateStr(d)] = 1;
+    }
+  }
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Standup', isEnabled: true, type: 'ClickCounter', streakMinValue: 1,
+      streakMode: 'specific-days', streakWeekDays: monFri, countOnDay: on })],
+    state
+  );
+  const r = habits(state).find((x) => x.id === 'h1');
+  // 10 weekdays in a 14-day window (2 full weeks), all met -> streak 10, and
+  // the weekend gaps did not reset it.
+  assert.strictEqual(r.streak, 10);
+});
+
+check('getActiveHabits: weekly-frequency streak counts qualifying weeks', () => {
+  const state = store.emptyState();
+  // 3 full past weeks with >= 3 met days each, plus this week partial.
+  const on = {};
+  for (let n = 1; n <= 28; n++) {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    // hit Mon/Wed/Fri
+    const dow = d.getDay();
+    if (dow === 1 || dow === 3 || dow === 5) {
+      on[store.dateToDateStr(d)] = 1;
+    }
+  }
+  store.applyOperations(
+    [addCounter({ id: 'h1', title: 'Gym', isEnabled: true, type: 'ClickCounter', streakMinValue: 1,
+      streakMode: 'weekly-frequency', streakWeeklyFrequency: 3, countOnDay: on })],
+    state
+  );
+  const r = habits(state).find((x) => x.id === 'h1');
+  // Each qualifying week contributes its met-day count (>= 3). At least the
+  // 3 clean past weeks -> >= 9.
+  assert.ok(r.streak >= 9, 'weekly streak ' + r.streak + ' >= 9');
+  assert.ok(r.bestStreak >= 9, 'weekly bestStreak ' + r.bestStreak + ' >= 9');
+});
+
+check('getActiveHabits bestStreak is the longest goal-met run anywhere in history', () => {
   const state = store.emptyState();
   store.applyOperations(
     [
       // current streak 1 (today only); an earlier 4-day run (days 4-7) is the record
       addCounter({ id: 'h1', title: 'Run', isEnabled: true, type: 'ClickCounter', streakMinValue: 2,
+        streakWeekDays: ALL_WEEKDAYS,
         countOnDay: { [dayStr(0)]: 2, [dayStr(2)]: 2, [dayStr(4)]: 2, [dayStr(5)]: 2, [dayStr(6)]: 2, [dayStr(7)]: 2 } }),
       // never met goal -> bestStreak 0
       addCounter({ id: 'h2', title: 'Read', isEnabled: true, type: 'ClickCounter', streakMinValue: 5,
+        streakWeekDays: ALL_WEEKDAYS,
         countOnDay: { [dayStr(1)]: 1, [dayStr(2)]: 2 } }),
     ],
     state
@@ -1290,7 +1379,8 @@ check('getActiveHabits bestStreak is the longest goal-met run anywhere in histor
   assert.strictEqual(rows.find((r) => r.id === 'h1').streak, 1);
   assert.strictEqual(rows.find((r) => r.id === 'h1').bestStreak, 4);
   assert.strictEqual(rows.find((r) => r.id === 'h2').bestStreak, 0);
-  assert.strictEqual(store.habitBestStreak({ countOnDay: { [dayStr(0)]: 3, [dayStr(1)]: 3, [dayStr(2)]: 3 } }, 3), 3);
+  assert.strictEqual(store.habitBestStreak({ streakMinValue: 3, streakWeekDays: ALL_WEEKDAYS,
+    countOnDay: { [dayStr(0)]: 3, [dayStr(1)]: 3, [dayStr(2)]: 3 } }), 3);
 });
 
 check('getActiveHabits sorts plain alphabetically by title, done and not-done interleaved', () => {
