@@ -54,12 +54,45 @@ function dateToDateStr(d) {
   return d.getFullYear() + '-' + mm + '-' + dd;
 }
 
+// The "logical day" rollover: SP's globalConfig.misc.startOfNextDay(Time) - the
+// clock time your day flips over (e.g. 4am). Minutes since midnight, 0 =
+// midnight. Set from the replayed globalConfig (setStartOfNextDayFromState);
+// every date-sensitive computation below derives its "now" from logicalNow().
+var startOfNextDayMin = 0;
+function setStartOfNextDayMin(min) {
+  startOfNextDayMin = (typeof min === 'number' && isFinite(min) && min >= 0 && min < 1440)
+    ? Math.floor(min) : 0;
+}
+function setStartOfNextDayFromState(state) {
+  var misc = state && state.globalConfig && state.globalConfig.misc;
+  if (misc) {
+    var t = misc.startOfNextDayTime;
+    var m = typeof t === 'string' && /^(\d{1,2}):(\d{2})$/.exec(t);
+    if (m) {
+      setStartOfNextDayMin((+m[1]) * 60 + (+m[2]));
+      return;
+    }
+    var h = misc.startOfNextDay;
+    if (typeof h === 'number' && h >= 0 && h <= 23) {
+      setStartOfNextDayMin(h * 60);
+      return;
+    }
+  }
+  setStartOfNextDayMin(0);
+}
+
+// "now", shifted back by the rollover offset - its local calendar date is the
+// logical day.
+function logicalNow() {
+  return new Date(Date.now() - startOfNextDayMin * 60000);
+}
+
 function todayStr() {
-  return dateToDateStr(new Date());
+  return dateToDateStr(logicalNow());
 }
 
 function yesterdayStr() {
-  var d = new Date();
+  var d = logicalNow();
   d.setDate(d.getDate() - 1);
   return dateToDateStr(d);
 }
@@ -68,10 +101,11 @@ function yesterdayStr() {
 // day). The real app enforces dueDay/dueWithTime as MUTUALLY EXCLUSIVE -
 // setting one clears the other (task-shared-scheduling.reducer.ts) - so a
 // todayOnly filter keyed on dueDay alone would miss a dueWithTime-only
-// task entirely. No custom "start of day" offset here (unlike the real
-// app's startOfNextDayDiffMs) - just the phone's local calendar day.
+// task entirely. The scheduled time is shifted by the same rollover offset
+// (SP's isTodayWithOffset) so a 1am task with a 4am rollover still counts as
+// "today".
 function msIsToday(ms) {
-  return dateToDateStr(new Date(ms)) === todayStr();
+  return dateToDateStr(new Date(ms - startOfNextDayMin * 60000)) === todayStr();
 }
 
 // Whole days from today to a task's deadline (negative = overdue, 0 = today),
@@ -889,6 +923,9 @@ function applyGlobalConfigAction(op, actionPayload, state) {
   var gc = state.globalConfig || (state.globalConfig = {});
   gc[actionPayload.sectionKey] = Object.assign(
     {}, gc[actionPayload.sectionKey], actionPayload.sectionCfg || {});
+  if (actionPayload.sectionKey === 'misc') {
+    setStartOfNextDayFromState(state);
+  }
 }
 
 // Applies one SuperSync operation to `state` in place. `crypto` is the
@@ -1061,6 +1098,7 @@ function applyOperation(entry, state, crypto) {
         // globalConfig / timeTracking are plain objects, not NgRx EntityState.
         if (payload && payload.globalConfig) {
           state.globalConfig = payload.globalConfig;
+          setStartOfNextDayFromState(state);
         }
         if (payload && payload.timeTracking) {
           state.timeTracking = payload.timeTracking;
@@ -1607,7 +1645,7 @@ function habitWeeklyFrequencyStreak(c) {
     return 0;
   }
   var on = c.countOnDay || {};
-  var currentWeekStart = streakWeekStart(new Date());
+  var currentWeekStart = streakWeekStart(logicalNow());
   var currentWeekCount = streakWeekMetCount(currentWeekStart, on, min);
   var isCurrentWeekMet = currentWeekCount >= freq;
   var weekStart = new Date(currentWeekStart);
@@ -1647,7 +1685,7 @@ function habitStreak(c) {
   }
   var on = c.countOnDay || {};
   var today = todayStr();
-  var d = new Date();
+  var d = logicalNow();
   streakStepToConsidered(d, c.streakWeekDays);
   if (dateToDateStr(d) === today && (on[today] || 0) < min) {
     d.setDate(d.getDate() - 1);
@@ -1700,7 +1738,7 @@ function habitBestStreak(c) {
       return 0;
     }
     var w = streakWeekStart(earliest);
-    var currentWeekStart = streakWeekStart(new Date()).getTime();
+    var currentWeekStart = streakWeekStart(logicalNow()).getTime();
     var runSum = 0;
     var wbest = 0;
     for (var wg = 0; wg < 1200 && w.getTime() < currentWeekStart; wg++) {
@@ -1803,7 +1841,7 @@ function computeStats(state) {
   var weekLabels = [];
   var weekIndex = {};
   for (var wi = 0; wi < 7; wi++) {
-    var wd = new Date();
+    var wd = logicalNow();
     wd.setDate(wd.getDate() - (6 - wi));
     weekIndex[dateToDateStr(wd)] = wi;
     weekLabels.push(wi === 6 ? 'Today' : DOW[wd.getDay()]);
@@ -2222,6 +2260,7 @@ module.exports = {
   computeUpcoming: computeUpcoming,
   computeNotes: computeNotes,
   formatRepeatCfg: formatRepeatCfg,
+  setStartOfNextDayFromState: setStartOfNextDayFromState,
   repeatOccurrences: repeatOccurrences,
   NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,

@@ -545,6 +545,9 @@ function sendTaskListToWatch(tasks) {
 // has to show in the watch's pinned "TRACKING" section, which reads exactly
 // this list (main.c's pinned_task_index).
 function watchTaskList(state, config) {
+  // Re-derive the day-rollover offset from this state - the module var it lives
+  // in resets on a pkjs process restart, and loadState() doesn't replay ops.
+  store.setStartOfNextDayFromState(state);
   var trackedId = (presenceBroadcasting && presenceBroadcasting.taskId) || null;
   return store.getActiveTasks(
     state,
@@ -850,7 +853,9 @@ function handleStatsRequest() {
   if (config.enableStats === false) {
     return;
   }
-  var stats = store.computeStats(loadState());
+  var statsState = loadState();
+  store.setStartOfNextDayFromState(statsState);
+  var stats = store.computeStats(statsState);
   // STATS_TEXT is a preformatted block the watch prints verbatim. A line
   // starting with "\x02" is a section header (drawn as a black bar). First the
   // last-7-days worklog, then the per-project open-task counts.
@@ -937,7 +942,9 @@ function handleUpcomingRequest() {
   if (config.enableUpcoming === false) {
     return;
   }
-  var items = store.computeUpcoming(loadState(), 40);
+  var upState = loadState();
+  store.setStartOfNextDayFromState(upState);
+  var items = store.computeUpcoming(upState, 40);
   var lines = [];
   var lastDay = '';
   var clean = function (s, n) {
@@ -984,7 +991,9 @@ function handleNotesPageRequest() {
   if (!config.enableNotesPage) {
     return;
   }
-  var notes = store.computeNotes(loadState(), 20);
+  var notesState = loadState();
+  store.setStartOfNextDayFromState(notesState);
+  var notes = store.computeNotes(notesState, 20);
   var clean = function (s, n) {
     return String(s).replace(/[\t\x02]/g, ' ').slice(0, n);
   };
@@ -1087,6 +1096,7 @@ var syncInFlight = false;
 // out of sync with each other on what "push the current state" means.
 function pushCachedStateToWatch(config) {
   var state = loadState();
+  store.setStartOfNextDayFromState(state);
   var tasks = watchTaskList(state, config);
   sendTaskListToWatch(tasks);
   if (config.enableHabits !== false) {

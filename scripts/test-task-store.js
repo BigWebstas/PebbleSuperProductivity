@@ -2097,6 +2097,37 @@ check('applyMetricAction upserts / updates / deletes a day metric', () => {
   assert.strictEqual(state.metric['2026-09-08'], undefined);
 });
 
+check('startOfNextDay: logical day is the previous calendar day before the rollover', () => {
+  const realNow = Date.now;
+  try {
+    const state = store.emptyState();
+    store.applyOperations([
+      entry('GLOBAL_CONFIG', '[Global Config] Update Global Config Section',
+        { sectionKey: 'misc', sectionCfg: { startOfNextDayTime: '04:00', startOfNextDay: 4 } }),
+    ], state);
+    store.setStartOfNextDayFromState(state);
+
+    // 2026-06-15 02:30 local - before the 4am rollover -> logical day is the 14th
+    const preRollover = new Date(2026, 5, 15, 2, 30, 0);
+    Date.now = () => preRollover.getTime();
+    assert.strictEqual(store.todayStr(), '2026-06-14');
+    assert.strictEqual(store.yesterdayStr(), '2026-06-13');
+
+    // same day 09:00 - after the rollover -> logical day is the 15th
+    const postRollover = new Date(2026, 5, 15, 9, 0, 0);
+    Date.now = () => postRollover.getTime();
+    assert.strictEqual(store.todayStr(), '2026-06-15');
+
+    // clearing the config resets to a midnight boundary
+    store.setStartOfNextDayFromState(store.emptyState());
+    Date.now = () => preRollover.getTime();
+    assert.strictEqual(store.todayStr(), '2026-06-15');
+  } finally {
+    Date.now = realNow;
+    store.setStartOfNextDayFromState(store.emptyState());
+  }
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);
