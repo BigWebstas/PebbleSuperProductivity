@@ -95,6 +95,14 @@ var MSG_TASK_TOGGLE_CHECK = 51;    // watch -> phone: TASK_ID + CHECK_INDEX + CH
 var MSG_METRIC_ENERGY = 52;        // watch -> phone: METRIC_ENERGY (1 low / 2 ok / 3 good)
 var MSG_METRIC_RATING = 53;        // watch -> phone: METRIC_RATING (impactOfWork 1-4)
 var MSG_METRIC_REFLECT = 54;       // watch -> phone: METRIC_REFLECT_TEXT (dictated improvement)
+// Notes page (config.enableNotesPage, non-aplite): today-pinned standalone
+// notes, "\x02"-prefixed title line then body, one AppMessage.
+var MSG_NOTESPAGE_REQUEST = 55;    // watch -> phone: (no keys)
+var MSG_NOTESPAGE_DATA = 56;       // phone -> watch: NOTESPAGE_TEXT
+// Task action menu "Repeat" row - fetched on open, toggled with the pause msg.
+var MSG_TASK_REPEAT_REQUEST = 57;  // watch -> phone: TASK_ID
+var MSG_TASK_REPEAT_DATA = 58;     // phone -> watch: TASK_ID + TASK_REPEAT_TEXT + TASK_REPEAT_PAUSED
+var MSG_TASK_REPEAT_PAUSE = 59;    // watch -> phone: TASK_ID + TASK_REPEAT_PAUSED (1 pause / 0 resume)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -396,6 +404,9 @@ function sendStatus(code, message) {
     // Upcoming page row (default on). Drives main.c's s_upcoming_enabled /
     // SECTION0_ROW_UPCOMING - future-dated tasks grouped by day.
     UPCOMING_ENABLED: config.enableUpcoming !== false ? 1 : 0,
+    // Notes page row (default off). Drives main.c's s_notespage_enabled /
+    // SECTION0_ROW_NOTESPAGE - today-pinned standalone notes.
+    NOTESPAGE_ENABLED: config.enableNotesPage ? 1 : 0,
     // Tags page row - default OFF (unlike the others). Drives main.c's
     // s_tags_enabled / SECTION0_ROW_TAGS: every tag with its open-task count,
     // drill in for that tag's tasks. Reuses the projects-browser plumbing with
@@ -941,6 +952,110 @@ function handleUpcomingRequest() {
   }, function () {}, function (e) {
     console.log('[pkjs] giving up on UPCOMING_DATA after retries: ' + JSON.stringify(e));
   });
+}
+
+// Answers MSG_NOTESPAGE_REQUEST (the watch's optional Notes page, non-aplite).
+// NOTESPAGE_TEXT: a "\x02"-prefixed title line before each note, then its body
+// lines. Read-only, from the replayed `note` entity. One AppMessage.
+function handleNotesPageRequest() {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (!config.enableNotesPage) {
+    return;
+  }
+  var notes = store.computeNotes(loadState(), 20);
+  var clean = function (s, n) {
+    return String(s).replace(/[\t\x02]/g, ' ').slice(0, n);
+  };
+  var lines = [];
+  notes.forEach(function (n) {
+    lines.push('\x02' + (clean(n.title, 60) || '(untitled)'));
+    if (n.body) {
+      lines.push(clean(n.body.replace(/\n{2,}/g, '\n'), 240));
+    }
+  });
+  var text = lines.join('\n');
+  if (text.length > 600) {
+    text = text.slice(0, 600);
+  }
+  sendWithRetry({
+    MSG_TYPE: MSG_NOTESPAGE_DATA,
+    NOTESPAGE_TEXT: text,
+  }, function () {}, function (e) {
+    console.log('[pkjs] giving up on NOTESPAGE_DATA after retries: ' + JSON.stringify(e));
+  });
+}
+
+// Answers MSG_TASK_REPEAT_REQUEST: the repeat pattern for the action menu's
+// "Repeat" row, fetched when that menu opens for a recurring task.
+function handleTaskRepeatRequest(taskId) {
+  var config = loadConfig();
+  if (!config || !config.jwt || !taskId) {
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  var cfg = task && task.repeatCfgId && state.taskRepeatCfg[task.repeatCfgId];
+  sendWithRetry({
+    MSG_TYPE: MSG_TASK_REPEAT_DATA,
+    TASK_ID: String(taskId),
+    TASK_REPEAT_TEXT: cfg ? String(store.formatRepeatCfg(cfg)).slice(0, 23) : '',
+    TASK_REPEAT_PAUSED: cfg && cfg.isPaused ? 1 : 0,
+  }, function () {}, function (e) {
+    console.log('[pkjs] giving up on TASK_REPEAT_DATA after retries: ' + JSON.stringify(e));
+  });
+}
+
+// Action menu "Repeat" row toggled pause. A plain "[TaskRepeatCfg] Update
+// TaskRepeatCfg" op, exactly what the desktop's repeat dialog dispatches.
+function handleTaskRepeatPause(taskId, paused) {
+  var config = loadConfig();
+  if (!config || !config.jwt || !taskId) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  var cfgId = task && task.repeatCfgId;
+  var cfg = cfgId && state.taskRepeatCfg[cfgId];
+  if (!cfg) {
+    return;
+  }
+  var isPaused = !!paused;
+  state.taskRepeatCfg[cfgId] = Object.assign({}, cfg, { isPaused: isPaused });
+  saveState(state);
+
+  var crypto = getCrypto();
+  var clientId = getOrCreateClientId();
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  var payload = { actionPayload: { taskRepeatCfg: { id: cfgId, changes: { isPaused: isPaused } } }, entityChanges: [] };
+  var op = {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[TaskRepeatCfg] Update TaskRepeatCfg',
+    entityType: 'TASK_REPEAT_CFG',
+    entityId: cfgId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+  var failureMsg = null;
+  uploadOps([op], config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload repeat pause: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, failureMsg);
+    });
 }
 
 // ---------------- sync engine ----------------
@@ -3293,6 +3408,15 @@ Pebble.addEventListener('appmessage', function (e) {
     case MSG_STATS_REQUEST:
       handleStatsRequest();
       break;
+    case MSG_NOTESPAGE_REQUEST:
+      handleNotesPageRequest();
+      break;
+    case MSG_TASK_REPEAT_REQUEST:
+      handleTaskRepeatRequest(payload.TASK_ID);
+      break;
+    case MSG_TASK_REPEAT_PAUSE:
+      handleTaskRepeatPause(payload.TASK_ID, payload.TASK_REPEAT_PAUSED | 0);
+      break;
     case MSG_UPCOMING_REQUEST:
       handleUpcomingRequest();
       break;
@@ -3338,6 +3462,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableStats: config.enableStats !== false,
       enableSchedule: config.enableSchedule !== false,
       enableUpcoming: config.enableUpcoming !== false,
+      enableNotesPage: !!config.enableNotesPage,
       enableTags: config.enableTags === true,
       yesterdayStats: !!config.yesterdayStats,
       backlightMode: config.backlightMode || 0,
@@ -3440,6 +3565,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableStats: !!result.enableStats,
     enableSchedule: !!result.enableSchedule,
     enableUpcoming: !!result.enableUpcoming,
+    enableNotesPage: !!result.enableNotesPage,
     enableTags: !!result.enableTags,
     yesterdayStats: !!result.yesterdayStats,
     backlightMode: parseInt(result.backlightMode, 10) || 0,

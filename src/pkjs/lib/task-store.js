@@ -2023,6 +2023,69 @@ function computeUpcoming(state, limit) {
   return out.slice(0, limit || 40);
 }
 
+// Today-pinned standalone notes (the `note` entity, isPinnedToToday), oldest
+// first by `created`. { title, body } - title is the first line, body the
+// rest. The watch shows these on its optional Notes page.
+function computeNotes(state, limit) {
+  var notes = (state && state.note) || {};
+  var out = Object.keys(notes)
+    .map(function (id) { return notes[id]; })
+    .filter(function (n) { return n && n.isPinnedToToday && typeof n.content === 'string' && n.content.trim(); })
+    .sort(function (a, b) { return (a.created || 0) - (b.created || 0); })
+    .slice(0, limit || 20)
+    .map(function (n) {
+      var lines = n.content.replace(/\r/g, '').split('\n');
+      var title = (lines.shift() || '').trim();
+      var body = lines.join('\n').trim();
+      return { title: title, body: body };
+    });
+  return out;
+}
+
+var REPEAT_DOW = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+var REPEAT_DOW_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+var REPEAT_ORDINAL = ['', '1st', '2nd', '3rd', '4th', '5th'];
+
+// Short human string for a taskRepeatCfg's cadence: "Daily", "Every 3 days",
+// "Mon Wed Fri", "Weekly", "Monthly", "Monthly (2nd Tue)", "Yearly". Does not
+// mention pause state - callers show that separately (cfg.isPaused).
+function formatRepeatCfg(cfg) {
+  if (!cfg) {
+    return '';
+  }
+  var every = cfg.repeatEvery > 1 ? cfg.repeatEvery : 0;
+  var s;
+  switch (cfg.repeatCycle) {
+    case 'DAILY':
+      s = every ? 'Every ' + every + ' days' : 'Daily';
+      break;
+    case 'WEEKLY': {
+      var days = [];
+      for (var i = 0; i < 7; i++) {
+        if (cfg[REPEAT_DOW[i]]) {
+          days.push(REPEAT_DOW_SHORT[i]);
+        }
+      }
+      s = days.length ? days.join(' ') : (every ? 'Every ' + every + ' weeks' : 'Weekly');
+      break;
+    }
+    case 'MONTHLY':
+      if (cfg.monthlyWeekOfMonth && cfg.monthlyWeekday != null) {
+        var wk = cfg.monthlyWeekOfMonth === -1 ? 'last' : (REPEAT_ORDINAL[cfg.monthlyWeekOfMonth] || cfg.monthlyWeekOfMonth);
+        s = 'Monthly (' + wk + ' ' + REPEAT_DOW_SHORT[cfg.monthlyWeekday] + ')';
+      } else {
+        s = every ? 'Every ' + every + ' months' : 'Monthly';
+      }
+      break;
+    case 'YEARLY':
+      s = every ? 'Every ' + every + ' years' : 'Yearly';
+      break;
+    default:
+      s = 'Repeats';
+  }
+  return s;
+}
+
 module.exports = {
   emptyState: emptyState,
   applyOperation: applyOperation,
@@ -2037,6 +2100,8 @@ module.exports = {
   getTagTasks: getTagTasks,
   computeStats: computeStats,
   computeUpcoming: computeUpcoming,
+  computeNotes: computeNotes,
+  formatRepeatCfg: formatRepeatCfg,
   repeatOccurrences: repeatOccurrences,
   NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,

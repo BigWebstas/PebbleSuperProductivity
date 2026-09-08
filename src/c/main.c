@@ -91,6 +91,10 @@
 #define KEY_SCHEDULE_ENABLED MESSAGE_KEY_SCHEDULE_ENABLED
 #define KEY_UPCOMING_ENABLED MESSAGE_KEY_UPCOMING_ENABLED
 #define KEY_UPCOMING_TEXT MESSAGE_KEY_UPCOMING_TEXT
+#define KEY_NOTESPAGE_ENABLED MESSAGE_KEY_NOTESPAGE_ENABLED
+#define KEY_NOTESPAGE_TEXT MESSAGE_KEY_NOTESPAGE_TEXT
+#define KEY_TASK_REPEAT_TEXT MESSAGE_KEY_TASK_REPEAT_TEXT
+#define KEY_TASK_REPEAT_PAUSED MESSAGE_KEY_TASK_REPEAT_PAUSED
 
 // MSG_TYPE values, watch <-> phone.
 enum {
@@ -195,6 +199,14 @@ enum {
   MSG_METRIC_ENERGY = 52,           // watch -> phone: METRIC_ENERGY (1 low / 2 ok / 3 good)
   MSG_METRIC_RATING = 53,           // watch -> phone: METRIC_RATING (impactOfWork 1-4)
   MSG_METRIC_REFLECT = 54,          // watch -> phone: METRIC_REFLECT_TEXT (dictated improvement)
+  // Notes page (today-pinned standalone notes) - shares the Upcoming window.
+  MSG_NOTESPAGE_REQUEST = 55,       // watch -> phone: (no keys)
+  MSG_NOTESPAGE_DATA = 56,          // phone -> watch: NOTESPAGE_TEXT
+  // Action menu "Repeat" row: the pattern text (fetched on menu open) and a
+  // pause toggle.
+  MSG_TASK_REPEAT_REQUEST = 57,     // watch -> phone: TASK_ID
+  MSG_TASK_REPEAT_DATA = 58,        // phone -> watch: TASK_ID + TASK_REPEAT_TEXT + TASK_REPEAT_PAUSED
+  MSG_TASK_REPEAT_PAUSE = 59,       // watch -> phone: TASK_ID + TASK_REPEAT_PAUSED
 };
 
 // STATUS_CODE values sent from the phone.
@@ -779,8 +791,15 @@ static int s_stats_worked_yesterday_ms = 0;
 static int s_stats_done_yesterday = 0;
 // "Upcoming" page row (config.enableUpcoming, default on) and its last
 // MSG_UPCOMING_DATA payload - future-dated tasks preformatted phone-side into
-// "\x02"-prefixed day headers + task lines the watch prints verbatim.
+// "\x02"-prefixed day headers + task lines the watch prints verbatim. The
+// same scroll window + text buffer also serves the optional "Notes" page
+// (config.enableNotesPage, default off - today-pinned standalone notes); the
+// two are never open at once. s_page_mode picks which request the window
+// sends and which empty-state text it shows.
 static bool s_upcoming_enabled = true;
+static bool s_notespage_enabled = false;
+typedef enum { PAGE_UPCOMING, PAGE_NOTES } PageMode;
+static PageMode s_page_mode = PAGE_UPCOMING;
 static char s_upcoming_text[640] = "";
 static bool s_upcoming_have_data = false;
 // "Tags" page row (config.enableTags) - default OFF, unlike every other
@@ -1461,8 +1480,9 @@ static void push_stats_window(void);
 static void stats_render(void);
 static void push_schedule_window(void);
 static void schedule_refresh_if_open(void);
-static void push_upcoming_window(void);
+static void push_page_window(PageMode mode);
 static void upcoming_render(void);
+static void handle_repeat_data(DictionaryIterator *it);
 #endif
 #if PROJECTS_BROWSER
 static void push_browse_window(const char *jump_to_project);
@@ -1558,6 +1578,7 @@ typedef enum {
   SECTION0_ROW_STATS,    // stats page, between Projects and Add Task (non-aplite)
   SECTION0_ROW_SCHEDULE, // schedule page, between Stats and Add Task (non-aplite)
   SECTION0_ROW_UPCOMING, // upcoming page, between Schedule and Add Task (non-aplite)
+  SECTION0_ROW_NOTESPAGE, // notes page, right after Upcoming, opt-in / default off (non-aplite)
   SECTION0_ROW_ADD_TASK,
 } Section0RowKind;
 
@@ -1605,8 +1626,10 @@ typedef enum {
 // Whether the "Upcoming" row sits in section 0. Compile-time false on aplite.
 #ifdef PBL_PLATFORM_APLITE
 #define UPCOMING_ROW_ACTIVE() false
+#define NOTESPAGE_ROW_ACTIVE() false
 #else
 #define UPCOMING_ROW_ACTIVE() (s_upcoming_enabled)
+#define NOTESPAGE_ROW_ACTIVE() (s_notespage_enabled)
 #endif
 
 // A remote presence session shows in the pinned "TRACKING" section
@@ -1635,6 +1658,9 @@ static int section0_row_count(void) {
     count++;
   }
   if (UPCOMING_ROW_ACTIVE()) {
+    count++;
+  }
+  if (NOTESPAGE_ROW_ACTIVE()) {
     count++;
   }
   if (PBL_IF_MICROPHONE_ELSE(s_add_task_enabled, false)) {
@@ -1684,6 +1710,12 @@ static Section0RowKind section0_row_kind(int row) {
   if (UPCOMING_ROW_ACTIVE()) {
     if (row == next) {
       return SECTION0_ROW_UPCOMING;
+    }
+    next++;
+  }
+  if (NOTESPAGE_ROW_ACTIVE()) {
+    if (row == next) {
+      return SECTION0_ROW_NOTESPAGE;
     }
     next++;
   }
@@ -2579,6 +2611,28 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
+    if (kind == SECTION0_ROW_NOTESPAGE) {
+      // Opens the Notes page - today-pinned standalone notes. Light grey, its
+      // own shade among the nav rows; text/glyph stay black (white would wash
+      // out on select). A lined-note glyph on the right.
+      (void)is_selected;
+      fill_bg(ctx, bounds, GColorLightGray);
+      graphics_context_set_text_color(ctx, GColorBlack);
+      GRect np_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                                  bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+      draw_text(ctx, "Notes", HEADING_FONT_KEY, np_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      int16_t gx = bounds.size.w - ROW_ICON_SIZE - 4;
+      int16_t gy = bounds.size.h / 2;
+      graphics_context_set_stroke_color(ctx, GColorBlack);
+      graphics_draw_rect(ctx, GRect(gx, gy - 7, 13, 15));
+      for (int k = 0; k < 3; k++) {
+        graphics_draw_line(ctx, GPoint(gx + 3, gy - 3 + k * 3), GPoint(gx + 10, gy - 3 + k * 3));
+      }
+      return;
+    }
+#endif
+
+#ifndef PBL_PLATFORM_APLITE
     if (kind == SECTION0_ROW_ADD_TASK) {
       // Mic platforms with the feature enabled only. Starts dictation via
       // menu_select_click.
@@ -2862,6 +2916,13 @@ static void send_pending_retry(void) {
       break;
     case MSG_METRIC_ENERGY:
       dict_write_int32(iter, KEY_METRIC_ENERGY, s_retry_int);
+      break;
+    case MSG_TASK_REPEAT_REQUEST:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      break;
+    case MSG_TASK_REPEAT_PAUSE:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_int32(iter, KEY_TASK_REPEAT_PAUSED, s_retry_int);
       break;
     case MSG_METRIC_RATING:
       dict_write_int32(iter, KEY_METRIC_RATING, s_retry_int);
@@ -3478,7 +3539,9 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     } else if (kind == SECTION0_ROW_SCHEDULE) {
       push_schedule_window();
     } else if (kind == SECTION0_ROW_UPCOMING) {
-      push_upcoming_window();
+      push_page_window(PAGE_UPCOMING);
+    } else if (kind == SECTION0_ROW_NOTESPAGE) {
+      push_page_window(PAGE_NOTES);
     } else if (kind == SECTION0_ROW_ADD_TASK) {
       start_add_task_dictation();
 #endif
@@ -4490,9 +4553,23 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       break;
     }
     case MSG_UPCOMING_DATA: {
-      str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), sizeof(s_upcoming_text));
-      s_upcoming_have_data = true;
-      upcoming_render(); // no-op if the window was closed before the reply landed
+      if (s_page_mode == PAGE_UPCOMING) {
+        str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), sizeof(s_upcoming_text));
+        s_upcoming_have_data = true;
+        upcoming_render(); // no-op if the window was closed before the reply landed
+      }
+      break;
+    }
+    case MSG_NOTESPAGE_DATA: {
+      if (s_page_mode == PAGE_NOTES) {
+        str_copy(s_upcoming_text, tuple_str(iterator, KEY_NOTESPAGE_TEXT, ""), sizeof(s_upcoming_text));
+        s_upcoming_have_data = true;
+        upcoming_render();
+      }
+      break;
+    }
+    case MSG_TASK_REPEAT_DATA: {
+      handle_repeat_data(iterator);
       break;
     }
 #endif
@@ -4513,6 +4590,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_stats_enabled = tuple_int(iterator, KEY_STATS_ENABLED, s_stats_enabled) != 0;
       s_schedule_enabled = tuple_int(iterator, KEY_SCHEDULE_ENABLED, s_schedule_enabled) != 0;
       s_upcoming_enabled = tuple_int(iterator, KEY_UPCOMING_ENABLED, s_upcoming_enabled) != 0;
+      s_notespage_enabled = tuple_int(iterator, KEY_NOTESPAGE_ENABLED, s_notespage_enabled) != 0;
       s_tags_enabled = tuple_int(iterator, KEY_TAGS_ENABLED, s_tags_enabled) != 0;
       s_yesterday_stats_enabled = tuple_int(iterator, KEY_YESTERDAY_STATS_ENABLED, s_yesterday_stats_enabled) != 0;
 #endif
@@ -6549,6 +6627,7 @@ static void push_reflect_window(void) {
 enum {
   ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
   ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG,
+  ACT_REPEAT, // appended by act_rows() only for a recurring task
 };
 // The visible rows, in order, per context. Tags / Move open the browse window
 // as a picker, so they're only offered from the today list (from the browser
@@ -6570,18 +6649,46 @@ static StatusBarLayer *s_action_status_bar = NULL;
 static char s_action_task_id[MAX_ID_LEN] = "";
 static ActionCtx s_action_ctx = ACTX_TODAY;
 static bool s_action_in_backlog = false;
+// "Repeat" row: pattern text (MSG_TASK_REPEAT_DATA) + pause state, per open.
+static char s_action_repeat_text[24] = "";
+static bool s_action_repeat_paused = false;
+static int s_act_rows_buf[12];
+
+static Task *resolve_action_task(void);
 
 static const int *act_rows(int *count) {
+  const int *base;
+  int n;
   switch (s_action_ctx) {
-    case ACTX_PROJECT: *count = ARRLEN(s_act_rows_project); return s_act_rows_project;
-    case ACTX_TAG:     *count = ARRLEN(s_act_rows_tag);     return s_act_rows_tag;
-    default:           *count = ARRLEN(s_act_rows_today);   return s_act_rows_today;
+    case ACTX_PROJECT: base = s_act_rows_project; n = ARRLEN(s_act_rows_project); break;
+    case ACTX_TAG:     base = s_act_rows_tag;     n = ARRLEN(s_act_rows_tag);     break;
+    default:           base = s_act_rows_today;   n = ARRLEN(s_act_rows_today);   break;
   }
+  memcpy(s_act_rows_buf, base, (size_t)n * sizeof(int));
+  Task *t = resolve_action_task();
+  if (t && t->recurs && n < (int)ARRLEN(s_act_rows_buf)) {
+    s_act_rows_buf[n++] = ACT_REPEAT;
+  }
+  *count = n;
+  return s_act_rows_buf;
 }
 
 static bool action_task_is_tracked(void) {
   return s_tracking_task_id[0] != '\0' &&
          strncmp(s_tracking_task_id, s_action_task_id, MAX_ID_LEN) == 0;
+}
+
+// MSG_TASK_REPEAT_DATA: the "Repeat" row's pattern + pause state, for the task
+// whose action menu is open. A stale reply for a different task is ignored.
+static void handle_repeat_data(DictionaryIterator *it) {
+  if (strncmp(tuple_str(it, KEY_TASK_ID, ""), s_action_task_id, MAX_ID_LEN) != 0) {
+    return;
+  }
+  str_copy(s_action_repeat_text, tuple_str(it, KEY_TASK_REPEAT_TEXT, ""), sizeof(s_action_repeat_text));
+  s_action_repeat_paused = tuple_int(it, KEY_TASK_REPEAT_PAUSED, 0) != 0;
+  if (s_action_menu) {
+    menu_layer_reload_data(s_action_menu);
+  }
 }
 
 // The Task* for s_action_task_id: the today list, else a browsed task.
@@ -6612,6 +6719,7 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
     return;
   }
   const char *label = "";
+  const char *sub = NULL;
   switch (rows[idx->row]) {
     case ACT_TRACK:      label = action_task_is_tracked() ? "Stop tracking" : "Start tracking"; break;
     case ACT_TODAY:      label = "Schedule today"; break;
@@ -6624,8 +6732,12 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
     case ACT_ESTIMATE:   label = "Set estimate"; break;
     case ACT_DEADLINE:   label = "Set deadline"; break;
     case ACT_BACKLOG:    label = s_action_in_backlog ? "Move to list" : "Move to backlog"; break;
+    case ACT_REPEAT:
+      label = s_action_repeat_paused ? "Resume repeat" : "Pause repeat";
+      sub = s_action_repeat_text[0] ? s_action_repeat_text : "Loading...";
+      break;
   }
-  menu_cell_basic_draw(ctx, cell, label, NULL, NULL);
+  menu_cell_basic_draw(ctx, cell, label, sub, NULL);
 }
 
 static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
@@ -6637,6 +6749,13 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
   }
   int row = rows[idx->row];
   Task *t = resolve_action_task();
+  if (row == ACT_REPEAT) {
+    // Toggle pause in place - keep the menu open so the label flips.
+    s_action_repeat_paused = !s_action_repeat_paused;
+    begin_send(MSG_TASK_REPEAT_PAUSE, s_action_task_id, NULL, s_action_repeat_paused ? 1 : 0);
+    menu_layer_reload_data(s_action_menu);
+    return;
+  }
   window_stack_pop(true); // close the menu; targets push onto the list below it
   switch (row) {
     case ACT_TRACK:
@@ -6731,6 +6850,15 @@ static void push_action_menu(const char *task_id, ActionCtx ctx, bool in_backlog
   str_copy(s_action_task_id, task_id, sizeof(s_action_task_id));
   s_action_ctx = ctx;
   s_action_in_backlog = in_backlog;
+  // "Repeat" row only exists for a recurring task; its pattern text is fetched.
+  s_action_repeat_text[0] = '\0';
+  s_action_repeat_paused = false;
+  {
+    Task *rt = resolve_action_task();
+    if (rt && rt->recurs) {
+      begin_send(MSG_TASK_REPEAT_REQUEST, s_action_task_id, NULL, 0);
+    }
+  }
   if (!s_action_window) {
     s_action_window = window_create();
     window_set_window_handlers(s_action_window, (WindowHandlers) {
@@ -7070,7 +7198,8 @@ static void upcoming_content_update_proc(Layer *layer, GContext *ctx) {
 
   if (!s_upcoming_have_data || s_upcoming_text[0] == '\0') {
     graphics_context_set_text_color(ctx, GColorBlack);
-    draw_text(ctx, s_upcoming_have_data ? "Nothing scheduled" : "Loading…", STATS_LINE_FONT,
+    const char *empty = s_page_mode == PAGE_NOTES ? "No pinned notes" : "Nothing scheduled";
+    draw_text(ctx, s_upcoming_have_data ? empty : "Loading…", STATS_LINE_FONT,
               GRect(STATS_PAD_X, 8, w - STATS_PAD_X * 2, STATS_LINE_H),
               GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
     return;
@@ -7121,7 +7250,7 @@ static void upcoming_render(void) {
 }
 
 static void request_upcoming(void) {
-  begin_send(MSG_UPCOMING_REQUEST, NULL, NULL, 0);
+  begin_send(s_page_mode == PAGE_NOTES ? MSG_NOTESPAGE_REQUEST : MSG_UPCOMING_REQUEST, NULL, NULL, 0);
 }
 
 static void upcoming_window_load(Window *window) {
@@ -7147,7 +7276,10 @@ static void upcoming_window_unload(Window *window) {
   s_upcoming_status_bar = NULL;
 }
 
-static void push_upcoming_window(void) {
+static void push_page_window(PageMode mode) {
+  s_page_mode = mode;
+  s_upcoming_have_data = false; // don't flash the other page's stale list
+  s_upcoming_text[0] = '\0';
   if (!s_upcoming_window) {
     s_upcoming_window = window_create();
     window_set_window_handlers(s_upcoming_window, (WindowHandlers) {

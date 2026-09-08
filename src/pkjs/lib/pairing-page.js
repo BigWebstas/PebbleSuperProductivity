@@ -35,6 +35,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var yesterdayStats = !!options.yesterdayStats;
   var enableSchedule = options.enableSchedule !== false;
   var enableUpcoming = options.enableUpcoming !== false;
+  var enableNotesPage = !!options.enableNotesPage;
   var enableTags = options.enableTags === true; // default off, unlike the others
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
@@ -476,6 +477,15 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableNotesPage" type="checkbox"' + (enableNotesPage ? ' checked' : '') + '>\n' +
+'    <label for="enableNotesPage">Enable Notes page</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Shows a Notes row on the watch: your notes pinned to Today, read-only,\n' +
+'    scrollable. Not available on original Pebble/Pebble Steel (aplite).\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableReflect" type="checkbox"' + (enableReflect ? ' checked' : '') + '>\n' +
 '    <label for="enableReflect">Day review on Finish Day</label>\n' +
 '  </div>\n' +
@@ -627,6 +637,7 @@ taskEstimateOptions + '\n' +
 '      yesterdayStats: document.getElementById(\'yesterdayStats\').checked,\n' +
 '      enableSchedule: document.getElementById(\'enableSchedule\').checked,\n' +
 '      enableUpcoming: document.getElementById(\'enableUpcoming\').checked,\n' +
+'      enableNotesPage: document.getElementById(\'enableNotesPage\').checked,\n' +
 '      enableReflect: document.getElementById(\'enableReflect\').checked,\n' +
 '      enableTags: document.getElementById(\'enableTags\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +

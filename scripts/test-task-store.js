@@ -2035,6 +2035,31 @@ check('computeUpcoming merges recurring occurrences, marked and deduped', () => 
   assert.strictEqual(up.filter((u) => u.day === in2 && u.title === 'Water plants').length, 1, 'no double-show on in2');
 });
 
+check('computeNotes: today-pinned notes only, title = first line, oldest first', () => {
+  const state = store.emptyState();
+  store.applyOperations([
+    entry('NOTE', '[Note] Add Note', { note: { id: 'n1', isPinnedToToday: true, content: 'Groceries\nmilk\neggs', created: 10 } }),
+    entry('NOTE', '[Note] Add Note', { note: { id: 'n2', isPinnedToToday: true, content: 'Call mum', created: 5 } }),
+    entry('NOTE', '[Note] Add Note', { note: { id: 'n3', isPinnedToToday: false, content: 'not pinned', created: 1 } }),
+  ], state);
+  const out = store.computeNotes(state, 10);
+  assert.deepStrictEqual(out, [
+    { title: 'Call mum', body: '' },
+    { title: 'Groceries', body: 'milk\neggs' },
+  ]);
+});
+
+check('formatRepeatCfg renders each cycle shape', () => {
+  assert.strictEqual(store.formatRepeatCfg({ repeatCycle: 'DAILY' }), 'Daily');
+  assert.strictEqual(store.formatRepeatCfg({ repeatCycle: 'DAILY', repeatEvery: 3 }), 'Every 3 days');
+  assert.strictEqual(store.formatRepeatCfg({ repeatCycle: 'WEEKLY', monday: true, wednesday: true, friday: true }), 'Mon Wed Fri');
+  assert.strictEqual(store.formatRepeatCfg({ repeatCycle: 'WEEKLY' }), 'Weekly');
+  assert.strictEqual(store.formatRepeatCfg({ repeatCycle: 'MONTHLY' }), 'Monthly');
+  assert.strictEqual(store.formatRepeatCfg({ repeatCycle: 'MONTHLY', monthlyWeekOfMonth: 2, monthlyWeekday: 2 }), 'Monthly (2nd Tue)');
+  assert.strictEqual(store.formatRepeatCfg({ repeatCycle: 'MONTHLY', monthlyWeekOfMonth: -1, monthlyWeekday: 5 }), 'Monthly (last Fri)');
+  assert.strictEqual(store.formatRepeatCfg({ repeatCycle: 'YEARLY' }), 'Yearly');
+});
+
 check('applyMetricAction upserts / updates / deletes a day metric', () => {
   const state = store.emptyState();
   store.applyOperations([

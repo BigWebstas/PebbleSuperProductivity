@@ -184,7 +184,11 @@
       "REFLECT_ENABLED",
       "METRIC_RATING",
       "METRIC_REFLECT_TEXT",
-      "TASK_ISSUE_KEY"
+      "TASK_ISSUE_KEY",
+      "NOTESPAGE_TEXT",
+      "NOTESPAGE_ENABLED",
+      "TASK_REPEAT_TEXT",
+      "TASK_REPEAT_PAUSED"
     ]
   }
 }
