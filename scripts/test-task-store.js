@@ -287,6 +287,22 @@ check('[Planner] Transfer Task (drag reschedule in the Planner week view) sets d
   assert.deepStrictEqual(active(state, 30, false, true).map((t) => t.id), ['a']);
 });
 
+check('getActiveTasks carries remindAt through to the watch row', () => {
+  const state = store.emptyState();
+  const noon = new Date(); noon.setHours(12, 0, 0, 0);
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Call the dentist', isDone: false,
+        dueWithTime: noon.getTime(), remindAt: noon.getTime() - 600000 }),
+      addTask({ id: 'b', title: 'No reminder', isDone: false, dueDay: today }),
+    ],
+    state
+  );
+  const rows = active(state, 30, false, true);
+  assert.strictEqual(rows.find((t) => t.id === 'a').remindAt, noon.getTime() - 600000);
+  assert.strictEqual(rows.find((t) => t.id === 'b').remindAt, undefined);
+});
+
 check('[Planner] Plan Task for Day on an unknown id creates a bare record rather than throwing (same ghost pattern as updateTask)', () => {
   const state = store.emptyState();
   assert.doesNotThrow(() => {

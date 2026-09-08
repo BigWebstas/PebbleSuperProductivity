@@ -1411,7 +1411,8 @@
       "HABIT_STREAK_NUDGE",
       "HABIT_ICON",
       "CHECK_INDEX",
-      "CHECK_VALUE"
+      "CHECK_VALUE",
+      "TASK_REMIND_MIN"
     ]
   }
 }

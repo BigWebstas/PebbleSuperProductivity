@@ -575,6 +575,17 @@ function fillTaskFields(dict, t) {
     var dueDate = new Date(t.dueWithTime);
     dict.TASK_DUE_MIN = dueDate.getHours() * 60 + dueDate.getMinutes();
   }
+  if (t.remindAt) {
+    // The task's own reminder time (task.remindAt, set on the desktop). Sent as
+    // minutes since local midnight, and only when it falls on the local today -
+    // the watch fires it at that clock time, app-open only, and has no notion
+    // of another day. Supersedes the global "notify before due" lead for this
+    // task (main.c's minute_tick_handler).
+    var remDate = new Date(t.remindAt);
+    if (store.dateToDateStr(remDate) === store.todayStr()) {
+      dict.TASK_REMIND_MIN = remDate.getHours() * 60 + remDate.getMinutes();
+    }
+  }
   if (typeof t.deadlineDays === 'number') {
     // Whole days from today (negative = overdue). Absent = no deadline; the
     // watch defaults the field to its DEADLINE_NONE sentinel.

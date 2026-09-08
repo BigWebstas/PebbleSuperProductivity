@@ -22,6 +22,7 @@
 #define KEY_TASK_DONE MESSAGE_KEY_TASK_DONE
 #define KEY_TASK_PROJECT MESSAGE_KEY_TASK_PROJECT
 #define KEY_TASK_DUE_MIN MESSAGE_KEY_TASK_DUE_MIN
+#define KEY_TASK_REMIND_MIN MESSAGE_KEY_TASK_REMIND_MIN
 #define KEY_TASK_TIME_SPENT_MS MESSAGE_KEY_TASK_TIME_SPENT_MS
 #define KEY_TASK_TIME_ESTIMATE_MS MESSAGE_KEY_TASK_TIME_ESTIMATE_MS
 #define KEY_TRACKED_MS MESSAGE_KEY_TRACKED_MS
@@ -269,6 +270,11 @@ typedef struct {
 #endif
   bool done;
   bool recurs; // has a repeat config - draws a small ↻ glyph on the row
+#ifndef PBL_PLATFORM_APLITE
+  // The task's own reminder fired this app-open session (minute_tick_handler).
+  // Not preserved across a sync - a still-due reminder re-fires once after one.
+  bool remind_fired;
+#endif
 #if TODAY_PROJECT_SWATCH
   // Packed GColor8 byte for this task's project's theme-colour swatch (0 =
   // none). Sits in the padding after `done`, costing the double-buffered
@@ -277,6 +283,11 @@ typedef struct {
   uint8_t project_color;
 #endif
   int due_min;       // minutes since local midnight, or -1 when the task has no dueWithTime
+#ifndef PBL_PLATFORM_APLITE
+  // task.remindAt as minutes since local midnight (only sent when it's today),
+  // or -1. When set, it supersedes the global "notify before due" lead.
+  int remind_min;
+#endif
   int time_spent_ms; // total tracked time (all days, all devices), 0 if none
   int time_estimate_ms; // 0 if none
   // Days from today to the task's deadlineDay (negative = overdue, 0 = today),
@@ -4142,6 +4153,10 @@ static void parse_common_task_fields(DictionaryIterator *it, Task *dst,
   dst->time_estimate_ms = tuple_int(it, KEY_TASK_TIME_ESTIMATE_MS, 0);
   dst->deadline_days = tuple_int(it, KEY_TASK_DEADLINE_DAYS, DEADLINE_NONE);
   dst->recurs = tuple_int(it, KEY_TASK_RECURS, 0) != 0;
+#ifndef PBL_PLATFORM_APLITE
+  dst->remind_min = tuple_int(it, KEY_TASK_REMIND_MIN, -1);
+  dst->remind_fired = false;
+#endif
 }
 
 static void inbox_received_handler(DictionaryIterator *iterator, void *context) {
@@ -7787,14 +7802,35 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
   maybe_notify_idle();
 #endif
   maybe_notify_streak_at_risk(now_tm);
-  if (s_due_reminder_min <= 0 || s_error_overlay_active) {
+  if (s_error_overlay_active) {
     return;
   }
   int now_min = now_tm->tm_hour * 60 + now_tm->tm_min;
+
+  // Per-task reminders (task.remindAt from the desktop): fire once when the
+  // clock reaches the set time. One banner per tick; the rest catch up on
+  // later ticks.
+  for (int i = 0; i < s_task_count; i++) {
+    if (s_tasks[i].remind_min >= 0 && !s_tasks[i].done && !s_tasks[i].remind_fired &&
+        now_min >= s_tasks[i].remind_min) {
+      s_tasks[i].remind_fired = true;
+      snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
+               "Reminder\n%s", s_tasks[i].title);
+      show_top_banner(s_overtime_banner_text);
+      break;
+    }
+  }
+
+  if (s_due_reminder_min <= 0) {
+    return;
+  }
+  // Global "notify before due" lead - skips tasks that carry their own
+  // reminder (handled above).
   int soonest = -1;
   for (int i = 0; i < s_task_count; i++) {
     int d = s_tasks[i].due_min;
-    if (!s_tasks[i].done && d >= now_min && (soonest < 0 || d < soonest)) {
+    if (!s_tasks[i].done && s_tasks[i].remind_min < 0 && d >= now_min &&
+        (soonest < 0 || d < soonest)) {
       soonest = d;
     }
   }
