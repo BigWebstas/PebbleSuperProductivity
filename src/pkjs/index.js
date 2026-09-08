@@ -81,6 +81,7 @@ var MSG_UPCOMING_DATA = 43;         // phone -> watch: UPCOMING_TEXT
 // PROJECT_TASK_BACKLOG 1 = move into the backlog, 0 = move back to the regular
 // list. The watch picks the direction from the row's section.
 var MSG_TASK_SET_BACKLOG = 44;      // watch -> phone: TASK_ID + PROJECT_ID + PROJECT_TASK_BACKLOG
+var MSG_TASK_SET_ESTIMATE = 45;     // watch -> phone: TASK_ID + TASK_TIME_ESTIMATE_MS (0 clears)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -1654,6 +1655,38 @@ function handleTaskReschedule(taskId, when, projectId) {
     });
 }
 
+// Watch estimate picker: set (ms > 0) or clear (ms === 0) a task's timeEstimate.
+// A plain updateTask op, exactly what the desktop's "Estimate time" dialog
+// dispatches; task-store's mergeTaskChanges replays it.
+function handleTaskSetEstimate(taskId, ms) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task) {
+    return;
+  }
+  var estimate = Math.max(0, ms | 0);
+  state.task[taskId] = Object.assign({}, task, { timeEstimate: estimate });
+  saveState(state);
+  sendTaskListToWatch(watchTaskList(state, config));
+
+  var clientId = getOrCreateClientId();
+  var failureMsg = null;
+  uploadOps([buildTaskUpdateOp(taskId, { timeEstimate: estimate }, clientId)], config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload estimate change: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, failureMsg);
+    });
+}
+
 // Projects browser: long-Select toggled a task's backlog membership.
 // toBacklog picks the direction. Only touches membership - not dueDay - so it
 // stays in step with task-store's replay of the same actions.
@@ -2804,6 +2837,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_SET_BACKLOG:
       handleTaskSetBacklog(payload.TASK_ID, payload.PROJECT_ID, payload.PROJECT_TASK_BACKLOG === 1);
+      break;
+    case MSG_TASK_SET_ESTIMATE:
+      handleTaskSetEstimate(payload.TASK_ID, payload.TASK_TIME_ESTIMATE_MS || 0);
       break;
     case MSG_PRESENCE_STOP:
       if (presenceClient && presenceLastSessionId) {

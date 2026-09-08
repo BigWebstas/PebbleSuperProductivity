@@ -154,6 +154,9 @@ enum {
   // the backlog, 0 = back to the regular list. Direction is chosen watch-
   // side from which section the row is in.
   MSG_TASK_SET_BACKLOG = 44,        // watch -> phone: TASK_ID + PROJECT_ID + PROJECT_TASK_BACKLOG
+  // Set a task's time estimate (the estimate picker, reached by long-Up on the
+  // notes overlay). 0 clears it. Replays as a plain [Task Shared] updateTask.
+  MSG_TASK_SET_ESTIMATE = 45,       // watch -> phone: TASK_ID + TASK_TIME_ESTIMATE_MS
 };
 
 // STATUS_CODE values sent from the phone.
@@ -1372,6 +1375,7 @@ static void show_notes_overlay(Task *task);
 static void show_project_notes_overlay(TaskGroup *group);
 static void hide_notes_overlay(void);
 static void push_notes_window(void);
+static void push_estimate_window(const char *task_id, int current_ms);
 static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
@@ -2602,6 +2606,10 @@ static void send_pending_retry(void) {
       }
       dict_write_int32(iter, KEY_PROJECT_TASK_BACKLOG, s_retry_int);
       break;
+    case MSG_TASK_SET_ESTIMATE:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_int32(iter, KEY_TASK_TIME_ESTIMATE_MS, s_retry_int);
+      break;
     case MSG_PROJECT_NOTE_APPEND:
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
       dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str2);
@@ -2708,6 +2716,12 @@ static void send_task_reschedule(const char *task_id, RescheduleKind kind, const
                  : kind == RESCHEDULE_TOMORROW ? MSG_TASK_PLAN_TOMORROW
                  : MSG_TASK_UNSCHEDULE;
   begin_send(msg_type, task_id, pid, 0);
+}
+
+// Set (or clear, ms == 0) a task's time estimate. The phone turns it into a
+// plain updateTask op and pushes a fresh list back. int_val carries the ms.
+static void send_task_set_estimate(const char *task_id, int32_t ms) {
+  begin_send(MSG_TASK_SET_ESTIMATE, task_id, NULL, ms);
 }
 #endif
 
@@ -5451,12 +5465,24 @@ static void apply_touch_nav(void) {
 }
 #endif  // PBL_TOUCH
 
+// Long-Up on a task's notes overlay opens the estimate picker. Up/Down are the
+// ScrollLayer's (single-click scroll); a long hold is free.
+static void notes_estimate_long_click_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_notes_overlay_is_project) {
+    return; // a project has no estimate
+  }
+  backlight_touch();
+  Task *t = find_task_by_id(s_notes_overlay_subject_id);
+  push_estimate_window(s_notes_overlay_subject_id, t ? t->time_estimate_ms : 0);
+}
+
 // Installed onto the ScrollLayer (not the window) via
 // scroll_layer_set_click_config_onto_window, which wires UP/DOWN to scrolling
 // then calls this for SELECT. On touch builds the bridge also scrolls by finger.
 static void notes_window_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, notes_window_select_click_handler);
   window_long_click_subscribe(BUTTON_ID_SELECT, 0, notes_window_select_long_click_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_UP, 0, notes_estimate_long_click_handler, NULL);
 }
 
 // Fills the layer with NOTES_TAGS_BG_COLOR and draws the bold "Tags:" label
@@ -5544,6 +5570,139 @@ static void push_notes_window(void) {
     });
   }
   window_stack_push(s_notes_window, true);
+}
+
+// ---------- estimate picker ----------
+// A tiny full-screen picker reached by long-Up on a task's notes overlay.
+// Up/Down step a fixed ladder of estimate values, Select sends it (a plain
+// updateTask, applied optimistically to the row too), Back cancels. 0 = "None"
+// clears the estimate.
+static const int s_est_ladder_min[] = { 0, 15, 30, 45, 60, 90, 120, 180, 240, 300, 360, 480 };
+#define EST_LADDER_LEN (int)(sizeof(s_est_ladder_min) / sizeof(s_est_ladder_min[0]))
+static Window *s_est_window = NULL;
+static Layer *s_est_layer = NULL;
+static StatusBarLayer *s_est_status_bar = NULL;
+static char s_est_task_id[MAX_ID_LEN] = "";
+static int s_est_idx = 0;
+
+static void format_estimate(int min, char *out, size_t len) {
+  if (min <= 0) {
+    str_copy(out, "None", len);
+    return;
+  }
+  int h = min / 60, m = min % 60;
+  if (h && m) {
+    snprintf(out, len, "%dh %dm", h, m);
+  } else if (h) {
+    snprintf(out, len, "%dh", h);
+  } else {
+    snprintf(out, len, "%dm", m);
+  }
+}
+
+// Ladder index whose value is closest to `ms` - so the picker opens on (or
+// nearest to) the task's current estimate.
+static int est_nearest_idx(int ms) {
+  int target = ms / 60000;
+  int best = 0, best_d = 1 << 30;
+  for (int i = 0; i < EST_LADDER_LEN; i++) {
+    int d = s_est_ladder_min[i] - target;
+    if (d < 0) {
+      d = -d;
+    }
+    if (d < best_d) {
+      best_d = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+static void est_layer_update_proc(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  fill_bg(ctx, b, GColorWhite);
+  graphics_context_set_text_color(ctx, GColorBlack);
+  int16_t cy = b.size.h / 2;
+  draw_text(ctx, "Estimate", CHROME_FONT_KEY,
+            GRect(0, cy - 44, b.size.w, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  char val[16];
+  format_estimate(s_est_ladder_min[s_est_idx], val, sizeof(val));
+  draw_text(ctx, val, FONT_KEY_GOTHIC_28_BOLD,
+            GRect(0, cy - 22, b.size.w, 34), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  draw_text(ctx, "Up/Down pick\nSelect to set", CHROME_FONT_KEY,
+            GRect(0, cy + 16, b.size.w, 40), GTextOverflowModeWordWrap, GTextAlignmentCenter);
+}
+
+static void est_step(int delta) {
+  int n = s_est_idx + delta;
+  if (n < 0) {
+    n = 0;
+  }
+  if (n >= EST_LADDER_LEN) {
+    n = EST_LADDER_LEN - 1;
+  }
+  if (n != s_est_idx) {
+    s_est_idx = n;
+    layer_mark_dirty(s_est_layer);
+    vibes_short_pulse();
+  }
+}
+
+static void est_up_click(ClickRecognizerRef r, void *c) { backlight_touch(); est_step(1); }
+static void est_down_click(ClickRecognizerRef r, void *c) { backlight_touch(); est_step(-1); }
+
+static void est_select_click(ClickRecognizerRef r, void *c) {
+  backlight_touch();
+  int32_t ms = (int32_t)s_est_ladder_min[s_est_idx] * 60000;
+  // Optimistic: update the today-list row now if the task is on it.
+  Task *t = find_task_by_id(s_est_task_id);
+  if (t) {
+    t->time_estimate_ms = (int)ms;
+    save_tasks();
+    if (s_menu_layer) {
+      menu_layer_reload_data(s_menu_layer);
+    }
+  }
+  send_task_set_estimate(s_est_task_id, ms);
+  window_stack_pop(true);
+}
+
+static void est_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_UP, est_up_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN, est_down_click);
+  window_single_click_subscribe(BUTTON_ID_SELECT, est_select_click);
+}
+
+static void est_window_load(Window *window) {
+  Layer *window_layer;
+  GRect content = window_chrome(window, &s_est_status_bar, &window_layer);
+  s_est_layer = layer_create(content);
+  layer_set_update_proc(s_est_layer, est_layer_update_proc);
+  layer_add_child(window_layer, s_est_layer);
+  window_set_click_config_provider(window, est_click_config_provider);
+}
+
+static void est_window_unload(Window *window) {
+  layer_destroy(s_est_layer);
+  s_est_layer = NULL;
+  status_bar_layer_destroy(s_est_status_bar);
+  s_est_status_bar = NULL;
+}
+
+static void push_estimate_window(const char *task_id, int current_ms) {
+  if (!task_id || task_id[0] == '\0') {
+    return;
+  }
+  str_copy(s_est_task_id, task_id, sizeof(s_est_task_id));
+  s_est_idx = est_nearest_idx(current_ms);
+  if (!s_est_window) {
+    s_est_window = window_create();
+    window_set_window_handlers(s_est_window, (WindowHandlers) {
+      .load = est_window_load,
+      .unload = est_window_unload,
+    });
+  }
+  window_stack_push(s_est_window, true);
 }
 #endif
 
