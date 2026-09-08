@@ -1686,6 +1686,13 @@ static int16_t draw_project_marker(GContext *ctx, int16_t x, int16_t cell_h,
 }
 #endif
 
+#ifndef PBL_PLATFORM_APLITE
+// Defined further down with the marquee helpers; used by the pinned tracking
+// header's sweeping-word draw below.
+static int16_t title_natural_width_font(const char *title, GFont font);
+static int16_t pingpong_offset(int16_t travel);
+#endif
+
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
     if (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) {
@@ -1701,14 +1708,25 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // The pinned "TRACKING" header - a thin green strip. Bold (CHROME_FONT_BOLD_KEY,
-  // the same point size as CHROME_FONT_KEY) so the label reads at a glance while
-  // a session is running; one word, so it still fits the strip on a 144px watch.
+  // The pinned tracking header - a thin green strip. Bold (CHROME_FONT_BOLD_KEY,
+  // same point size as CHROME_FONT_KEY) and title-case so it reads at a glance.
+  // While THIS watch is the one tracking, the word sweeps gently left<->right
+  // across the strip to catch the eye; a remote presence session leaves it
+  // static, left-aligned.
   if (has_pinned_row() && section_index == 1) {
     GRect hb = layer_get_bounds(cell_layer);
     fill_bg(ctx, hb, GColorGreen);
     graphics_context_set_text_color(ctx, GColorBlack);
-    draw_text(ctx, focus_active() ? "FOCUSING" : "TRACKING", CHROME_FONT_BOLD_KEY, GRect(TITLE_BOX_X, 0, hb.size.w - TITLE_BOX_X * 2, hb.size.h), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+    const char *label = focus_active() ? "Focusing" : "Tracking";
+    GFont label_font = fonts_get_system_font(CHROME_FONT_BOLD_KEY);
+    int16_t avail = hb.size.w - TITLE_BOX_X * 2;
+    int16_t word_w = title_natural_width_font(label, label_font);
+    int16_t x = TITLE_BOX_X;
+    if (s_tracking_task_id[0] != '\0' && avail - word_w > 0) {
+      x += pingpong_offset(avail - word_w);
+    }
+    graphics_draw_text(ctx, label, label_font, GRect(x, 0, word_w + 4, hb.size.h),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
     graphics_context_set_stroke_color(ctx, GColorBlack);
     graphics_draw_line(ctx, GPoint(0, hb.size.h - 1), GPoint(hb.size.w, hb.size.h - 1));
     return;
@@ -1882,25 +1900,18 @@ static void draw_marquee_title(GContext *ctx, GRect box, const char *text, GFont
   }
 }
 
-// Triangle-wave scroll offset (0 -> left, back to 0) for the pinned "TRACKING"
-// row's title while a session is running - a back-and-forth sweep rather than
-// the seam of the looping marquee, and it runs whether or not the row is
-// selected so the whole task name is always readable at a glance. Driven by the
-// same s_scroll_offset_px counter the loop marquee steps.
-static int16_t marquee_pingpong_x(int16_t natural_width, int16_t available) {
-  int16_t travel = natural_width - available;
+// Triangle-wave position 0 -> travel -> 0, driven by the shared
+// s_scroll_offset_px counter, with a brief hold at each end. Drives the pinned
+// "TRACKING" header word's gentle left<->right sweep while a local session runs.
+static int16_t pingpong_offset(int16_t travel) {
   if (travel <= 0) {
     return 0;
   }
-  // A brief hold at each end so the first/last characters don't whip past.
   const int32_t hold = 20;
   int32_t leg = travel + hold;
   int32_t phase = (int32_t)s_scroll_offset_px % (leg * 2);
   int32_t pos = phase < leg ? phase : (leg * 2 - phase);
-  if (pos > travel) {
-    pos = travel;
-  }
-  return (int16_t)(-pos);
+  return (int16_t)(pos > travel ? travel : pos);
 }
 #endif
 
@@ -2001,14 +2012,11 @@ static void refresh_scroll_state(bool reset_offset) {
   if (!needs_scroll && selected_row_is_presence_title()) {
     needs_scroll = title_natural_width(s_presence_task) > available;
   }
-  // The pinned "TRACKING" row keeps its back-and-forth sweep going whether or
-  // not it's the selected row, so leave the timer running while this watch is
-  // tracking a task whose name overflows.
-  if (!needs_scroll && has_pinned_row() && s_tracking_task_id[0] != '\0') {
-    Task *pt = find_task_by_id(s_tracking_task_id);
-    if (pt && title_natural_width(pt->title) > available) {
-      needs_scroll = true;
-    }
+  // Keep the repaint timer running the whole time this watch is tracking: the
+  // pinned tracking header's word sweeps left<->right for the entire session,
+  // regardless of the selected row.
+  if (has_pinned_row() && s_tracking_task_id[0] != '\0') {
+    needs_scroll = true;
   }
 #endif
   if (needs_scroll && !s_scroll_timer) {
@@ -2070,15 +2078,12 @@ static void apply_backlight_mode(void) {
 // Draws one task row - marquee/ellipsized title plus the "@ due  > spent /
 // estimate" subtitle. Shared by per-group rows and the pinned "TRACKING" row.
 // show_project right-aligns task->project on the subtitle line; only the pinned
-// row passes true (and only shows it when grouping is on). ambient_marquee runs
-// the back-and-forth title sweep even when the row isn't selected - the pinned
-// row passes it while a local session is tracking this task. `bounds` is a
+// row passes true (and only shows it when grouping is on). `bounds` is a
 // MenuLayer cell's own bounds (origin 0,0).
-static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selected,
-                          bool show_project, bool ambient_marquee) {
+static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selected, bool show_project) {
   int16_t available = bounds.size.w - TITLE_BOX_X * 2;
   int16_t natural_width = title_natural_width(task->title);
-  bool needs_marquee = (is_selected || ambient_marquee) && natural_width > available;
+  bool needs_marquee = is_selected && natural_width > available;
 
   GColor bg = is_selected ? GColorBlack : GColorWhite;
   GColor fg = is_selected ? GColorWhite : GColorBlack;
@@ -2096,25 +2101,14 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
                            bounds.size.w - TITLE_BOX_X * 2, title_box_h);
 
   if (needs_marquee) {
-#ifndef PBL_PLATFORM_APLITE
-    if (ambient_marquee) {
-      // Pinned "TRACKING" row: one copy, swept back and forth.
-      int16_t x = marquee_pingpong_x(natural_width, available);
-      graphics_draw_text(ctx, task->title, title_font,
-                          GRect(title_box.origin.x + x, title_box.origin.y, natural_width, title_box.size.h),
-                          GTextOverflowModeFill, GTextAlignmentLeft, NULL);
-    } else
-#endif
-    {
-      int16_t period = natural_width + SCROLL_GAP_PX;
-      int16_t x = -(s_scroll_offset_px % period);
-      graphics_draw_text(ctx, task->title, title_font,
-                          GRect(title_box.origin.x + x, title_box.origin.y, natural_width, title_box.size.h),
-                          GTextOverflowModeFill, GTextAlignmentLeft, NULL);
-      graphics_draw_text(ctx, task->title, title_font,
-                          GRect(title_box.origin.x + x + period, title_box.origin.y, natural_width, title_box.size.h),
-                          GTextOverflowModeFill, GTextAlignmentLeft, NULL);
-    }
+    int16_t period = natural_width + SCROLL_GAP_PX;
+    int16_t x = -(s_scroll_offset_px % period);
+    graphics_draw_text(ctx, task->title, title_font,
+                        GRect(title_box.origin.x + x, title_box.origin.y, natural_width, title_box.size.h),
+                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, task->title, title_font,
+                        GRect(title_box.origin.x + x + period, title_box.origin.y, natural_width, title_box.size.h),
+                        GTextOverflowModeFill, GTextAlignmentLeft, NULL);
   } else {
     graphics_draw_text(ctx, task->title, title_font, title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
@@ -2458,16 +2452,10 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
                       menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
   bool is_pinned_row = false;
-  bool ambient_marquee = false;
 #ifndef PBL_PLATFORM_APLITE
   is_pinned_row = has_pinned_row() && cell_index->section == 1;
-  // The pinned row sweeps its title back and forth whenever THIS watch is the
-  // one tracking (not for a remote presence row, which has its own selected-
-  // only marquee).
-  ambient_marquee = is_pinned_row && s_tracking_task_id[0] != '\0' &&
-                    strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
 #endif
-  draw_task_row(ctx, layer_get_bounds(cell_layer), task, is_selected, is_pinned_row, ambient_marquee);
+  draw_task_row(ctx, layer_get_bounds(cell_layer), task, is_selected, is_pinned_row);
 }
 
 // ---------- outbound send retry ----------
@@ -4906,7 +4894,7 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // draw_task_row reads the same fields the today list draws; a browsed task
   // isn't in s_tasks but the struct is identical, so this reuses it wholesale
   // (including the live-ticking "spent / estimate" when it's the tracked one).
-  draw_task_row(ctx, bounds, bt, is_selected, false, false);
+  draw_task_row(ctx, bounds, bt, is_selected, false);
 }
 
 // Switch to level 1 for `project_id` and fetch its tasks. Shared by a
@@ -5925,7 +5913,7 @@ static void schedule_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuI
   // Reuse the today-list row renderer - same look (dim-on-done, "@ 9:41 AM"
   // due subtitle, tracked/estimate time), with the project name shown
   // right-aligned since this view crosses projects.
-  draw_task_row(ctx, layer_get_bounds(cell_layer), task, is_selected, true, false);
+  draw_task_row(ctx, layer_get_bounds(cell_layer), task, is_selected, true);
 }
 
 static void schedule_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
