@@ -161,6 +161,10 @@ enum {
   // Set a task's deadline (long-Down on the notes overlay). The value is days
   // from today; -1 clears it. Phone turns it into { deadlineDay } (or nulls).
   MSG_TASK_SET_DEADLINE = 46,       // watch -> phone: TASK_ID + TASK_DEADLINE_DAYS
+  // Add / remove a tag on a task (the tag editor, BROWSE_TAG_EDIT). PROJECT_ID
+  // is the tag id, PROJECT_TASK_BACKLOG is 1 to add / 0 to remove. Replays as
+  // a plain [Task Shared] updateTask { tagIds }.
+  MSG_TASK_TOGGLE_TAG = 47,         // watch -> phone: TASK_ID + PROJECT_ID + PROJECT_TASK_BACKLOG
 };
 
 // STATUS_CODE values sent from the phone.
@@ -784,8 +788,13 @@ static int s_browse_level = 0;              // 0 = project list, 1 = one project
 // Which flavour this window is showing. Set before push_browse_window / any
 // request; the *_REQUEST sends carry IS_TAGS off it, and the draw / long-press
 // paths branch on it (tags have no backlog, no notes, no offline cache).
-typedef enum { BROWSE_PROJECTS, BROWSE_TAGS } BrowseMode;
+// BROWSE_TAG_EDIT is level-0-only: the tag list with a checkbox per tag, Select
+// toggles that tag on s_browse_edit_task_id. Reached from a task's notes overlay.
+typedef enum { BROWSE_PROJECTS, BROWSE_TAGS, BROWSE_TAG_EDIT } BrowseMode;
 static BrowseMode s_browse_mode = BROWSE_PROJECTS;
+static char s_browse_edit_task_id[MAX_ID_LEN] = ""; // the task BROWSE_TAG_EDIT tags
+// Any tag-flavoured mode (list request carries IS_TAGS; no notes/backlog/cache).
+static bool browse_wants_tags(void) { return s_browse_mode != BROWSE_PROJECTS; }
 static Window *s_browse_window = NULL;
 static MenuLayer *s_browse_menu = NULL;
 static StatusBarLayer *s_browse_status_bar = NULL;
@@ -2661,6 +2670,11 @@ static void send_pending_retry(void) {
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_int32(iter, KEY_TASK_DEADLINE_DAYS, s_retry_int);
       break;
+    case MSG_TASK_TOGGLE_TAG:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2); // the tag id
+      dict_write_int32(iter, KEY_PROJECT_TASK_BACKLOG, s_retry_int); // 1 = assign
+      break;
     case MSG_PROJECT_NOTE_APPEND:
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str);
       dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str2);
@@ -2675,6 +2689,9 @@ static void send_pending_retry(void) {
       break;
     case MSG_PROJECT_LIST_REQUEST:
       dict_write_int32(iter, KEY_IS_TAGS, s_retry_int);
+      if (s_retry_str[0] != '\0') {
+        dict_write_cstring(iter, KEY_TASK_ID, s_retry_str); // BROWSE_TAG_EDIT
+      }
       break;
 #endif
     case MSG_FINISH_DAY:
@@ -2778,6 +2795,11 @@ static void send_task_set_estimate(const char *task_id, int32_t ms) {
 // Set a task's deadline to `days` from today, or clear it (days < 0).
 static void send_task_set_deadline(const char *task_id, int32_t days) {
   begin_send(MSG_TASK_SET_DEADLINE, task_id, NULL, days);
+}
+
+// Add (assign != 0) or remove a tag from a task.
+static void send_toggle_tag(const char *task_id, const char *tag_id, int32_t assign) {
+  begin_send(MSG_TASK_TOGGLE_TAG, task_id, tag_id, assign);
 }
 #endif
 
@@ -3741,7 +3763,7 @@ static void begin_pending_reschedule(RescheduleKind kind) {
     // Tags mode: the browsed id is a tag, not a project - the phone's
     // reschedule handler would re-push an empty "that project's" list and
     // blank the view. Reschedule isn't offered from the tag task list.
-    if (s_browse_mode == BROWSE_TAGS) {
+    if (browse_wants_tags()) {
       return;
     }
     Task *bt = resolve_browse_task_at(menu_layer_get_selected_index(s_browse_menu));
@@ -3878,14 +3900,18 @@ static void send_presence_stop(void) {
 // Projects browser: ask the phone for the project list / one project's task
 // list. Both replies are chunked (START / ITEM* / END) - see the MSG_PROJECT_*
 // handlers in inbox_received_handler.
-// int_val carries IS_TAGS (1 in BROWSE_TAGS mode) - see send_pending_retry and
-// the phone's handleProjectListRequest / handleProjectTasksRequest.
+// int_val carries IS_TAGS (1 for any tag-flavoured mode) - see send_pending_retry
+// and the phone's handleProjectListRequest / handleProjectTasksRequest. In
+// BROWSE_TAG_EDIT the str_val is the task id whose tags are being edited (the
+// phone then marks each tag assigned/not in PROJECT_TASK_COUNT).
 static void request_project_list(void) {
-  begin_send(MSG_PROJECT_LIST_REQUEST, NULL, NULL, s_browse_mode == BROWSE_TAGS ? 1 : 0);
+  const char *edit_id = (s_browse_mode == BROWSE_TAG_EDIT && s_browse_edit_task_id[0] != '\0')
+                            ? s_browse_edit_task_id : NULL;
+  begin_send(MSG_PROJECT_LIST_REQUEST, edit_id, NULL, browse_wants_tags() ? 1 : 0);
 }
 
 static void request_project_tasks(const char *project_id) {
-  begin_send(MSG_PROJECT_TASKS_REQUEST, project_id, NULL, s_browse_mode == BROWSE_TAGS ? 1 : 0);
+  begin_send(MSG_PROJECT_TASKS_REQUEST, project_id, NULL, browse_wants_tags() ? 1 : 0);
 }
 #endif
 
@@ -4096,7 +4122,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       // Drop a reply for the other mode (the user switched Projects<->Tags
       // while this list was in flight).
-      if ((tuple_int(iterator, KEY_IS_TAGS, 0) != 0) != (s_browse_mode == BROWSE_TAGS)) {
+      if ((tuple_int(iterator, KEY_IS_TAGS, 0) != 0) != browse_wants_tags()) {
         break;
       }
       s_browse_project_incoming = tuple_int(iterator, KEY_PROJECT_TOTAL, 0);
@@ -5081,28 +5107,47 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     // Green with bold black text - the same treatment the today view gives a
     // project group header (menu_draw_header). The selected row darkens with
     // white text so it stands out (a bare text-colour flip on the bright fill
-    // barely read). Tags mode uses the mint green of its nav row.
+    // barely read). Any tag-flavoured mode uses the mint green of its nav row.
 #ifndef PBL_PLATFORM_APLITE
-    if (s_browse_mode == BROWSE_TAGS) {
+    if (browse_wants_tags()) {
       fill_bg(ctx, bounds, is_selected ? GColorJaegerGreen : GColorMintGreen);
     } else
 #endif
     {
       fill_bg(ctx, bounds, is_selected ? GColorIslamicGreen : GColorGreen);
     }
+    int16_t title_y = HEADING_TITLE_Y(bounds.size.h);
+    graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
+#ifndef PBL_PLATFORM_APLITE
+    if (s_browse_mode == BROWSE_TAG_EDIT) {
+      // A checkbox (p->task_count 1 = tag assigned to s_browse_edit_task_id),
+      // then the tag name. Select toggles it.
+      GColor mk = is_selected ? GColorWhite : GColorBlack;
+      GRect box = GRect(TITLE_BOX_X, (bounds.size.h - 16) / 2, 16, 16);
+      graphics_context_set_stroke_color(ctx, mk);
+      graphics_draw_rect(ctx, box);
+      if (p->task_count) {
+        graphics_context_set_fill_color(ctx, mk);
+        graphics_fill_rect(ctx, GRect(box.origin.x + 4, box.origin.y + 4, 8, 8), 0, GCornerNone);
+      }
+      int16_t tx = TITLE_BOX_X + 22;
+      draw_text(ctx, p->title, FONT_KEY_GOTHIC_24_BOLD,
+                GRect(tx, title_y, bounds.size.w - tx - TITLE_BOX_X, HEADING_TITLE_H),
+                GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      return;
+    }
+#endif
     // The Inbox glyph for the default project, else the project's theme colour
     // as a swatch (draw_project_marker, shared with the today view). The phone
     // already packed the colour to a GColor8.
     int16_t text_x = draw_project_marker(ctx, TITLE_BOX_X, bounds.size.h, p->id,
                                           (uint8_t)p->color, is_selected);
-    graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
     // Right-aligned count of the project's regular-list tasks (backlog and
     // done excluded, computed phone-side). Fixed-width strip so the title
     // ellipsis lands before it; 3 digits of GOTHIC_24_BOLD fit in 40 px.
     char count_buf[8];
     snprintf(count_buf, sizeof(count_buf), "%d", p->task_count);
     const int16_t count_w = 40;
-    int16_t title_y = HEADING_TITLE_Y(bounds.size.h);
     draw_text(ctx, count_buf, FONT_KEY_GOTHIC_24_BOLD,
               GRect(bounds.size.w - TITLE_BOX_X - count_w, title_y, count_w, HEADING_TITLE_H),
               GTextOverflowModeTrailingEllipsis, GTextAlignmentRight);
@@ -5122,7 +5167,7 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // span projects).
   bool show_project = false;
 #ifndef PBL_PLATFORM_APLITE
-  show_project = (s_browse_mode == BROWSE_TAGS);
+  show_project = (s_browse_mode == BROWSE_TAGS); // TAG_EDIT is level-0 only
 #endif
   draw_task_row(ctx, bounds, bt, is_selected, show_project);
 }
@@ -5162,6 +5207,14 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
     if (!p) {
       return;
     }
+#ifndef PBL_PLATFORM_APLITE
+    if (s_browse_mode == BROWSE_TAG_EDIT) {
+      p->task_count = p->task_count ? 0 : 1; // flip the checkbox
+      menu_layer_reload_data(s_browse_menu);
+      send_toggle_tag(s_browse_edit_task_id, p->id, p->task_count);
+      return;
+    }
+#endif
     browse_descend(p->id);
     return;
   }
@@ -5190,7 +5243,7 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
 static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
 #ifndef PBL_PLATFORM_APLITE
-  if (s_browse_mode == BROWSE_TAGS) {
+  if (browse_wants_tags()) {
     return;
   }
 #endif
@@ -5220,7 +5273,7 @@ static void browse_update_empty(void) {
   const char *msg;
   bool tags = false;
 #ifndef PBL_PLATFORM_APLITE
-  tags = (s_browse_mode == BROWSE_TAGS);
+  tags = browse_wants_tags();
 #endif
   if (s_browse_level == 0) {
     empty = s_browse_project_count == 0;
@@ -5375,6 +5428,19 @@ static void push_browse_window(const char *jump_to_project) {
 // Select dismisses the notes window; Back also does, for free, via Pebble's
 // default pop behavior.
 static void notes_window_select_click_handler(ClickRecognizerRef recognizer, void *context) {
+#if PROJECTS_BROWSER
+  // On a TASK's notes, Select opens the tag editor (the tags are shown right at
+  // the top of this screen). Back still just dismisses. A project has no tags.
+  if (!s_notes_overlay_is_project) {
+    char id[MAX_ID_LEN];
+    str_copy(id, s_notes_overlay_subject_id, sizeof(id));
+    hide_notes_overlay();
+    s_browse_mode = BROWSE_TAG_EDIT;
+    str_copy(s_browse_edit_task_id, id, sizeof(s_browse_edit_task_id));
+    push_browse_window(NULL);
+    return;
+  }
+#endif
   hide_notes_overlay();
 }
 

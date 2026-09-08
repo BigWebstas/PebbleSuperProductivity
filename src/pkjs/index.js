@@ -83,6 +83,7 @@ var MSG_UPCOMING_DATA = 43;         // phone -> watch: UPCOMING_TEXT
 var MSG_TASK_SET_BACKLOG = 44;      // watch -> phone: TASK_ID + PROJECT_ID + PROJECT_TASK_BACKLOG
 var MSG_TASK_SET_ESTIMATE = 45;     // watch -> phone: TASK_ID + TASK_TIME_ESTIMATE_MS (0 clears)
 var MSG_TASK_SET_DEADLINE = 46;     // watch -> phone: TASK_ID + TASK_DEADLINE_DAYS (days from today, <0 clears)
+var MSG_TASK_TOGGLE_TAG = 47;       // watch -> phone: TASK_ID + PROJECT_ID (tag id) + PROJECT_TASK_BACKLOG (1 add / 0 remove)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -654,7 +655,7 @@ function sendHabitAt(habits, index) {
 // isTags: the same request with IS_TAGS=1 asks for the TAG list instead (the
 // Tags page reuses this whole path; a tag entry has the same id/title/color/
 // count shape a project entry does).
-function handleProjectListRequest(isTags) {
+function handleProjectListRequest(isTags, editTaskId) {
   var config = loadConfig();
   if (!config || !config.jwt) {
     sendStatus(STATUS_NOT_PAIRED);
@@ -664,6 +665,15 @@ function handleProjectListRequest(isTags) {
     return;
   }
   var projects = isTags ? store.getTagList(loadState()) : store.getProjectList(loadState());
+  if (isTags && editTaskId) {
+    // Tag editor: PROJECT_TASK_COUNT carries "assigned to this task" (0/1),
+    // not a count.
+    var editTask = loadState().task[editTaskId];
+    var have = (editTask && editTask.tagIds) || [];
+    projects.forEach(function (p) {
+      p.taskCount = have.indexOf(p.id) !== -1 ? 1 : 0;
+    });
+  }
   sendWithRetry({ MSG_TYPE: MSG_PROJECT_LIST_START, PROJECT_TOTAL: projects.length, IS_TAGS: isTags ? 1 : 0 }, function () {
     sendProjectListAt(projects, 0);
   }, function (e) {
@@ -1667,6 +1677,46 @@ function handleTaskReschedule(taskId, when, projectId) {
     .catch(function (err) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload task reschedule: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, failureMsg);
+    });
+}
+
+// Watch tag editor: add (assign) or remove a tag from a task. A plain
+// updateTask { tagIds } - the same op the desktop's tag chip fires;
+// task-store's tagIds-aware paths replay it (mergeTaskChanges).
+function handleToggleTag(taskId, tagId, assign) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task || !tagId) {
+    return;
+  }
+  var tagIds = (task.tagIds || []).slice();
+  var at = tagIds.indexOf(tagId);
+  if (assign && at === -1) {
+    tagIds.push(tagId);
+  } else if (!assign && at !== -1) {
+    tagIds.splice(at, 1);
+  } else {
+    return; // already in the wanted state
+  }
+  state.task[taskId] = Object.assign({}, task, { tagIds: tagIds });
+  saveState(state);
+  sendTaskListToWatch(watchTaskList(state, config));
+
+  var clientId = getOrCreateClientId();
+  var failureMsg = null;
+  uploadOps([buildTaskUpdateOp(taskId, { tagIds: tagIds }, clientId)], config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload tag change: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
     })
     .then(function () {
@@ -2923,7 +2973,10 @@ Pebble.addEventListener('appmessage', function (e) {
       handleProjectNoteRequest(payload.PROJECT_ID);
       break;
     case MSG_PROJECT_LIST_REQUEST:
-      handleProjectListRequest(payload.IS_TAGS === 1);
+      handleProjectListRequest(payload.IS_TAGS === 1, payload.TASK_ID);
+      break;
+    case MSG_TASK_TOGGLE_TAG:
+      handleToggleTag(payload.TASK_ID, payload.PROJECT_ID, payload.PROJECT_TASK_BACKLOG === 1);
       break;
     case MSG_PROJECT_TASKS_REQUEST:
       handleProjectTasksRequest(payload.PROJECT_ID, payload.IS_TAGS === 1);
