@@ -170,6 +170,30 @@ check('worked / completed yesterday come from the yesterday day-key and doneOn',
   assert.strictEqual(stats.completedYesterdayCount, 1);
 });
 
+check('week entries carry session start/end + break count from timeTracking', () => {
+  const start = new Date(); start.setHours(9, 12, 0, 0);
+  const end = new Date(); end.setHours(17, 40, 0, 0);
+  const s = build([
+    entry('TIME_TRACKING', '[TimeTracking] Sync sessions', {
+      contextType: 'PROJECT', contextId: 'p1', date: today,
+      data: { s: start.getTime(), e: end.getTime(), b: 2, bt: 1200000 },
+    }),
+    // a second context the same day - earliest start / latest end / summed breaks
+    entry('TIME_TRACKING', '[TimeTracking] Update Work Context Data', {
+      ctx: { type: 'TAG', id: 't1' }, date: today,
+      data: undefined, updates: { s: new Date(new Date().setHours(8, 30, 0, 0)).getTime(), b: 1 },
+    }),
+  ]);
+  const wk = store.computeStats(s).week;
+  const todayRow = wk[wk.length - 1];
+  assert.strictEqual(todayRow.startMin, 8 * 60 + 30);
+  assert.strictEqual(todayRow.endMin, 17 * 60 + 40);
+  assert.strictEqual(todayRow.breaks, 3);
+  // a day with no session data
+  assert.strictEqual(wk[0].startMin, -1);
+  assert.strictEqual(wk[0].breaks, 0);
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);

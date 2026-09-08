@@ -105,7 +105,10 @@ function taskIssueKey(t) {
 //                          modified, ...} },
 //          tag: { [id]: {id, title, ...} } }
 function emptyState() {
-  return { task: {}, project: {}, simpleCounter: {}, note: {}, tag: {}, taskRepeatCfg: {}, metric: {} };
+  return {
+    task: {}, project: {}, simpleCounter: {}, note: {}, tag: {}, taskRepeatCfg: {},
+    metric: {}, timeTracking: { project: {}, tag: {} },
+  };
 }
 
 function ensureCollection(state, entityType) {
@@ -830,6 +833,38 @@ function applyMetricAction(op, actionPayload, state) {
   }
 }
 
+// Per-day work-session data (time-tracking.model.ts's TTWorkContextData:
+// s/e = minute-rounded epoch ms of work start/end, b = break count, bt = break
+// ms), keyed state.timeTracking[project|tag][ctxId][dateStr]. The watch never
+// tracks this itself; this replay just keeps it consistent so computeStats can
+// show each day's session span + break count on the Stats page.
+function applyTimeTrackingAction(op, actionPayload, state) {
+  var tt = state.timeTracking || (state.timeTracking = { project: {}, tag: {} });
+  if (!actionPayload) {
+    return;
+  }
+  var type, ctxId, date, data;
+  if (op.actionType === '[TimeTracking] Sync sessions') {
+    type = actionPayload.contextType;
+    ctxId = actionPayload.contextId;
+    date = actionPayload.date;
+    data = actionPayload.data;
+  } else if (op.actionType === '[TimeTracking] Update Work Context Data') {
+    type = actionPayload.ctx && actionPayload.ctx.type;
+    ctxId = actionPayload.ctx && actionPayload.ctx.id;
+    date = actionPayload.date;
+    data = actionPayload.updates;
+  } else {
+    return;
+  }
+  var bucket = type === 'TAG' ? 'tag' : type === 'PROJECT' ? 'project' : null;
+  if (!bucket || !ctxId || !date || !data) {
+    return;
+  }
+  var byCtx = tt[bucket][ctxId] || (tt[bucket][ctxId] = {});
+  byCtx[date] = Object.assign({}, byCtx[date], data);
+}
+
 // Applies one SuperSync operation to `state` in place. `crypto` is the
 // object returned by supersync-client.js's createCrypto(password) if E2EE is
 // on, or null/undefined otherwise. Never throws - a single malformed/
@@ -919,6 +954,10 @@ function applyOperation(entry, state, crypto) {
     }
     if (entityType === 'metric') {
       applyMetricAction(op, payload && payload.actionPayload, state);
+      return;
+    }
+    if (entityType === 'time_tracking') {
+      applyTimeTrackingAction(op, payload && payload.actionPayload, state);
       return;
     }
 
@@ -1806,8 +1845,49 @@ function computeStats(state) {
     return { id: p.id, title: p.title, taskCount: count };
   });
 
+  // Per-day work-session span + break count from the timeTracking entity,
+  // across every project/tag context for that date. s/e are minute-rounded
+  // epoch ms; convert to minutes-since-local-midnight for the watch.
+  var weekStart = [-1, -1, -1, -1, -1, -1, -1];
+  var weekEnd = [-1, -1, -1, -1, -1, -1, -1];
+  var weekBreaks = [0, 0, 0, 0, 0, 0, 0];
+  var tt = state.timeTracking || {};
+  ['project', 'tag'].forEach(function (bucket) {
+    var b = tt[bucket] || {};
+    Object.keys(b).forEach(function (ctxId) {
+      var byDate = b[ctxId] || {};
+      Object.keys(byDate).forEach(function (ds) {
+        if (!(ds in weekIndex)) {
+          return;
+        }
+        var wi = weekIndex[ds];
+        var d = byDate[ds] || {};
+        if (typeof d.s === 'number' && d.s > 0) {
+          var sd = new Date(d.s);
+          var sm = sd.getHours() * 60 + sd.getMinutes();
+          if (weekStart[wi] < 0 || sm < weekStart[wi]) {
+            weekStart[wi] = sm;
+          }
+        }
+        if (typeof d.e === 'number' && d.e > 0) {
+          var ed = new Date(d.e);
+          var em = ed.getHours() * 60 + ed.getMinutes();
+          if (em > weekEnd[wi]) {
+            weekEnd[wi] = em;
+          }
+        }
+        if (typeof d.b === 'number' && d.b > 0) {
+          weekBreaks[wi] += d.b;
+        }
+      });
+    });
+  });
+
   var week = weekLabels.map(function (label, i) {
-    return { label: label, ms: weekBuckets[i] };
+    return {
+      label: label, ms: weekBuckets[i],
+      startMin: weekStart[i], endMin: weekEnd[i], breaks: weekBreaks[i],
+    };
   });
 
   return {

@@ -855,8 +855,21 @@ function handleStatsRequest() {
     var h = Math.floor(m / 60);
     return h ? (h + 'h ' + (m % 60) + 'm') : (m + 'm');
   };
+  // 24h H:MM - the Stats text is a preformatted blob so the watch's 12/24h
+  // preference can't reach here; session times are a secondary stat.
+  var hm = function (min) {
+    var h = Math.floor(min / 60), m = min % 60;
+    return h + ':' + (m < 10 ? '0' : '') + m;
+  };
   var weekBlock = '\x02Last 7 days\n' +
-    stats.week.map(function (d) { return d.label + '  ' + fmtDur(d.ms); }).join('\n') +
+    stats.week.map(function (d) {
+      var s = d.label + '  ' + fmtDur(d.ms);
+      if (d.startMin >= 0 && d.endMin >= 0) {
+        s += '  ' + hm(d.startMin) + '-' + hm(d.endMin);
+        if (d.breaks > 0) { s += ' ' + d.breaks + 'b'; }
+      }
+      return s;
+    }).join('\n') +
     '\nWeek  ' + fmtDur(stats.workedWeekMs);
   var projectBlock = '\x02Projects\n' + stats.projects.map(function (p) {
     return String(p.title).replace(/[\t\n]/g, ' ').slice(0, 40) + ' - ' + p.taskCount;
