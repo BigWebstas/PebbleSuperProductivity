@@ -2612,18 +2612,18 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
 #ifndef PBL_PLATFORM_APLITE
     if (kind == SECTION0_ROW_NOTESPAGE) {
-      // Opens the Notes page - today-pinned standalone notes. Light grey, its
-      // own shade among the nav rows; text/glyph stay black (white would wash
-      // out on select). A lined-note glyph on the right.
-      (void)is_selected;
-      fill_bg(ctx, bounds, GColorLightGray);
-      graphics_context_set_text_color(ctx, GColorBlack);
+      // Opens the Notes page - today-pinned standalone notes. Light grey,
+      // inverting to dark grey + white on select like the other nav rows. A
+      // lined-note glyph on the right.
+      GColor fg = is_selected ? GColorWhite : GColorBlack;
+      fill_bg(ctx, bounds, is_selected ? GColorDarkGray : GColorLightGray);
+      graphics_context_set_text_color(ctx, fg);
       GRect np_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                   bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
       draw_text(ctx, "Notes", HEADING_FONT_KEY, np_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       int16_t gx = bounds.size.w - ROW_ICON_SIZE - 4;
       int16_t gy = bounds.size.h / 2;
-      graphics_context_set_stroke_color(ctx, GColorBlack);
+      graphics_context_set_stroke_color(ctx, fg);
       graphics_draw_rect(ctx, GRect(gx, gy - 7, 13, 15));
       for (int k = 0; k < 3; k++) {
         graphics_draw_line(ctx, GPoint(gx + 3, gy - 3 + k * 3), GPoint(gx + 10, gy - 3 + k * 3));
