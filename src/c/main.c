@@ -2243,12 +2243,14 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
 #ifndef PBL_PLATFORM_APLITE
     if (kind == SECTION0_ROW_SCHEDULE) {
-      // Opens the Schedule page - today's timed tasks in time order. Teal, its
-      // own colour among the section-0 nav rows (Stats orange, Habits cerulean,
-      // Projects purple). A clock glyph on the right, drawn from primitives (no
-      // bitmap asset), black normally / white when selected like the others.
+      // Opens the Schedule page - today's timed tasks in time order. Yellow: the
+      // old teal read as the same blue as the Habits row (cerulean) on-watch, so
+      // it's now a hue nothing else in section 0 uses (Resync red, Habits
+      // cerulean, Projects purple, Stats orange, Upcoming indigo, Add Task
+      // green). A clock glyph on the right, drawn from primitives (no bitmap
+      // asset), black normally / white when selected like the others.
       GColor icon = is_selected ? GColorWhite : GColorBlack;
-      fill_bg(ctx, bounds, GColorTiffanyBlue);
+      fill_bg(ctx, bounds, GColorYellow);
       graphics_context_set_text_color(ctx, icon);
       GRect sched_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                      bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
