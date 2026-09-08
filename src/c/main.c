@@ -5974,7 +5974,17 @@ static void push_value_picker(PickKind kind, const char *task_id, int current) {
 // scattered across cryptic gestures (track, tags, estimate, deadline) plus a
 // way into notes. Each row pops this menu, then launches its target - so Back
 // from the target returns to the list.
-enum { ACT_TRACK, ACT_NOTES, ACT_TAGS, ACT_ESTIMATE, ACT_DEADLINE, ACT_COUNT };
+enum {
+  ACT_TRACK,
+  ACT_TODAY,
+  ACT_TOMORROW,
+  ACT_UNSCHEDULE,
+  ACT_NOTES,
+  ACT_TAGS,
+  ACT_ESTIMATE,
+  ACT_DEADLINE,
+  ACT_COUNT,
+};
 static Window *s_action_window = NULL;
 static MenuLayer *s_action_menu = NULL;
 static StatusBarLayer *s_action_status_bar = NULL;
@@ -5992,11 +6002,14 @@ static uint16_t action_get_num_rows(MenuLayer *ml, uint16_t section, void *ctx) 
 static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, void *c) {
   const char *label = "";
   switch (idx->row) {
-    case ACT_TRACK:    label = action_task_is_tracked() ? "Stop tracking" : "Start tracking"; break;
-    case ACT_NOTES:    label = "Notes"; break;
-    case ACT_TAGS:     label = "Edit tags"; break;
-    case ACT_ESTIMATE: label = "Set estimate"; break;
-    case ACT_DEADLINE: label = "Set deadline"; break;
+    case ACT_TRACK:      label = action_task_is_tracked() ? "Stop tracking" : "Start tracking"; break;
+    case ACT_TODAY:      label = "Schedule today"; break;
+    case ACT_TOMORROW:   label = "Schedule tomorrow"; break;
+    case ACT_UNSCHEDULE: label = "Unschedule"; break;
+    case ACT_NOTES:      label = "Notes"; break;
+    case ACT_TAGS:       label = "Edit tags"; break;
+    case ACT_ESTIMATE:   label = "Set estimate"; break;
+    case ACT_DEADLINE:   label = "Set deadline"; break;
   }
   menu_cell_basic_draw(ctx, cell, label, NULL, NULL);
 }
@@ -6019,6 +6032,15 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
         }
         menu_layer_reload_data(s_menu_layer);
       }
+      break;
+    case ACT_TODAY:
+      begin_pending_reschedule(RESCHEDULE_TODAY);
+      break;
+    case ACT_TOMORROW:
+      begin_pending_reschedule(RESCHEDULE_TOMORROW);
+      break;
+    case ACT_UNSCHEDULE:
+      begin_pending_reschedule(RESCHEDULE_UNSCHEDULE);
       break;
     case ACT_NOTES:
       if (t) {
@@ -6963,33 +6985,9 @@ static void push_live_window(void) {
 
 // ---------- window lifecycle ----------
 
-#ifndef PBL_PLATFORM_APLITE
-// MenuLayer owns the main window's click config (UP/DOWN scroll, SELECT single
-// and long). menu_layer_set_click_config_onto_window installs its provider on
-// the window; this wraps that provider to add a long-press on UP (unschedule)
-// and DOWN (move to tomorrow) without disturbing anything else - see
-// begin_pending_reschedule. The wrapped provider is called with MenuLayer's own
-// context (the MenuLayer*), which its handlers require.
-static ClickConfigProvider s_menu_click_config_provider = NULL;
-static void *s_menu_click_config_context = NULL;
-
-static void reschedule_long_click_handler(ClickRecognizerRef recognizer, void *context) {
-  backlight_touch();
-  begin_pending_reschedule(click_recognizer_get_button_id(recognizer) == BUTTON_ID_UP
-                               ? RESCHEDULE_UNSCHEDULE
-                               : RESCHEDULE_TOMORROW);
-}
-
-static void main_window_click_config_provider(void *context) {
-  if (s_menu_click_config_provider) {
-    s_menu_click_config_provider(context);
-  }
-  window_long_click_subscribe(BUTTON_ID_UP, RESCHEDULE_LONGPRESS_MS,
-                              reschedule_long_click_handler, NULL);
-  window_long_click_subscribe(BUTTON_ID_DOWN, RESCHEDULE_LONGPRESS_MS,
-                              reschedule_long_click_handler, NULL);
-}
-#endif
+// MenuLayer owns the whole main-window click config now: UP/DOWN scroll, SELECT
+// single (toggle / double-click notes) and long (the per-task action menu, where
+// scheduling now lives - it used to be long-press UP/DOWN here).
 
 static void window_load(Window *window) {
   Layer *window_layer;
@@ -7007,14 +7005,6 @@ static void window_load(Window *window) {
     .selection_changed = menu_selection_changed,
   });
   menu_layer_set_click_config_onto_window(s_menu_layer, window);
-#ifndef PBL_PLATFORM_APLITE
-  // Wrap MenuLayer's just-installed provider to add the long-press UP/DOWN
-  // reschedule gestures (see main_window_click_config_provider).
-  s_menu_click_config_provider = window_get_click_config_provider(window);
-  s_menu_click_config_context = window_get_click_config_context(window);
-  window_set_click_config_provider_with_context(window, main_window_click_config_provider,
-                                                s_menu_click_config_context);
-#endif
   layer_add_child(window_layer, menu_layer_get_layer(s_menu_layer));
   // A cached list may already have a selection that needs to scroll.
   refresh_scroll_state(true);
@@ -7144,8 +7134,6 @@ static void window_unload(Window *window) {
   }
   s_pending_reschedule_kind = RESCHEDULE_NONE;
   s_pending_reschedule_task_id[0] = '\0';
-  s_menu_click_config_provider = NULL;
-  s_menu_click_config_context = NULL;
 #endif
 #if defined(PBL_TOUCH)
   clear_tap_select_guard();
