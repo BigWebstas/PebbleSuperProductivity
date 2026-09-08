@@ -2031,6 +2031,23 @@ check('computeUpcoming merges recurring occurrences, marked and deduped', () => 
   assert.strictEqual(up.filter((u) => u.day === in2 && u.title === 'Water plants').length, 1, 'no double-show on in2');
 });
 
+check('applyMetricAction upserts / updates / deletes a day metric', () => {
+  const state = store.emptyState();
+  store.applyOperations([
+    entry('METRIC', '[Metric] Upsert Metric', { metric: { id: '2026-09-08', energyCheckin: 2 } }),
+  ], state);
+  assert.strictEqual(state.metric['2026-09-08'].energyCheckin, 2);
+  store.applyOperations([
+    entry('METRIC', '[Metric] Update Metric', { metric: { id: '2026-09-08', changes: { energyCheckin: 3, notes: 'good day' } } }),
+  ], state);
+  assert.strictEqual(state.metric['2026-09-08'].energyCheckin, 3);
+  assert.strictEqual(state.metric['2026-09-08'].notes, 'good day');
+  store.applyOperations([
+    entry('METRIC', '[Metric] Delete Metric', { id: '2026-09-08' }),
+  ], state);
+  assert.strictEqual(state.metric['2026-09-08'], undefined);
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);

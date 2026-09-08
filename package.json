@@ -1412,7 +1412,9 @@
       "HABIT_ICON",
       "CHECK_INDEX",
       "CHECK_VALUE",
-      "TASK_REMIND_MIN"
+      "TASK_REMIND_MIN",
+      "METRIC_ENERGY",
+      "REFLECT_ENABLED"
     ]
   }
 }

@@ -28,6 +28,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var projects = options.projects || [];
   var enableHabits = options.enableHabits !== false;
   var habitStreakNudge = !!options.habitStreakNudge;
+  var enableReflect = !!options.enableReflect;
   var enableAddTask = options.enableAddTask !== false;
   var enableProjects = options.enableProjects !== false;
   var enableStats = options.enableStats !== false;
@@ -475,6 +476,18 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableReflect" type="checkbox"' + (enableReflect ? ' checked' : '') + '>\n' +
+'    <label for="enableReflect">Log energy on Finish Day</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Adds an energy check-in: press Select on the Finish Day row to log how\n' +
+'    the day felt (low / ok / good). Saved to the day\'s metric and synced to\n' +
+'    the desktop\'s productivity history. Long-press Finish Day still archives\n' +
+'    done tasks as before. Not available on original Pebble/Pebble Steel\n' +
+'    (aplite).\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableTags" type="checkbox"' + (enableTags ? ' checked' : '') + '>\n' +
 '    <label for="enableTags">Enable Tags</label>\n' +
 '  </div>\n' +
@@ -614,6 +627,7 @@ taskEstimateOptions + '\n' +
 '      yesterdayStats: document.getElementById(\'yesterdayStats\').checked,\n' +
 '      enableSchedule: document.getElementById(\'enableSchedule\').checked,\n' +
 '      enableUpcoming: document.getElementById(\'enableUpcoming\').checked,\n' +
+'      enableReflect: document.getElementById(\'enableReflect\').checked,\n' +
 '      enableTags: document.getElementById(\'enableTags\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +

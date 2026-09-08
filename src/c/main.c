@@ -44,6 +44,8 @@
 #define KEY_HABIT_ICON MESSAGE_KEY_HABIT_ICON
 #define KEY_CHECK_INDEX MESSAGE_KEY_CHECK_INDEX
 #define KEY_CHECK_VALUE MESSAGE_KEY_CHECK_VALUE
+#define KEY_METRIC_ENERGY MESSAGE_KEY_METRIC_ENERGY
+#define KEY_REFLECT_ENABLED MESSAGE_KEY_REFLECT_ENABLED
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
 #define KEY_BACKLIGHT_MODE MESSAGE_KEY_BACKLIGHT_MODE
@@ -194,6 +196,8 @@ enum {
   // Toggle the CHECK_INDEX-th "- [ ]" / "- [x]" checklist line in a task's
   // notes markdown. Opened from the notes window (Select) when it has any.
   MSG_TASK_TOGGLE_CHECK = 51,       // watch -> phone: TASK_ID + CHECK_INDEX + CHECK_VALUE
+  // Today's energy check-in from the Reflect window (Select on Finish Day).
+  MSG_METRIC_ENERGY = 52,           // watch -> phone: METRIC_ENERGY (1 low / 2 ok / 3 good)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -762,6 +766,9 @@ static bool s_stop_at_midnight = false;
 // only. s_streak_nudge_day latches on tm_yday so it fires at most once a day.
 static bool s_habit_streak_nudge = false;
 static int s_streak_nudge_day = -1;
+// "Log energy on Finish Day" (config.enableReflect, default off). Select on the
+// Finish Day row opens the Reflect window; long-Select still archives.
+static bool s_reflect_enabled = false;
 // "Stats" page row (config.enableStats, default on) and the last
 // MSG_STATS_DATA payload - kept across visits so a re-open shows the previous
 // numbers immediately while a fresh request is in flight. Declared here (not
@@ -1521,6 +1528,7 @@ static void show_project_notes_overlay(TaskGroup *group);
 static void hide_notes_overlay(void);
 static void push_notes_window(void);
 static bool try_open_checklist(void);
+static void push_reflect_window(void);
 typedef enum { PICK_ESTIMATE, PICK_DEADLINE, PICK_HABIT, PICK_TIME } PickKind;
 // task_id is a habit id for PICK_HABIT. current: ms (estimate) / days-from-today
 // or DEADLINE_NONE (deadline) / the counter's value (habit) / hour 0-23 (time).
@@ -2855,6 +2863,9 @@ static void send_pending_retry(void) {
       dict_write_int32(iter, KEY_CHECK_INDEX, s_retry_int >> 1); // index<<1 | checked
       dict_write_int32(iter, KEY_CHECK_VALUE, s_retry_int & 1);
       break;
+    case MSG_METRIC_ENERGY:
+      dict_write_int32(iter, KEY_METRIC_ENERGY, s_retry_int);
+      break;
     case MSG_TASK_TOGGLE_TAG:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
       dict_write_cstring(iter, KEY_PROJECT_ID, s_retry_str2); // the tag id
@@ -3473,6 +3484,14 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     s_browse_mode = BROWSE_PROJECTS;
     push_browse_window(project_row->project_id);
 #endif
+    return;
+  }
+  // The Finish Day row: Select opens the Reflect energy check-in when it's
+  // enabled (long-Select still archives - menu_select_long_click). The row
+  // resolves to no task, so this must come before resolve_task_at's NULL.
+  if (s_reflect_enabled &&
+      (int)cell_index->section - GROUP_SECTION_BASE == s_group_count) {
+    push_reflect_window();
     return;
   }
 #endif
@@ -4539,6 +4558,8 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_stop_at_midnight = tuple_int(iterator, KEY_STOP_AT_MIDNIGHT, s_stop_at_midnight) != 0;
       // "Nudge me about unfinished streaks" - absent-means-unchanged.
       s_habit_streak_nudge = tuple_int(iterator, KEY_HABIT_STREAK_NUDGE, s_habit_streak_nudge) != 0;
+      // "Log energy on Finish Day" - absent-means-unchanged.
+      s_reflect_enabled = tuple_int(iterator, KEY_REFLECT_ENABLED, s_reflect_enabled) != 0;
 #endif
       // reload_data refreshes the Resync row's status subtitle;
       // update_empty_layer() handles the empty screen. Both no-op while the
@@ -6431,6 +6452,82 @@ static void push_value_picker(PickKind kind, const char *task_id, int current) {
     });
   }
   window_stack_push(s_pick_window, true);
+}
+
+// ---------- reflect (daily energy check-in) ----------
+// A tiny full-screen picker like the value picker: Up/Down cycle Low/OK/Good,
+// Select logs it (MSG_METRIC_ENERGY -> the phone's [Metric] Upsert Metric for
+// today), Back cancels. Reached with Select on the Finish Day row when
+// config.enableReflect is on; long-Select there still archives.
+static Window *s_reflect_window = NULL;
+static Layer *s_reflect_layer = NULL;
+static StatusBarLayer *s_reflect_status_bar = NULL;
+static int s_reflect_idx = 1; // 0 Low, 1 OK, 2 Good
+
+static void reflect_layer_update(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  fill_bg(ctx, b, GColorWhite);
+  graphics_context_set_text_color(ctx, GColorBlack);
+  int16_t cy = b.size.h / 2;
+  draw_text(ctx, "Energy today", CHROME_FONT_KEY,
+            GRect(0, cy - 44, b.size.w, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  draw_text(ctx, s_reflect_idx == 0 ? "Low" : s_reflect_idx == 2 ? "Good" : "OK",
+            FONT_KEY_GOTHIC_28_BOLD,
+            GRect(0, cy - 22, b.size.w, 34), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  draw_text(ctx, "Up/Down pick\nSelect to log", CHROME_FONT_KEY,
+            GRect(0, cy + 16, b.size.w, 40), GTextOverflowModeWordWrap, GTextAlignmentCenter);
+}
+
+static void reflect_step(int delta) {
+  int n = s_reflect_idx + delta;
+  if (n < 0) {
+    n = 0;
+  }
+  if (n > 2) {
+    n = 2;
+  }
+  if (n != s_reflect_idx) {
+    s_reflect_idx = n;
+    layer_mark_dirty(s_reflect_layer);
+    vibes_short_pulse();
+  }
+}
+static void reflect_up_click(ClickRecognizerRef r, void *c) { backlight_touch(); reflect_step(1); }
+static void reflect_down_click(ClickRecognizerRef r, void *c) { backlight_touch(); reflect_step(-1); }
+static void reflect_select_click(ClickRecognizerRef r, void *c) {
+  backlight_touch();
+  begin_send(MSG_METRIC_ENERGY, "", NULL, s_reflect_idx + 1);
+  window_stack_pop(true);
+}
+static void reflect_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_UP, reflect_up_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN, reflect_down_click);
+  window_single_click_subscribe(BUTTON_ID_SELECT, reflect_select_click);
+}
+static void reflect_window_load(Window *window) {
+  Layer *window_layer;
+  GRect content = window_chrome(window, &s_reflect_status_bar, &window_layer);
+  s_reflect_layer = layer_create(content);
+  layer_set_update_proc(s_reflect_layer, reflect_layer_update);
+  layer_add_child(window_layer, s_reflect_layer);
+  window_set_click_config_provider(window, reflect_click_config_provider);
+}
+static void reflect_window_unload(Window *window) {
+  layer_destroy(s_reflect_layer);
+  s_reflect_layer = NULL;
+  status_bar_layer_destroy(s_reflect_status_bar);
+  s_reflect_status_bar = NULL;
+}
+static void push_reflect_window(void) {
+  s_reflect_idx = 1;
+  if (!s_reflect_window) {
+    s_reflect_window = window_create();
+    window_set_window_handlers(s_reflect_window, (WindowHandlers) {
+      .load = reflect_window_load,
+      .unload = reflect_window_unload,
+    });
+  }
+  window_stack_push(s_reflect_window, true);
 }
 
 // ---------- per-task action menu ----------

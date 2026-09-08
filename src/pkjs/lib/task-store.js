@@ -92,7 +92,7 @@ function taskDeadlineDays(t) {
 //                          modified, ...} },
 //          tag: { [id]: {id, title, ...} } }
 function emptyState() {
-  return { task: {}, project: {}, simpleCounter: {}, note: {}, tag: {}, taskRepeatCfg: {} };
+  return { task: {}, project: {}, simpleCounter: {}, note: {}, tag: {}, taskRepeatCfg: {}, metric: {} };
 }
 
 function ensureCollection(state, entityType) {
@@ -784,6 +784,39 @@ function applyTaskRepeatCfgAction(op, actionPayload, state) {
   }
 }
 
+// Daily metric / reflection entity (metric.actions.ts), keyed by day string.
+// The watch never displays these; this keeps state.metric consistent so the
+// watch's own energy-check-in upsert (index.js's handleMetricEnergy) merges
+// onto the latest value rather than clobbering a desktop reflection.
+function applyMetricAction(op, actionPayload, state) {
+  var metrics = ensureCollection(state, 'metric');
+  if (!actionPayload) {
+    return;
+  }
+  switch (op.actionType) {
+    case '[Metric] Add Metric':
+    case '[Metric] Upsert Metric':
+      if (actionPayload.metric && actionPayload.metric.id) {
+        metrics[actionPayload.metric.id] = actionPayload.metric;
+      }
+      break;
+    case '[Metric] Update Metric':
+      // ngrx Update<Metric>: { id, changes }
+      if (actionPayload.metric && actionPayload.metric.id) {
+        metrics[actionPayload.metric.id] = Object.assign(
+          {}, metrics[actionPayload.metric.id], actionPayload.metric.changes);
+      }
+      break;
+    case '[Metric] Delete Metric':
+      if (actionPayload.id) {
+        delete metrics[actionPayload.id];
+      }
+      break;
+    default:
+      break;
+  }
+}
+
 // Applies one SuperSync operation to `state` in place. `crypto` is the
 // object returned by supersync-client.js's createCrypto(password) if E2EE is
 // on, or null/undefined otherwise. Never throws - a single malformed/
@@ -869,6 +902,10 @@ function applyOperation(entry, state, crypto) {
     }
     if (entityType === 'task_repeat_cfg') {
       applyTaskRepeatCfgAction(op, payload && payload.actionPayload, state);
+      return;
+    }
+    if (entityType === 'metric') {
+      applyMetricAction(op, payload && payload.actionPayload, state);
       return;
     }
 
