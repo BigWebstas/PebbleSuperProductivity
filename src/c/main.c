@@ -784,7 +784,12 @@ static bool s_reflect_note_set = false;
 static bool s_stats_enabled = true;
 // The Stats page's scrollable text: a "\x02"-prefixed section header line, then
 // its lines, repeated - "Last 7 days" (per-day tracked time) then "Projects".
-static char s_stats_projects[832] = "";
+// Heap-backed, alive only while the Stats window is open (stats_window_load /
+// _unload) - saves ~830 B of steady-state .bss on basalt/chalk/diorite, which
+// run near the heap floor. NULL when the window is closed; the MSG_STATS_DATA
+// handler drops the text then (the page re-requests on open anyway).
+#define STATS_TEXT_CAP 832
+static char *s_stats_projects = NULL;
 static int s_stats_est_remaining_ms = 0;
 static int s_stats_worked_today_ms = 0;
 static int s_stats_done_today = 0;
@@ -807,7 +812,10 @@ static bool s_upcoming_enabled = true;
 static bool s_notespage_enabled = false;
 typedef enum { PAGE_UPCOMING, PAGE_NOTES } PageMode;
 static PageMode s_page_mode = PAGE_UPCOMING;
-static char s_upcoming_text[640] = "";
+// Heap-backed, alive only while the shared page window is open (see
+// s_stats_projects for the same pattern / rationale). NULL when closed.
+#define PAGE_TEXT_CAP 640
+static char *s_upcoming_text = NULL;
 static bool s_upcoming_have_data = false;
 // "Tags" page row (config.enableTags) - default OFF, unlike every other
 // optional row. Reuses the Projects-browser window (s_browse_*) with
@@ -4567,22 +4575,24 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_stats_done_today = tuple_int(iterator, KEY_STATS_DONE_TODAY, 0);
       s_stats_worked_yesterday_ms = tuple_int(iterator, KEY_STATS_WORKED_YESTERDAY_MS, 0);
       s_stats_done_yesterday = tuple_int(iterator, KEY_STATS_DONE_YESTERDAY, 0);
-      str_copy(s_stats_projects, tuple_str(iterator, KEY_STATS_TEXT, ""), sizeof(s_stats_projects));
-      s_stats_have_data = true;
-      stats_render(); // no-op if the window was closed before the reply landed
+      if (s_stats_projects) { // NULL = window closed; it'll re-request on open
+        str_copy(s_stats_projects, tuple_str(iterator, KEY_STATS_TEXT, ""), STATS_TEXT_CAP);
+        s_stats_have_data = true;
+        stats_render();
+      }
       break;
     }
     case MSG_UPCOMING_DATA: {
-      if (s_page_mode == PAGE_UPCOMING) {
-        str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), sizeof(s_upcoming_text));
+      if (s_upcoming_text && s_page_mode == PAGE_UPCOMING) {
+        str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), PAGE_TEXT_CAP);
         s_upcoming_have_data = true;
         upcoming_render(); // no-op if the window was closed before the reply landed
       }
       break;
     }
     case MSG_NOTESPAGE_DATA: {
-      if (s_page_mode == PAGE_NOTES) {
-        str_copy(s_upcoming_text, tuple_str(iterator, KEY_NOTESPAGE_TEXT, ""), sizeof(s_upcoming_text));
+      if (s_upcoming_text && s_page_mode == PAGE_NOTES) {
+        str_copy(s_upcoming_text, tuple_str(iterator, KEY_NOTESPAGE_TEXT, ""), PAGE_TEXT_CAP);
         s_upcoming_have_data = true;
         upcoming_render();
       }
@@ -6989,7 +6999,7 @@ static int16_t stats_draw_metric(GContext *ctx, int16_t y, int16_t w,
 static void stats_text_line_counts(int *label_lines, int *text_lines) {
   *label_lines = 0;
   *text_lines = 0;
-  if (s_stats_projects[0] == '\0') {
+  if (!s_stats_projects || s_stats_projects[0] == '\0') {
     *text_lines = 1;
     return;
   }
@@ -7075,7 +7085,7 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
 
   graphics_context_set_text_color(ctx, GColorBlack);
   GFont line_font = fonts_get_system_font(STATS_LINE_FONT);
-  if (s_stats_projects[0] == '\0') {
+  if (!s_stats_projects || s_stats_projects[0] == '\0') {
     graphics_draw_text(ctx, "None", line_font,
                         GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LINE_H),
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
@@ -7157,6 +7167,14 @@ static void stats_window_load(Window *window) {
   Layer *window_layer;
   s_stats_content_bounds = window_chrome(window, &s_stats_status_bar, &window_layer);
 
+  // Heap-backed text buffer, alive only for this window (see its declaration).
+  free(s_stats_projects);
+  s_stats_projects = malloc(STATS_TEXT_CAP);
+  if (s_stats_projects) {
+    s_stats_projects[0] = '\0';
+  }
+  s_stats_have_data = false;
+
   s_stats_scroll_layer = scroll_layer_create(s_stats_content_bounds);
   scroll_layer_set_content_size(s_stats_scroll_layer, s_stats_content_bounds.size);
   scroll_layer_set_click_config_onto_window(s_stats_scroll_layer, window);
@@ -7182,6 +7200,9 @@ static void stats_window_unload(Window *window) {
   s_stats_scroll_layer = NULL;
   status_bar_layer_destroy(s_stats_status_bar);
   s_stats_status_bar = NULL;
+  free(s_stats_projects);
+  s_stats_projects = NULL;
+  s_stats_have_data = false;
 }
 
 // Created once and reused, like push_notes_window. Keeps whatever data the
@@ -7212,6 +7233,9 @@ static GRect s_upcoming_content_bounds;
 
 static int16_t upcoming_content_height(void) {
   int16_t h = 8;
+  if (!s_upcoming_text) {
+    return h;
+  }
   const char *p = s_upcoming_text;
   bool at_line_start = true;
   for (; *p; p++) {
@@ -7228,7 +7252,7 @@ static void upcoming_content_update_proc(Layer *layer, GContext *ctx) {
   int16_t w = b.size.w;
   fill_bg(ctx, b, GColorWhite);
 
-  if (!s_upcoming_have_data || s_upcoming_text[0] == '\0') {
+  if (!s_upcoming_have_data || !s_upcoming_text || s_upcoming_text[0] == '\0') {
     graphics_context_set_text_color(ctx, GColorBlack);
     const char *empty = s_page_mode == PAGE_NOTES ? "No pinned notes" : "Nothing scheduled";
     draw_text(ctx, s_upcoming_have_data ? empty : "Loading…", STATS_LINE_FONT,
@@ -7287,6 +7311,12 @@ static void request_upcoming(void) {
 
 static void upcoming_window_load(Window *window) {
   Layer *window_layer;
+  free(s_upcoming_text);
+  s_upcoming_text = malloc(PAGE_TEXT_CAP);
+  if (s_upcoming_text) {
+    s_upcoming_text[0] = '\0';
+  }
+  s_upcoming_have_data = false;
   s_upcoming_content_bounds = window_chrome(window, &s_upcoming_status_bar, &window_layer);
   s_upcoming_scroll_layer = scroll_layer_create(s_upcoming_content_bounds);
   scroll_layer_set_content_size(s_upcoming_scroll_layer, s_upcoming_content_bounds.size);
@@ -7306,12 +7336,13 @@ static void upcoming_window_unload(Window *window) {
   s_upcoming_scroll_layer = NULL;
   status_bar_layer_destroy(s_upcoming_status_bar);
   s_upcoming_status_bar = NULL;
+  free(s_upcoming_text);
+  s_upcoming_text = NULL;
+  s_upcoming_have_data = false;
 }
 
 static void push_page_window(PageMode mode) {
-  s_page_mode = mode;
-  s_upcoming_have_data = false; // don't flash the other page's stale list
-  s_upcoming_text[0] = '\0';
+  s_page_mode = mode; // window_load allocs + clears s_upcoming_text
   if (!s_upcoming_window) {
     s_upcoming_window = window_create();
     window_set_window_handlers(s_upcoming_window, (WindowHandlers) {
