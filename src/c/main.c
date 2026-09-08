@@ -30,6 +30,7 @@
 #define KEY_HABIT_DELTA MESSAGE_KEY_HABIT_DELTA
 #define KEY_HABIT_TYPE MESSAGE_KEY_HABIT_TYPE
 #define KEY_HABIT_COUNTDOWN_MS MESSAGE_KEY_HABIT_COUNTDOWN_MS
+#define KEY_HABIT_STREAK MESSAGE_KEY_HABIT_STREAK
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
 #define KEY_BACKLIGHT_MODE MESSAGE_KEY_BACKLIGHT_MODE
@@ -312,6 +313,9 @@ typedef struct {
   // Countdown length in ms for an is_countdown counter (0 otherwise). Only used
   // by the countdown-timer machinery, itself aplite-excluded.
   int countdown_ms;
+  // Consecutive days (back from today, or yesterday if today's not met yet) the
+  // count reached its goal. 0 = none; the phone omits the key then.
+  int streak;
 #endif
 } Habit;
 
@@ -4155,6 +4159,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habits[idx].is_stopwatch = habit_type == 1;
       s_habits[idx].is_countdown = habit_type == 2;
       s_habits[idx].countdown_ms = tuple_int(iterator, KEY_HABIT_COUNTDOWN_MS, 0);
+      s_habits[idx].streak = tuple_int(iterator, KEY_HABIT_STREAK, 0);
 #endif
       break;
     }
@@ -4859,7 +4864,28 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - SUBTITLE_STRIP_H,
                               bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
 #endif
-  draw_text(ctx, subtitle, SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  GRect left_sub = subtitle_box;
+#ifndef PBL_PLATFORM_APLITE
+  // Consecutive-days streak, right-aligned on the subtitle line. Only from 2 -
+  // "1 streak" reads oddly and a single day isn't much of a streak.
+  if (habit->streak >= 2) {
+    char st[16];
+    snprintf(st, sizeof(st), "%d streak", habit->streak);
+    GFont sf = fonts_get_system_font(FONT_KEY_GOTHIC_14);
+    GSize ss = graphics_text_layout_get_content_size(
+        st, sf, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentRight);
+    int16_t sw = ss.w;
+    if (sw > subtitle_box.size.w / 2) {
+      sw = subtitle_box.size.w / 2;
+    }
+    graphics_draw_text(ctx, st, sf,
+        GRect(subtitle_box.origin.x + subtitle_box.size.w - sw, subtitle_box.origin.y + 2,
+              sw, subtitle_box.size.h - 2),
+        GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+    left_sub.size.w -= (sw + 4);
+  }
+#endif
+  draw_text(ctx, subtitle, SUBTITLE_FONT_KEY, left_sub, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
 }
 
 // Select +1, long-select -1 (never below 0). The phone applies the delta to its

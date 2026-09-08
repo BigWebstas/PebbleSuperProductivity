@@ -642,6 +642,9 @@ function sendHabitAt(habits, index) {
   if (h.isCountdown && h.countdownMs) {
     dict.HABIT_COUNTDOWN_MS = Math.min(h.countdownMs, 2000000000);
   }
+  if (h.streak) {
+    dict.HABIT_STREAK = Math.min(h.streak, 9999);
+  }
   sendWithRetry(dict, function () {
     sendHabitAt(habits, index + 1);
   }, function (e) {

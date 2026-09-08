@@ -1429,6 +1429,28 @@ function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId
 // blocks, since a habit's position jumping around as soon as it crosses its
 // goal for the day makes a specific habit harder to find at a glance than a
 // fixed alphabetical spot does.
+// How many consecutive days up to and including today (or up to yesterday, if
+// today's goal isn't met yet) this counter hit its goal. countOnDay is keyed
+// by local date string; a missing/short day breaks the run. Capped at a year's
+// scan so a pathological history can't spin.
+function habitStreak(c, goal) {
+  var on = (c && c.countOnDay) || {};
+  var d = new Date();
+  if (((on[dateToDateStr(d)]) || 0) < goal) {
+    d.setDate(d.getDate() - 1); // today not done yet - count the run behind it
+  }
+  var n = 0;
+  for (var i = 0; i < 366; i++) {
+    if (((on[dateToDateStr(d)]) || 0) >= goal) {
+      n++;
+      d.setDate(d.getDate() - 1);
+    } else {
+      break;
+    }
+  }
+  return n;
+}
+
 function getActiveHabits(state, limit) {
   var counters = state.simpleCounter || {};
   var today = todayStr();
@@ -1448,6 +1470,7 @@ function getActiveHabits(state, limit) {
         isStopwatch: c.type === 'StopWatch',
         isCountdown: isCountdown,
         countdownMs: isCountdown ? (c.countdownDuration || 0) : 0,
+        streak: habitStreak(c, goal),
       };
     });
   rows.sort(function (a, b) { return titleCompare(a.title, b.title); });

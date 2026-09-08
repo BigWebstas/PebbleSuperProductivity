@@ -1125,7 +1125,7 @@ check('getActiveHabits includes an enabled click-counter, not done below goal', 
     state
   );
   const rows = habits(state);
-  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, isStopwatch: false, isCountdown: false, countdownMs: 0 }]);
+  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, isStopwatch: false, isCountdown: false, countdownMs: 0, streak: 0 }]);
 });
 
 check('getActiveHabits marks done once today\'s count reaches goal', () => {
@@ -1226,6 +1226,32 @@ check('getActiveHabits defaults countdownMs to 0 for a ClickCounter/StopWatch ro
   const rows = habits(state);
   assert.strictEqual(rows.find((r) => r.id === 'h1').countdownMs, 0);
   assert.strictEqual(rows.find((r) => r.id === 'h2').countdownMs, 0);
+});
+
+check('getActiveHabits streak counts consecutive goal-met days, unbroken through today', () => {
+  const dayStr = (n) => {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    return store.dateToDateStr(d);
+  };
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      // met today, yesterday, 2 days ago; missed 3 days ago -> streak 3
+      addCounter({ id: 'h1', title: 'Run', isEnabled: true, type: 'ClickCounter', streakMinValue: 2,
+        countOnDay: { [dayStr(0)]: 2, [dayStr(1)]: 5, [dayStr(2)]: 2, [dayStr(3)]: 1, [dayStr(4)]: 9 } }),
+      // today not met yet, but yesterday + day before were -> streak 2 (counts behind today)
+      addCounter({ id: 'h2', title: 'Read', isEnabled: true, type: 'ClickCounter', streakMinValue: 1,
+        countOnDay: { [dayStr(1)]: 1, [dayStr(2)]: 1 } }),
+      // nothing -> streak 0
+      addCounter({ id: 'h3', title: 'New', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: {} }),
+    ],
+    state
+  );
+  const rows = habits(state);
+  assert.strictEqual(rows.find((r) => r.id === 'h1').streak, 3);
+  assert.strictEqual(rows.find((r) => r.id === 'h2').streak, 2);
+  assert.strictEqual(rows.find((r) => r.id === 'h3').streak, 0);
 });
 
 check('getActiveHabits sorts plain alphabetically by title, done and not-done interleaved', () => {
