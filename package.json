@@ -170,7 +170,8 @@
       "PROJECT_TASK_COUNT",
       "TAGS_ENABLED",
       "IS_TAGS",
-      "TASK_DEADLINE_DAYS"
+      "TASK_DEADLINE_DAYS",
+      "TASK_RECURS"
     ]
   }
 }

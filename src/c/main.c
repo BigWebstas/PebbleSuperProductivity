@@ -39,6 +39,7 @@
 #define KEY_TASK_PROJECT_ID MESSAGE_KEY_TASK_PROJECT_ID
 #define KEY_TASK_PROJECT_COLOR MESSAGE_KEY_TASK_PROJECT_COLOR
 #define KEY_TASK_DEADLINE_DAYS MESSAGE_KEY_TASK_DEADLINE_DAYS
+#define KEY_TASK_RECURS MESSAGE_KEY_TASK_RECURS
 #define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
 #define KEY_PROJECT_INDEX MESSAGE_KEY_PROJECT_INDEX
 #define KEY_PROJECT_TITLE MESSAGE_KEY_PROJECT_TITLE
@@ -240,6 +241,7 @@ typedef struct {
   char tags[MAX_TASK_TAGS_LEN];
 #endif
   bool done;
+  bool recurs; // has a repeat config - draws a small ↻ glyph on the row
 #if TODAY_PROJECT_SWATCH
   // Packed GColor8 byte for this task's project's theme-colour swatch (0 =
   // none). Sits in the padding after `done`, costing the double-buffered
@@ -2176,6 +2178,19 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
   GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, title_box_h, SUBTITLE_STRIP_H),
                            bounds.size.w - TITLE_BOX_X * 2, title_box_h);
 
+  // Recurring-task glyph on the right of the title line: an open circle-arrow.
+  // The title box shrinks to leave room so its ellipsis clears the glyph.
+  if (task->recurs && !needs_marquee) {
+    int16_t gx = bounds.size.w - TITLE_BOX_X - 12;
+    int16_t gy = title_box.origin.y + title_box.size.h / 2;
+    graphics_context_set_stroke_color(ctx, fg);
+    graphics_draw_arc(ctx, GRect(gx, gy - 5, 11, 11), GOvalScaleModeFitCircle,
+                      DEG_TO_TRIGANGLE(35), DEG_TO_TRIGANGLE(330));
+    graphics_draw_line(ctx, GPoint(gx + 9, gy - 5), GPoint(gx + 12, gy - 2));
+    graphics_draw_line(ctx, GPoint(gx + 9, gy - 5), GPoint(gx + 6, gy - 3));
+    title_box.size.w -= 16;
+  }
+
   if (needs_marquee) {
     int16_t period = natural_width + SCROLL_GAP_PX;
     int16_t x = -(s_scroll_offset_px % period);
@@ -3952,6 +3967,7 @@ static void parse_common_task_fields(DictionaryIterator *it, Task *dst,
   dst->time_spent_ms = tuple_int(it, KEY_TASK_TIME_SPENT_MS, 0);
   dst->time_estimate_ms = tuple_int(it, KEY_TASK_TIME_ESTIMATE_MS, 0);
   dst->deadline_days = tuple_int(it, KEY_TASK_DEADLINE_DAYS, DEADLINE_NONE);
+  dst->recurs = tuple_int(it, KEY_TASK_RECURS, 0) != 0;
 }
 
 static void inbox_received_handler(DictionaryIterator *iterator, void *context) {

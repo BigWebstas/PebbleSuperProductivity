@@ -569,6 +569,9 @@ function fillTaskFields(dict, t) {
     // watch defaults the field to its DEADLINE_NONE sentinel.
     dict.TASK_DEADLINE_DAYS = Math.max(-999, Math.min(999, t.deadlineDays));
   }
+  if (t.recurs) {
+    dict.TASK_RECURS = 1; // has a repeat config - the watch draws a ↻ glyph
+  }
   if (t.timeSpent) {
     // AppMessage ints are 32-bit signed - cap well under the ~24.8 days
     // that would overflow, rather than let a very-long-lived task's total

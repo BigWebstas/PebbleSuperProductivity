@@ -1391,6 +1391,20 @@ check('getActiveTasks: deadlineDays is whole days from today, negative when over
   assert.strictEqual(tasks.find((t) => t.id === 'd').deadlineDays, undefined);
 });
 
+check('getActiveTasks: recurs is 1 for a task with a repeatCfgId, absent otherwise', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'r', title: 'Water plants', isDone: false, repeatCfgId: 'cfg1' }),
+      addTask({ id: 'o', title: 'One-off', isDone: false }),
+    ],
+    state
+  );
+  const tasks = active(state);
+  assert.strictEqual(tasks.find((t) => t.id === 'r').recurs, 1);
+  assert.strictEqual(tasks.find((t) => t.id === 'o').recurs, undefined);
+});
+
 check('getActiveTasks resolves a task\'s tagIds to joined tag titles', () => {
   const state = store.emptyState();
   store.applyOperations(
