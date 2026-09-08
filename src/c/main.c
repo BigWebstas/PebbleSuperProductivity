@@ -2265,11 +2265,12 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
 
     if (kind == SECTION0_ROW_TAGS) {
-      // Opens the Tags page (Projects browser reused in BROWSE_TAGS mode).
-      // Limerick (dark gold) - distinct from every other section-0 row. A "#"
-      // hash glyph on the right, from primitives, black / white on select.
+      // Opens the Tags page (Projects browser reused in BROWSE_TAGS mode). Mint
+      // green - distinct from every other section-0 row (the old Limerick read
+      // as the same yellow as the Schedule row). Darkens to JaegerGreen with
+      // white text on select. A "#" hash glyph on the right, from primitives.
       GColor icon = is_selected ? GColorWhite : GColorBlack;
-      fill_bg(ctx, bounds, GColorLimerick);
+      fill_bg(ctx, bounds, is_selected ? GColorJaegerGreen : GColorMintGreen);
       graphics_context_set_text_color(ctx, icon);
       GRect tags_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                     bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
@@ -4947,10 +4948,10 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     // Green with bold black text - the same treatment the today view gives a
     // project group header (menu_draw_header). The selected row darkens with
     // white text so it stands out (a bare text-colour flip on the bright fill
-    // barely read). Tags mode uses the Limerick of its nav row instead of green.
+    // barely read). Tags mode uses the mint green of its nav row.
 #ifndef PBL_PLATFORM_APLITE
     if (s_browse_mode == BROWSE_TAGS) {
-      fill_bg(ctx, bounds, is_selected ? GColorArmyGreen : GColorLimerick);
+      fill_bg(ctx, bounds, is_selected ? GColorJaegerGreen : GColorMintGreen);
     } else
 #endif
     {
