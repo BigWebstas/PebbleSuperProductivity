@@ -1709,15 +1709,15 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   }
 #ifndef PBL_PLATFORM_APLITE
   // The pinned tracking header - a thin green strip. Bold (CHROME_FONT_BOLD_KEY,
-  // same point size as CHROME_FONT_KEY) and title-case so it reads at a glance.
-  // While THIS watch is the one tracking, the word sweeps gently left<->right
-  // across the strip to catch the eye; a remote presence session leaves it
-  // static, left-aligned.
+  // same point size as CHROME_FONT_KEY) so it reads at a glance. While THIS
+  // watch is the one tracking, the word sweeps gently left<->right across the
+  // strip to catch the eye; a remote presence session leaves it static,
+  // left-aligned.
   if (has_pinned_row() && section_index == 1) {
     GRect hb = layer_get_bounds(cell_layer);
     fill_bg(ctx, hb, GColorGreen);
     graphics_context_set_text_color(ctx, GColorBlack);
-    const char *label = focus_active() ? "Focusing" : "Tracking";
+    const char *label = focus_active() ? "FOCUSING" : "TRACKING";
     GFont label_font = fonts_get_system_font(CHROME_FONT_BOLD_KEY);
     int16_t avail = hb.size.w - TITLE_BOX_X * 2;
     int16_t word_w = title_natural_width_font(label, label_font);
