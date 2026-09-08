@@ -1416,6 +1416,7 @@ typedef enum { PICK_ESTIMATE, PICK_DEADLINE, PICK_HABIT } PickKind;
 // task_id is a habit id for PICK_HABIT. current: ms (estimate) / days-from-today
 // or DEADLINE_NONE (deadline) / the counter's value (habit).
 static void push_value_picker(PickKind kind, const char *task_id, int current);
+static void push_action_menu(const char *task_id);
 static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
@@ -3327,9 +3328,9 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
 #endif
 }
 
-// Long-select toggles time tracking on the highlighted task. One task at a
-// time, so starting a new one first stops-and-reports the previous - mirrors
-// the real app's single global "current task".
+// Long-select on a task row opens its action menu (non-aplite) - track, notes,
+// tags, estimate, deadline. aplite has no menu window budget, so there it's the
+// plain track toggle it always was.
 static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
   // No s_notes_overlay_active check - note-append is wired on s_notes_window's
@@ -3354,8 +3355,14 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
   }
 #endif
   Task *task = resolve_task_at(*cell_index);
-  if (!task || task->done) {
-    return; // tracking a completed task isn't a real scenario - just ignore it
+  if (!task) {
+    return;
+  }
+#ifndef PBL_PLATFORM_APLITE
+  push_action_menu(task->id);
+#else
+  if (task->done) {
+    return; // tracking a completed task isn't a real scenario
   }
   bool already_tracking_this = s_tracking_task_id[0] != '\0' &&
                                 strncmp(s_tracking_task_id, task->id, MAX_ID_LEN) == 0;
@@ -3364,6 +3371,7 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
     start_tracking(task);
   }
   menu_layer_reload_data(s_menu_layer);
+#endif
 }
 
 // ---------- empty / status placeholder ----------
@@ -5444,19 +5452,6 @@ static void push_browse_window(const char *jump_to_project) {
 // Select dismisses the notes window; Back also does, for free, via Pebble's
 // default pop behavior.
 static void notes_window_select_click_handler(ClickRecognizerRef recognizer, void *context) {
-#if PROJECTS_BROWSER
-  // On a TASK's notes, Select opens the tag editor (the tags are shown right at
-  // the top of this screen). Back still just dismisses. A project has no tags.
-  if (!s_notes_overlay_is_project) {
-    char id[MAX_ID_LEN];
-    str_copy(id, s_notes_overlay_subject_id, sizeof(id));
-    hide_notes_overlay();
-    s_browse_mode = BROWSE_TAG_EDIT;
-    str_copy(s_browse_edit_task_id, id, sizeof(s_browse_edit_task_id));
-    push_browse_window(NULL);
-    return;
-  }
-#endif
   hide_notes_overlay();
 }
 
@@ -5666,30 +5661,14 @@ static void apply_touch_nav(void) {
 }
 #endif  // PBL_TOUCH
 
-// Long-Up / long-Down on a task's notes overlay open the value picker (estimate
-// / deadline). Up/Down are the ScrollLayer's single-click scroll; a long hold
-// is free.
-static void notes_pick_long_click_handler(ClickRecognizerRef recognizer, void *context) {
-  if (s_notes_overlay_is_project) {
-    return; // a project has neither an estimate nor a deadline
-  }
-  backlight_touch();
-  Task *t = find_task_by_id(s_notes_overlay_subject_id);
-  if (click_recognizer_get_button_id(recognizer) == BUTTON_ID_UP) {
-    push_value_picker(PICK_ESTIMATE, s_notes_overlay_subject_id, t ? t->time_estimate_ms : 0);
-  } else {
-    push_value_picker(PICK_DEADLINE, s_notes_overlay_subject_id, t ? t->deadline_days : DEADLINE_NONE);
-  }
-}
-
 // Installed onto the ScrollLayer (not the window) via
 // scroll_layer_set_click_config_onto_window, which wires UP/DOWN to scrolling
 // then calls this for SELECT. On touch builds the bridge also scrolls by finger.
+// Estimate / deadline / tags live in the task action menu (long-Select a task
+// row), not on hidden gestures here.
 static void notes_window_click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_SELECT, notes_window_select_click_handler);
   window_long_click_subscribe(BUTTON_ID_SELECT, 0, notes_window_select_long_click_handler, NULL);
-  window_long_click_subscribe(BUTTON_ID_UP, 0, notes_pick_long_click_handler, NULL);
-  window_long_click_subscribe(BUTTON_ID_DOWN, 0, notes_pick_long_click_handler, NULL);
 }
 
 // Fills the layer with NOTES_TAGS_BG_COLOR and draws the bold "Tags:" label
@@ -5988,6 +5967,113 @@ static void push_value_picker(PickKind kind, const char *task_id, int current) {
     });
   }
   window_stack_push(s_pick_window, true);
+}
+
+// ---------- per-task action menu ----------
+// Long-Select on a today-list task row opens this. Consolidates what used to be
+// scattered across cryptic gestures (track, tags, estimate, deadline) plus a
+// way into notes. Each row pops this menu, then launches its target - so Back
+// from the target returns to the list.
+enum { ACT_TRACK, ACT_NOTES, ACT_TAGS, ACT_ESTIMATE, ACT_DEADLINE, ACT_COUNT };
+static Window *s_action_window = NULL;
+static MenuLayer *s_action_menu = NULL;
+static StatusBarLayer *s_action_status_bar = NULL;
+static char s_action_task_id[MAX_ID_LEN] = "";
+
+static bool action_task_is_tracked(void) {
+  return s_tracking_task_id[0] != '\0' &&
+         strncmp(s_tracking_task_id, s_action_task_id, MAX_ID_LEN) == 0;
+}
+
+static uint16_t action_get_num_rows(MenuLayer *ml, uint16_t section, void *ctx) {
+  return ACT_COUNT;
+}
+
+static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, void *c) {
+  const char *label = "";
+  switch (idx->row) {
+    case ACT_TRACK:    label = action_task_is_tracked() ? "Stop tracking" : "Start tracking"; break;
+    case ACT_NOTES:    label = "Notes"; break;
+    case ACT_TAGS:     label = "Edit tags"; break;
+    case ACT_ESTIMATE: label = "Set estimate"; break;
+    case ACT_DEADLINE: label = "Set deadline"; break;
+  }
+  menu_cell_basic_draw(ctx, cell, label, NULL, NULL);
+}
+
+static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
+  backlight_touch();
+  uint16_t row = idx->row;
+  Task *t = find_task_by_id(s_action_task_id);
+  window_stack_pop(true); // close the menu; targets push onto the list below it
+  switch (row) {
+    case ACT_TRACK:
+      if (!t) {
+        break;
+      }
+      {
+        bool was = action_task_is_tracked();
+        stop_tracking_and_report();
+        if (!was) {
+          start_tracking(t);
+        }
+        menu_layer_reload_data(s_menu_layer);
+      }
+      break;
+    case ACT_NOTES:
+      if (t) {
+        show_notes_overlay(t);
+      }
+      break;
+    case ACT_TAGS:
+#if PROJECTS_BROWSER
+      s_browse_mode = BROWSE_TAG_EDIT;
+      str_copy(s_browse_edit_task_id, s_action_task_id, sizeof(s_browse_edit_task_id));
+      push_browse_window(NULL);
+#endif
+      break;
+    case ACT_ESTIMATE:
+      push_value_picker(PICK_ESTIMATE, s_action_task_id, t ? t->time_estimate_ms : 0);
+      break;
+    case ACT_DEADLINE:
+      push_value_picker(PICK_DEADLINE, s_action_task_id, t ? t->deadline_days : DEADLINE_NONE);
+      break;
+  }
+}
+
+static void action_window_load(Window *window) {
+  Layer *wl;
+  GRect content = window_chrome(window, &s_action_status_bar, &wl);
+  s_action_menu = menu_layer_create(content);
+  menu_layer_set_callbacks(s_action_menu, NULL, (MenuLayerCallbacks) {
+    .get_num_rows = action_get_num_rows,
+    .draw_row = action_draw_row,
+    .select_click = action_select,
+  });
+  menu_layer_set_click_config_onto_window(s_action_menu, window);
+  layer_add_child(wl, menu_layer_get_layer(s_action_menu));
+}
+
+static void action_window_unload(Window *window) {
+  menu_layer_destroy(s_action_menu);
+  s_action_menu = NULL;
+  status_bar_layer_destroy(s_action_status_bar);
+  s_action_status_bar = NULL;
+}
+
+static void push_action_menu(const char *task_id) {
+  if (!task_id || task_id[0] == '\0') {
+    return;
+  }
+  str_copy(s_action_task_id, task_id, sizeof(s_action_task_id));
+  if (!s_action_window) {
+    s_action_window = window_create();
+    window_set_window_handlers(s_action_window, (WindowHandlers) {
+      .load = action_window_load,
+      .unload = action_window_unload,
+    });
+  }
+  window_stack_push(s_action_window, true);
 }
 #endif
 
