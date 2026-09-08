@@ -570,6 +570,15 @@ typedef enum {
 static AppTimer *s_pending_reschedule_timer = NULL;
 static char s_pending_reschedule_task_id[MAX_ID_LEN] = "";
 static RescheduleKind s_pending_reschedule_kind = RESCHEDULE_NONE;
+// Frame ticks (one per scroll_timer_callback, SCROLL_INTERVAL_MS apart) since
+// the pending-reschedule window opened - drives the shrinking countdown bar
+// under its subtitle. Also: the row index + tick count for the check that
+// strokes itself onto a task the moment it commits to done. Both keep the
+// scroll timer alive via refresh_scroll_state.
+static int s_pending_reschedule_tick = 0;
+#define DONE_CHECK_MS 500
+static int s_done_check_idx = -1;
+static int s_done_check_tick = 0;
 // Set when the gesture came from the Projects browser task view - the phone
 // uses it to move a scheduled backlog task into the regular list and re-push
 // that view. Empty for a today-list reschedule.
@@ -2221,7 +2230,25 @@ static const char *presence_state_phrase(void) {
 
 static void scroll_timer_callback(void *data) {
   s_scroll_offset_px += SCROLL_STEP_PX;
+#ifndef PBL_PLATFORM_APLITE
+  if (s_pending_reschedule_kind != RESCHEDULE_NONE) {
+    s_pending_reschedule_tick++;
+  }
+  if (s_done_check_idx >= 0) {
+    s_done_check_tick++;
+    if (s_done_check_tick * SCROLL_INTERVAL_MS >= DONE_CHECK_MS + 400) {
+      s_done_check_idx = -1; // full check drawn, then a short hold, then gone
+    }
+  }
+#endif
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
+#if PROJECTS_BROWSER
+  // A pending reschedule started from the browser task view animates its bar
+  // there, not on the today list.
+  if (s_browse_menu && s_pending_reschedule_kind != RESCHEDULE_NONE) {
+    layer_mark_dirty(menu_layer_get_layer(s_browse_menu));
+  }
+#endif
   s_scroll_timer = app_timer_register(SCROLL_INTERVAL_MS, scroll_timer_callback, NULL);
 }
 
@@ -2316,6 +2343,10 @@ static void refresh_scroll_state(bool reset_offset) {
   int16_t available = menu_bounds.size.w - TITLE_BOX_X * 2;
   bool needs_scroll = selected && title_natural_width(selected->title) > available;
 #ifndef PBL_PLATFORM_APLITE
+  // Keep the repaint timer alive while a transient row animation is running.
+  if (s_pending_reschedule_kind != RESCHEDULE_NONE || s_done_check_idx >= 0) {
+    needs_scroll = true;
+  }
   if (!needs_scroll && selected && !selected->done) {
     char sub[56];
     build_task_subtitle(selected, sub, sizeof(sub));
@@ -2458,12 +2489,58 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
                               : s_pending_reschedule_kind == RESCHEDULE_FROM_BACKLOG ? "Moving to list..."
                               : "Un-Scheduling...";
     draw_text(ctx, pending_msg, SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+    // A thin bar under the message, centre-anchored, that shrinks as the 3s
+    // cancel window runs out - a visible countdown to the commit.
+    int rs_rem_ms = RESCHEDULE_WINDOW_MS - s_pending_reschedule_tick * SCROLL_INTERVAL_MS;
+    if (rs_rem_ms < 0) {
+      rs_rem_ms = 0;
+    }
+    int rs_full_w = subtitle_box.size.w;
+    int rs_bar_w = rs_full_w * rs_rem_ms / RESCHEDULE_WINDOW_MS;
+    graphics_context_set_fill_color(ctx, fg);
+    graphics_fill_rect(ctx,
+                       GRect(subtitle_box.origin.x + (rs_full_w - rs_bar_w) / 2,
+                             subtitle_box.origin.y + subtitle_box.size.h - 3, rs_bar_w, 2),
+                       0, GCornerNone);
     return;
   }
 #endif
 
   if (task->done) {
     draw_text(ctx, "Done", SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+#ifndef PBL_PLATFORM_APLITE
+    // Freshly committed to done: stroke a checkmark onto the title-line right
+    // over DONE_CHECK_MS, then a brief hold, then gone (s_done_check_idx is
+    // cleared by scroll_timer_callback).
+    if (s_done_check_idx >= 0 && task >= s_tasks && task < s_tasks + MAX_TASKS &&
+        (int)(task - s_tasks) == s_done_check_idx) {
+      int dc_ms = s_done_check_tick * SCROLL_INTERVAL_MS;
+      int cx = bounds.size.w - TITLE_BOX_X - 12;
+      int cy = title_box.origin.y + title_box.size.h / 2;
+      GPoint dc_start = GPoint(cx - 4, cy);
+      GPoint dc_elbow = GPoint(cx, cy + 4);
+      GPoint dc_end = GPoint(cx + 8, cy - 7);
+      int dc_leg1 = DONE_CHECK_MS * 2 / 5; // short leg first, then the long one
+      graphics_context_set_stroke_color(ctx, fg);
+      graphics_context_set_stroke_width(ctx, 2);
+      if (dc_ms > 0 && dc_ms < dc_leg1) {
+        GPoint p = GPoint(dc_start.x + (dc_elbow.x - dc_start.x) * dc_ms / dc_leg1,
+                          dc_start.y + (dc_elbow.y - dc_start.y) * dc_ms / dc_leg1);
+        graphics_draw_line(ctx, dc_start, p);
+      } else if (dc_ms >= dc_leg1) {
+        graphics_draw_line(ctx, dc_start, dc_elbow);
+        int num = dc_ms - dc_leg1;
+        int den = DONE_CHECK_MS - dc_leg1;
+        if (num > den) {
+          num = den;
+        }
+        GPoint p = GPoint(dc_elbow.x + (dc_end.x - dc_elbow.x) * num / den,
+                          dc_elbow.y + (dc_end.y - dc_elbow.y) * num / den);
+        graphics_draw_line(ctx, dc_elbow, p);
+      }
+      graphics_context_set_stroke_width(ctx, 1);
+    }
+#endif
     return;
   }
 
@@ -4054,9 +4131,16 @@ static void pending_toggle_timer_callback(void *data) {
     return; // The list changed underneath the pending click - nothing to commit.
   }
   task->done = !task->done;
+#ifndef PBL_PLATFORM_APLITE
+  if (task->done && task >= s_tasks && task < s_tasks + MAX_TASKS) {
+    s_done_check_idx = (int)(task - s_tasks);
+    s_done_check_tick = 0;
+  }
+#endif
   save_tasks();
   menu_layer_reload_data(s_menu_layer);
   send_task_toggle(task);
+  refresh_scroll_state(false);
 }
 
 
@@ -4082,9 +4166,11 @@ static void cancel_pending_reschedule(void) {
     s_pending_reschedule_timer = NULL;
   }
   s_pending_reschedule_kind = RESCHEDULE_NONE;
+  s_pending_reschedule_tick = 0;
   s_pending_reschedule_task_id[0] = '\0';
   s_pending_reschedule_project_id[0] = '\0';
   reschedule_menus_reload();
+  refresh_scroll_state(false);
 }
 
 // Commits the pending reschedule once its cancel window passes. Sends by the
@@ -4099,8 +4185,10 @@ static void pending_reschedule_timer_callback(void *data) {
   }
   s_pending_reschedule_task_id[0] = '\0';
   s_pending_reschedule_project_id[0] = '\0';
+  s_pending_reschedule_tick = 0;
   // Drop the pending subtitle now; the phone's list push handles the rest.
   reschedule_menus_reload();
+  refresh_scroll_state(false);
 }
 
 // Starts (or replaces) the pending reschedule for the currently-selected task -
@@ -4151,10 +4239,12 @@ static void begin_pending_reschedule(RescheduleKind kind) {
   }
   str_copy(s_pending_reschedule_task_id, task_id, MAX_ID_LEN);
   s_pending_reschedule_kind = kind;
+  s_pending_reschedule_tick = 0;
   s_pending_reschedule_timer =
       app_timer_register(RESCHEDULE_WINDOW_MS, pending_reschedule_timer_callback, NULL);
   vibes_short_pulse();
   reschedule_menus_reload();
+  refresh_scroll_state(false);
 }
 
 // True if a NOTE_SYNC_* reply for id/is_project is about what the notes overlay
