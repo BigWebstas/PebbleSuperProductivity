@@ -287,6 +287,24 @@ check('[Planner] Transfer Task (drag reschedule in the Planner week view) sets d
   assert.deepStrictEqual(active(state, 30, false, true).map((t) => t.id), ['a']);
 });
 
+check('getActiveTasks issueKey: Jira key as-is, numeric issue as #N, opaque dropped', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Jira task', isDone: false, dueDay: today, issueId: 'PROJ-123', issueType: 'JIRA' }),
+      addTask({ id: 'b', title: 'GH task', isDone: false, dueDay: today, issueId: '42', issueType: 'GITHUB' }),
+      addTask({ id: 'c', title: 'CalDAV task', isDone: false, dueDay: today, issueId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890', issueType: 'CALDAV' }),
+      addTask({ id: 'd', title: 'Plain task', isDone: false, dueDay: today }),
+    ],
+    state
+  );
+  const rows = active(state, 30, false, true);
+  assert.strictEqual(rows.find((t) => t.id === 'a').issueKey, 'PROJ-123');
+  assert.strictEqual(rows.find((t) => t.id === 'b').issueKey, '#42');
+  assert.strictEqual(rows.find((t) => t.id === 'c').issueKey, undefined);
+  assert.strictEqual(rows.find((t) => t.id === 'd').issueKey, undefined);
+});
+
 check('getActiveTasks carries remindAt through to the watch row', () => {
   const state = store.emptyState();
   const noon = new Date(); noon.setHours(12, 0, 0, 0);

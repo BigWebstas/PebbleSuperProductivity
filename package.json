@@ -183,7 +183,8 @@
       "METRIC_ENERGY",
       "REFLECT_ENABLED",
       "METRIC_RATING",
-      "METRIC_REFLECT_TEXT"
+      "METRIC_REFLECT_TEXT",
+      "TASK_ISSUE_KEY"
     ]
   }
 }

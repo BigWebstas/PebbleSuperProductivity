@@ -601,6 +601,11 @@ function fillTaskFields(dict, t) {
   if (t.recurs) {
     dict.TASK_RECURS = 1; // has a repeat config - the watch draws a ↻ glyph
   }
+  if (t.issueKey) {
+    // Short issue-tracker key ("PROJ-123" / "#42"), drawn as a badge at the
+    // start of the task's subtitle line. Already length-capped by task-store.
+    dict.TASK_ISSUE_KEY = String(t.issueKey).slice(0, 13);
+  }
   if (t.timeSpent) {
     // AppMessage ints are 32-bit signed - cap well under the ~24.8 days
     // that would overflow, rather than let a very-long-lived task's total

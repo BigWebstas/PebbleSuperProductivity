@@ -16,6 +16,7 @@
 #define KEY_TASK_PROJECT MESSAGE_KEY_TASK_PROJECT
 #define KEY_TASK_DUE_MIN MESSAGE_KEY_TASK_DUE_MIN
 #define KEY_TASK_REMIND_MIN MESSAGE_KEY_TASK_REMIND_MIN
+#define KEY_TASK_ISSUE_KEY MESSAGE_KEY_TASK_ISSUE_KEY
 #define KEY_TASK_TIME_SPENT_MS MESSAGE_KEY_TASK_TIME_SPENT_MS
 #define KEY_TASK_TIME_ESTIMATE_MS MESSAGE_KEY_TASK_TIME_ESTIMATE_MS
 #define KEY_TRACKED_MS MESSAGE_KEY_TRACKED_MS
@@ -267,6 +268,9 @@ typedef struct {
   // Comma-joined tag names, '' if untagged - shown above the notes text in the
   // notes overlay. aplite-gated (no margin for another MAX_TASKS*2 field).
   char tags[MAX_TASK_TAGS_LEN];
+  // Short issue-tracker key ("PROJ-123" / "#42"), '' when the task isn't linked
+  // to an issue. Drawn as a badge at the start of the subtitle line.
+  char issue_key[14];
 #endif
   bool done;
   bool recurs; // has a repeat config - draws a small ↻ glyph on the row
@@ -2337,15 +2341,30 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
   }
 
   char subtitle[56] = "";
-  // Deadline marker first, so it stays visible when the line clips. "!" reads
-  // as urgency; overdue / today spelled out, else "! Nd".
+  // Issue-tracker key first ("PROJ-123" / "#42"), then the deadline marker -
+  // both stay visible when the line clips. Each later part appends with a
+  // separator only when something's already there.
+#ifndef PBL_PLATFORM_APLITE
+  if (task->issue_key[0] != '\0') {
+    str_copy(subtitle, task->issue_key, sizeof(subtitle));
+  }
+#endif
+  // Deadline marker. "!" reads as urgency; overdue / today spelled out, else
+  // "! Nd".
   if (task->deadline_days != DEADLINE_NONE) {
+    char dl_text[16];
     if (task->deadline_days < 0) {
-      str_copy(subtitle, "! overdue", sizeof(subtitle));
+      str_copy(dl_text, "! overdue", sizeof(dl_text));
     } else if (task->deadline_days == 0) {
-      str_copy(subtitle, "! today", sizeof(subtitle));
+      str_copy(dl_text, "! today", sizeof(dl_text));
     } else {
-      snprintf(subtitle, sizeof(subtitle), "! %dd", task->deadline_days);
+      snprintf(dl_text, sizeof(dl_text), "! %dd", task->deadline_days);
+    }
+    size_t dll = strlen(subtitle);
+    if (dll > 0) {
+      snprintf(subtitle + dll, sizeof(subtitle) - dll, "  %s", dl_text);
+    } else {
+      str_copy(subtitle, dl_text, sizeof(subtitle));
     }
   }
   if (task->due_min >= 0) {
@@ -4176,6 +4195,7 @@ static void parse_common_task_fields(DictionaryIterator *it, Task *dst,
 #ifndef PBL_PLATFORM_APLITE
   dst->remind_min = tuple_int(it, KEY_TASK_REMIND_MIN, -1);
   dst->remind_fired = false;
+  str_copy(dst->issue_key, tuple_str(it, KEY_TASK_ISSUE_KEY, ""), sizeof(dst->issue_key));
 #endif
 }
 
