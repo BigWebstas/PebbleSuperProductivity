@@ -1,5 +1,11 @@
 #include <pebble.h>
 
+#ifndef PBL_PLATFORM_APLITE
+// Generated: Material-icon-name -> bitmap resource table for the per-habit icon
+// on the Habits list. Regenerate with scripts/gen-habit-icons.py.
+#include "habit_icons.h"
+#endif
+
 // Keep in sync by hand with package.json "version" on every bump - no runtime
 // API exposes it to C.
 #define APP_VERSION "0.6.48"
@@ -33,6 +39,7 @@
 #define KEY_HABIT_STREAK MESSAGE_KEY_HABIT_STREAK
 #define KEY_HABIT_BEST_STREAK MESSAGE_KEY_HABIT_BEST_STREAK
 #define KEY_HABIT_STREAK_NUDGE MESSAGE_KEY_HABIT_STREAK_NUDGE
+#define KEY_HABIT_ICON MESSAGE_KEY_HABIT_ICON
 #define KEY_HABITS_ENABLED MESSAGE_KEY_HABITS_ENABLED
 #define KEY_ADD_TASK_ENABLED MESSAGE_KEY_ADD_TASK_ENABLED
 #define KEY_BACKLIGHT_MODE MESSAGE_KEY_BACKLIGHT_MODE
@@ -324,6 +331,10 @@ typedef struct {
   // Longest run of goal-met days ever, sent only when it beats `streak` (0
   // otherwise). Shown as "best N" - a target once the current streak lapses.
   int best_streak;
+  // Index into HABIT_ICONS[] for the habit's Material icon, or -1 when the
+  // habit has no icon or one the watch doesn't bundle. The GBitmap itself
+  // lives in the s_habit_icon_bmp parallel array (not persisted).
+  int8_t icon_idx;
 #endif
 } Habit;
 
@@ -337,6 +348,40 @@ static Habit s_habits[MAX_HABITS];
 #endif
 static int s_habit_count = 0;
 static int s_habit_incoming_total = 0;
+#ifndef PBL_PLATFORM_APLITE
+// Per-habit icon GBitmaps, indexed by s_habits slot. Rebuilt on each habit
+// sync (rebuild_habit_icons), freed there and at deinit. Kept out of the Habit
+// struct so the persisted habit cache stays pointer-free.
+static GBitmap *s_habit_icon_bmp[MAX_HABITS];
+
+// HABIT_ICONS[] lookup by Material icon name. Linear - the table is ~36 long
+// and this runs once per habit on sync, not per frame.
+static int8_t habit_icon_index(const char *name) {
+  if (!name || name[0] == '\0') {
+    return -1;
+  }
+  for (int i = 0; i < HABIT_ICON_COUNT; i++) {
+    if (strcmp(HABIT_ICONS[i].name, name) == 0) {
+      return (int8_t)i;
+    }
+  }
+  return -1;
+}
+
+static void rebuild_habit_icons(void) {
+  for (int i = 0; i < MAX_HABITS; i++) {
+    if (s_habit_icon_bmp[i]) {
+      gbitmap_destroy(s_habit_icon_bmp[i]);
+      s_habit_icon_bmp[i] = NULL;
+    }
+  }
+  for (int i = 0; i < s_habit_count && i < MAX_HABITS; i++) {
+    if (s_habits[i].icon_idx >= 0 && s_habits[i].icon_idx < HABIT_ICON_COUNT) {
+      s_habit_icon_bmp[i] = gbitmap_create_with_resource(HABIT_ICONS[s_habits[i].icon_idx].res);
+    }
+  }
+}
+#endif
 
 static Window *s_main_window;
 static MenuLayer *s_menu_layer;
@@ -1237,6 +1282,9 @@ static void clear_persisted_caches(void) {
 #endif
   s_task_count = 0;
   s_habit_count = 0;
+#ifndef PBL_PLATFORM_APLITE
+  rebuild_habit_icons(); // free the icon GBitmaps now the list is empty
+#endif
 }
 
 static const uint32_t PERSIST_KEY_TRACKING_ID = 110;
@@ -4247,12 +4295,16 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habits[idx].countdown_ms = tuple_int(iterator, KEY_HABIT_COUNTDOWN_MS, 0);
       s_habits[idx].streak = tuple_int(iterator, KEY_HABIT_STREAK, 0);
       s_habits[idx].best_streak = tuple_int(iterator, KEY_HABIT_BEST_STREAK, 0);
+      s_habits[idx].icon_idx = habit_icon_index(tuple_str(iterator, KEY_HABIT_ICON, NULL));
 #endif
       break;
     }
     case MSG_HABIT_SYNC_END: {
       s_habit_count = s_habit_incoming_total;
       save_habits();
+#ifndef PBL_PLATFORM_APLITE
+      rebuild_habit_icons();
+#endif
       if (s_habits_menu_layer) {
         menu_layer_reload_data(s_habits_menu_layer);
       }
@@ -4884,6 +4936,20 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   fill_bg(ctx, bounds, bg);
   graphics_context_set_text_color(ctx, fg);
 
+  // Per-habit Material icon on the left (synced from the desktop, mapped to a
+  // bundled bitmap in habit_icons.h). Present ones push the title / subtitle
+  // right by x_off; the right-aligned streak badge stays put.
+  int16_t x_off = 0;
+#ifndef PBL_PLATFORM_APLITE
+  int habit_slot = (int)(habit - s_habits);
+  if (habit_slot >= 0 && habit_slot < MAX_HABITS && s_habit_icon_bmp[habit_slot]) {
+    graphics_context_set_compositing_mode(ctx, GCompOpSet);
+    graphics_draw_bitmap_in_rect(ctx, s_habit_icon_bmp[habit_slot],
+                                 GRect(TITLE_BOX_X, (bounds.size.h - 20) / 2, 20, 20));
+    x_off = 24;
+  }
+#endif
+
   // Non-emery: the fixed 30px top-aligned title box, unchanged. Emery: a
   // measured, vertically-centred block matching draw_task_row.
 #ifdef PBL_PLATFORM_EMERY
@@ -4891,12 +4957,12 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   GSize habit_line = graphics_text_layout_get_content_size(
       "Ag", habit_title_font, GRect(0, 0, 200, 100), GTextOverflowModeFill, GTextAlignmentLeft);
   int16_t habit_title_h = habit_line.h > 0 ? habit_line.h : HEADING_TITLE_H;
-  GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
-                           bounds.size.w - TITLE_BOX_X * 2, habit_title_h);
+  GRect title_box = GRect(TITLE_BOX_X + x_off, ROW_TITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
+                           bounds.size.w - TITLE_BOX_X * 2 - x_off, habit_title_h);
   graphics_draw_text(ctx, habit->title, habit_title_font, title_box,
                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 #else
-  GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
+  GRect title_box = GRect(TITLE_BOX_X + x_off, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2 - x_off, 30);
   draw_text(ctx, habit->title, TITLE_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
 #endif
 
@@ -4957,12 +5023,15 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   } else {
     snprintf(subtitle, sizeof(subtitle), "%d/%d", habit->value, habit->goal);
   }
+  // Shifted by x_off like the title so "value/goal" sits under it, not under
+  // the icon; width shrinks by the same so the right-aligned badge keeps its
+  // place at the row edge.
 #ifdef PBL_PLATFORM_EMERY
-  GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
-                              bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
+  GRect subtitle_box = GRect(TITLE_BOX_X + x_off, ROW_SUBTITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
+                              bounds.size.w - TITLE_BOX_X * 2 - x_off, SUBTITLE_STRIP_H);
 #else
-  GRect subtitle_box = GRect(TITLE_BOX_X, bounds.size.h - SUBTITLE_STRIP_H,
-                              bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
+  GRect subtitle_box = GRect(TITLE_BOX_X + x_off, bounds.size.h - SUBTITLE_STRIP_H,
+                              bounds.size.w - TITLE_BOX_X * 2 - x_off, SUBTITLE_STRIP_H);
 #endif
   GRect left_sub = subtitle_box;
 #ifndef PBL_PLATFORM_APLITE
@@ -7423,6 +7492,9 @@ static void window_unload(Window *window) {
   gbitmap_destroy(s_stats_white_bitmap);
   gbitmap_destroy(s_inbox_bitmap);
   gbitmap_destroy(s_inbox_white_bitmap);
+  for (int i = 0; i < MAX_HABITS; i++) {
+    gbitmap_destroy(s_habit_icon_bmp[i]);
+  }
 #endif
 #ifndef PBL_PLATFORM_APLITE
   dictation_session_destroy(s_dictation_session);
@@ -7598,6 +7670,7 @@ static void init(void) {
   load_habits();
   load_tracking();
 #ifndef PBL_PLATFORM_APLITE
+  rebuild_habit_icons(); // icon_idx is persisted; the GBitmaps are not
   load_habit_tracking();
   load_focus();
   // Drop a stale session: focus needs a live local track, and a session

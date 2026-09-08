@@ -1125,7 +1125,21 @@ check('getActiveHabits includes an enabled click-counter, not done below goal', 
     state
   );
   const rows = habits(state);
-  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, isStopwatch: false, isCountdown: false, countdownMs: 0, streak: 0, bestStreak: 0 }]);
+  assert.deepStrictEqual(rows, [{ id: 'h1', title: 'Drink water', value: 1, goal: 3, done: false, isStopwatch: false, isCountdown: false, countdownMs: 0, streak: 0, bestStreak: 0, icon: '' }]);
+});
+
+check('getActiveHabits passes the Material icon name through, empty string when unset', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Coffee', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, icon: 'local_cafe', countOnDay: {} }),
+      addCounter({ id: 'h2', title: 'Plain', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: {} }),
+    ],
+    state
+  );
+  const rows = habits(state);
+  assert.strictEqual(rows.find((r) => r.id === 'h1').icon, 'local_cafe');
+  assert.strictEqual(rows.find((r) => r.id === 'h2').icon, '');
 });
 
 check('getActiveHabits marks done once today\'s count reaches goal', () => {

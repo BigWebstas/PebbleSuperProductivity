@@ -656,6 +656,11 @@ function sendHabitAt(habits, index) {
   if (h.bestStreak && h.bestStreak > (h.streak || 0)) {
     dict.HABIT_BEST_STREAK = Math.min(h.bestStreak, 9999);
   }
+  // Material icon name - the watch keeps a bitmap for a curated subset and
+  // ignores names it doesn't have.
+  if (h.icon) {
+    dict.HABIT_ICON = String(h.icon).slice(0, 31);
+  }
   sendWithRetry(dict, function () {
     sendHabitAt(habits, index + 1);
   }, function (e) {

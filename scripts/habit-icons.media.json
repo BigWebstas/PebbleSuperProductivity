@@ -1,0 +1,398 @@
+[
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_DIRECTIONS_WALK",
+    "file": "images/hi/directions-walk.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_DIRECTIONS_RUN",
+    "file": "images/hi/directions-run.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_DIRECTIONS_BIKE",
+    "file": "images/hi/directions-bike.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_FITNESS_CENTER",
+    "file": "images/hi/fitness-center.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SELF_IMPROVEMENT",
+    "file": "images/hi/self-improvement.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_POOL",
+    "file": "images/hi/pool.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SPORTS_GYMNASTICS",
+    "file": "images/hi/sports-gymnastics.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SPORTS_SOCCER",
+    "file": "images/hi/sports-soccer.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_FREE_BREAKFAST",
+    "file": "images/hi/free-breakfast.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_LOCAL_CAFE",
+    "file": "images/hi/local-cafe.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_RESTAURANT",
+    "file": "images/hi/restaurant.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_LOCAL_BAR",
+    "file": "images/hi/local-bar.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_NO_DRINKS",
+    "file": "images/hi/no-drinks.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_WATER_DROP",
+    "file": "images/hi/water-drop.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_BEDTIME",
+    "file": "images/hi/bedtime.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_MEDICATION",
+    "file": "images/hi/medication.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_LOCAL_FLORIST",
+    "file": "images/hi/local-florist.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PARK",
+    "file": "images/hi/park.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PETS",
+    "file": "images/hi/pets.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_BOOK",
+    "file": "images/hi/book.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_MENU_BOOK",
+    "file": "images/hi/menu-book.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SCHOOL",
+    "file": "images/hi/school.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_EDIT",
+    "file": "images/hi/edit.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_BRUSH",
+    "file": "images/hi/brush.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CODE",
+    "file": "images/hi/code.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_LANGUAGE",
+    "file": "images/hi/language.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_MUSIC_NOTE",
+    "file": "images/hi/music-note.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SMOKE_FREE",
+    "file": "images/hi/smoke-free.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_FAVORITE",
+    "file": "images/hi/favorite.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_STAR",
+    "file": "images/hi/star.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_WB_SUNNY",
+    "file": "images/hi/wb-sunny.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_NIGHTLIGHT",
+    "file": "images/hi/nightlight.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_CLEANING_SERVICES",
+    "file": "images/hi/cleaning-services.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SAVINGS",
+    "file": "images/hi/savings.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_SHOPPING_CART",
+    "file": "images/hi/shopping-cart.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  },
+  {
+    "type": "bitmap",
+    "name": "IMAGE_HI_PHONE_IPHONE",
+    "file": "images/hi/phone-iphone.png",
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ]
+  }
+]
