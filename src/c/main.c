@@ -572,8 +572,8 @@ static char s_pending_reschedule_task_id[MAX_ID_LEN] = "";
 static RescheduleKind s_pending_reschedule_kind = RESCHEDULE_NONE;
 // Frame ticks (one per scroll_timer_callback, SCROLL_INTERVAL_MS apart) since
 // the pending-reschedule window opened - drives the shrinking countdown bar
-// under its subtitle. Also: the row index + tick count for the check that
-// strokes itself onto a task the moment it commits to done. Both keep the
+// under its subtitle. Also: the row index + tick count for the matching
+// "Marking done..." bar shown the moment a task commits to done. Both keep the
 // scroll timer alive via refresh_scroll_state.
 static int s_pending_reschedule_tick = 0;
 #define DONE_CHECK_MS 500
@@ -2236,8 +2236,8 @@ static void scroll_timer_callback(void *data) {
   }
   if (s_done_check_idx >= 0) {
     s_done_check_tick++;
-    if (s_done_check_tick * SCROLL_INTERVAL_MS >= DONE_CHECK_MS + 400) {
-      s_done_check_idx = -1; // full check drawn, then a short hold, then gone
+    if (s_done_check_tick * SCROLL_INTERVAL_MS >= DONE_CHECK_MS + 150) {
+      s_done_check_idx = -1; // bar emptied, brief hold, then back to "Done"
     }
   }
 #endif
@@ -2507,40 +2507,31 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
 #endif
 
   if (task->done) {
-    draw_text(ctx, "Done", SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
 #ifndef PBL_PLATFORM_APLITE
-    // Freshly committed to done: stroke a checkmark onto the title-line right
-    // over DONE_CHECK_MS, then a brief hold, then gone (s_done_check_idx is
-    // cleared by scroll_timer_callback).
+    // Just committed to done: the subtitle line shows "Marking done..." with a
+    // centre-anchored shrinking bar for DONE_CHECK_MS - the same treatment a
+    // pending reschedule gets - then reverts to plain "Done".
     if (s_done_check_idx >= 0 && task >= s_tasks && task < s_tasks + MAX_TASKS &&
         (int)(task - s_tasks) == s_done_check_idx) {
-      int dc_ms = s_done_check_tick * SCROLL_INTERVAL_MS;
-      int cx = bounds.size.w - TITLE_BOX_X - 12;
-      int cy = title_box.origin.y + title_box.size.h / 2;
-      GPoint dc_start = GPoint(cx - 4, cy);
-      GPoint dc_elbow = GPoint(cx, cy + 4);
-      GPoint dc_end = GPoint(cx + 8, cy - 7);
-      int dc_leg1 = DONE_CHECK_MS * 2 / 5; // short leg first, then the long one
-      graphics_context_set_stroke_color(ctx, fg);
-      graphics_context_set_stroke_width(ctx, 2);
-      if (dc_ms > 0 && dc_ms < dc_leg1) {
-        GPoint p = GPoint(dc_start.x + (dc_elbow.x - dc_start.x) * dc_ms / dc_leg1,
-                          dc_start.y + (dc_elbow.y - dc_start.y) * dc_ms / dc_leg1);
-        graphics_draw_line(ctx, dc_start, p);
-      } else if (dc_ms >= dc_leg1) {
-        graphics_draw_line(ctx, dc_start, dc_elbow);
-        int num = dc_ms - dc_leg1;
-        int den = DONE_CHECK_MS - dc_leg1;
-        if (num > den) {
-          num = den;
-        }
-        GPoint p = GPoint(dc_elbow.x + (dc_end.x - dc_elbow.x) * num / den,
-                          dc_elbow.y + (dc_end.y - dc_elbow.y) * num / den);
-        graphics_draw_line(ctx, dc_elbow, p);
+      GColor dc_crisp = is_selected ? GColorWhite : GColorBlack;
+      graphics_context_set_text_color(ctx, dc_crisp);
+      draw_text(ctx, "Marking done...", SUBTITLE_FONT_KEY, subtitle_box,
+                GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+      int dc_rem_ms = DONE_CHECK_MS - s_done_check_tick * SCROLL_INTERVAL_MS;
+      if (dc_rem_ms < 0) {
+        dc_rem_ms = 0;
       }
-      graphics_context_set_stroke_width(ctx, 1);
+      int dc_full_w = subtitle_box.size.w;
+      int dc_bar_w = dc_full_w * dc_rem_ms / DONE_CHECK_MS;
+      graphics_context_set_fill_color(ctx, dc_crisp);
+      graphics_fill_rect(ctx,
+                         GRect(subtitle_box.origin.x + (dc_full_w - dc_bar_w) / 2,
+                               subtitle_box.origin.y + subtitle_box.size.h - 3, dc_bar_w, 2),
+                         0, GCornerNone);
+      return;
     }
 #endif
+    draw_text(ctx, "Done", SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
     return;
   }
 
