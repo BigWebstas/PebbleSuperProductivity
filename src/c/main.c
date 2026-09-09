@@ -624,6 +624,9 @@ static bool s_habit_flash_gold = false;
 // Habit id whose streak crossed a milestone in the batch currently arriving;
 // the pop fires on MSG_HABIT_SYNC_END once the row data is in place.
 static char s_habit_milestone_id[MAX_HABIT_ID_LEN] = "";
+// Marquee for an overflowing habit title on the selected row - the habits menu
+// isn't wired to the main scroll timer, so it runs its own (shared offset).
+static AppTimer *s_habits_marquee_timer = NULL;
 #endif
 #endif
 
@@ -1623,6 +1626,7 @@ static GRect window_chrome(Window *window, StatusBarLayer **status, Layer **root
 #ifndef PBL_PLATFORM_APLITE
 #ifdef PBL_PLATFORM_EMERY
 static void begin_habit_flash(const char *habit_id, bool milestone);
+static void habits_marquee_refresh(bool reset_offset);
 #endif
 static void show_notes_overlay(Task *task);
 static void show_project_notes_overlay(TaskGroup *group);
@@ -4912,6 +4916,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         }
         s_habit_milestone_id[0] = '\0';
       }
+      if (s_habits_menu_layer) {
+        habits_marquee_refresh(false); // the selected title may now overflow
+      }
 #endif
       break;
     }
@@ -5479,6 +5486,51 @@ static void maybe_flash_last_habit(void) {
   vibe_celebrate();
   refresh_scroll_state(false);
 }
+
+// --- habit-title marquee (the habits menu has no scroll timer of its own) ---
+static void habits_marquee_tick(void *data) {
+  s_habits_marquee_timer = NULL;
+  s_scroll_offset_px += SCROLL_STEP_PX;
+  if (s_habits_menu_layer) {
+    layer_mark_dirty(menu_layer_get_layer(s_habits_menu_layer));
+  }
+  s_habits_marquee_timer = app_timer_register(SCROLL_INTERVAL_MS, habits_marquee_tick, NULL);
+}
+
+static void stop_habits_marquee(void) {
+  if (s_habits_marquee_timer) {
+    app_timer_cancel(s_habits_marquee_timer);
+    s_habits_marquee_timer = NULL;
+  }
+}
+
+// True if the selected habit's title is wider than its row.
+static bool selected_habit_title_overflows(void) {
+  if (!s_habits_menu_layer) {
+    return false;
+  }
+  Habit *h = resolve_habit_at(menu_layer_get_selected_index(s_habits_menu_layer));
+  if (!h) {
+    return false;
+  }
+  int16_t avail = layer_get_bounds(menu_layer_get_layer(s_habits_menu_layer)).size.w - TITLE_BOX_X * 2;
+  return title_natural_width_font(h->title, fonts_get_system_font(TITLE_FONT_KEY)) > avail;
+}
+
+// Run the marquee timer only while the selected habit needs it; reset the shared
+// offset on a selection change so the new title starts from the left.
+static void habits_marquee_refresh(bool reset_offset) {
+  if (reset_offset) {
+    s_scroll_offset_px = 0;
+  }
+  if (selected_habit_title_overflows()) {
+    if (!s_habits_marquee_timer) {
+      s_habits_marquee_timer = app_timer_register(SCROLL_INTERVAL_MS, habits_marquee_tick, NULL);
+    }
+  } else {
+    stop_habits_marquee();
+  }
+}
 #endif
 
 // Total elapsed ms for the current countdown session, paused or running. Only
@@ -5653,8 +5705,9 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   int16_t habit_title_h = habit_line.h > 0 ? habit_line.h : HEADING_TITLE_H;
   GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, habit_title_h, SUBTITLE_STRIP_H),
                            bounds.size.w - TITLE_BOX_X * 2, habit_title_h);
-  graphics_draw_text(ctx, habit->title, habit_title_font, title_box,
-                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  bool title_marquee = is_selected &&
+      title_natural_width_font(habit->title, habit_title_font) > title_box.size.w;
+  draw_marquee_title(ctx, title_box, habit->title, habit_title_font, title_marquee);
 #else
   GRect title_box = GRect(TITLE_BOX_X, TITLE_BOX_Y, bounds.size.w - TITLE_BOX_X * 2, 30);
   draw_text(ctx, habit->title, TITLE_FONT_KEY, title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
@@ -5885,6 +5938,9 @@ static void update_habits_empty_layer(void) {
 #ifndef PBL_PLATFORM_APLITE
 static void habits_menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, MenuIndex old_index, void *context) {
   backlight_touch();
+#ifdef PBL_PLATFORM_EMERY
+  habits_marquee_refresh(true);
+#endif
 }
 #endif
 
@@ -5951,6 +6007,9 @@ static void habits_window_load(Window *window) {
     start_habit_tracking_tick();
   }
 #endif
+#ifdef PBL_PLATFORM_EMERY
+  habits_marquee_refresh(true); // in case the first selected habit's title is long
+#endif
 }
 
 static void habits_window_unload(Window *window) {
@@ -5961,6 +6020,7 @@ static void habits_window_unload(Window *window) {
 #endif
 #ifdef PBL_PLATFORM_EMERY
   stop_habit_flash();
+  stop_habits_marquee();
 #endif
   menu_layer_destroy(s_habits_menu_layer);
 #ifndef PBL_PLATFORM_APLITE
