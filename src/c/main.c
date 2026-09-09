@@ -541,20 +541,9 @@ static AppTimer *s_notes_load_timeout_timer = NULL;
 // "improvement" entry - all share the single s_dictation_session/pending pair.
 typedef enum { DICT_ADD_TASK, DICT_NOTE_APPEND, DICT_REFLECT } DictationTarget;
 static DictationTarget s_dictation_target = DICT_ADD_TASK;
-// Double-click detection on Select: a single click starts this timer instead of
-// committing the task-done toggle, so a second click on the same task can
-// cancel it and show notes. Tracked by id, not Task* (a background sync can
-// rebuild s_tasks under a pending click; a stale id just fails to resolve).
-static AppTimer *s_pending_toggle_timer = NULL;
-static char s_pending_toggle_task_id[MAX_ID_LEN] = "";
-// Matches the SDK's default multi-click window (300ms) - reimplemented by hand
-// since MenuLayerCallbacks has no multi-click hook and MenuLayer already owns
-// the window's click config.
-#define DOUBLE_CLICK_WINDOW_MS 300
-
 // Long-press Up (unschedule) and long-press Down / swipe-left (move to tomorrow)
-// each open a 5s cancel window on the selected task, reusing the pending-toggle
-// pattern above: the row's subtitle shows "Moving to tomorrow..." / "Un-
+// each open a 5s cancel window on the selected task: the row's subtitle shows
+// "Moving to tomorrow..." / "Un-
 // Scheduling..." and a single Select cancels before the timer commits. Tracked
 // by id for the same background-sync reason. The same window fronts the action
 // menu's schedule rows (today / tomorrow / at an hour / unschedule) and the
@@ -1650,7 +1639,6 @@ static void push_value_picker(PickKind kind, const char *task_id, int current);
 static void send_task_set_due_time(const char *task_id, int hour);
 typedef enum { ACTX_TODAY, ACTX_PROJECT, ACTX_TAG } ActionCtx;
 static void push_action_menu(const char *task_id, ActionCtx ctx, bool in_backlog);
-static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
 static void begin_pending_reschedule(RescheduleKind kind);
@@ -3875,12 +3863,20 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     if (s_tap_moved_sel || s_touch_longpress_fired) {
       return;
     }
-    bool pinned_row = has_pinned_row() && cell_index->section == 1;
-    if (!pinned_row && resolve_task_at(*cell_index)) {
-      menu_select_long_click(s_menu_layer, cell_index, NULL);
-      return;
+    // While a pending reschedule / "Marking done..." window is up, a tap cancels
+    // it (like a physical Select) - fall through to the checks just below.
+    bool pending_window = s_pending_reschedule_kind != RESCHEDULE_NONE;
+#ifdef PBL_PLATFORM_EMERY
+    pending_window = pending_window || s_pending_done_task_id[0] != '\0';
+#endif
+    if (!pending_window) {
+      bool pinned_row = has_pinned_row() && cell_index->section == 1;
+      if (!pinned_row && resolve_task_at(*cell_index)) {
+        menu_select_long_click(s_menu_layer, cell_index, NULL);
+        return;
+      }
     }
-    // fall through: pinned / nav / project / Finish Day -> normal Select routing
+    // fall through: pinned / nav / project / Finish Day / a pending window
   }
 #endif
 #ifndef PBL_PLATFORM_APLITE
@@ -3994,23 +3990,10 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  // A second Select on the SAME task before the pending toggle commits shows
-  // notes instead of toggling. aplite-excluded with the notes feature.
-  if (s_pending_toggle_timer && strncmp(s_pending_toggle_task_id, task->id, MAX_ID_LEN) == 0) {
-    app_timer_cancel(s_pending_toggle_timer);
-    s_pending_toggle_timer = NULL;
-    s_pending_toggle_task_id[0] = '\0';
-    show_notes_overlay(task);
-    return;
-  }
-  // A different task's toggle was still pending - let it through now (it's
-  // clearly not being double-clicked) and start a fresh window for this click.
-  if (s_pending_toggle_timer) {
-    app_timer_cancel(s_pending_toggle_timer);
-    pending_toggle_timer_callback(NULL);
-  }
-  str_copy(s_pending_toggle_task_id, task->id, MAX_ID_LEN);
-  s_pending_toggle_timer = app_timer_register(DOUBLE_CLICK_WINDOW_MS, pending_toggle_timer_callback, NULL);
+  // Select on a task row opens its action menu (Mark done / track / schedule /
+  // notes / ...) - it used to be the toggle-done and a long-Select opened the
+  // menu; that swapped so the menu is one press, not a hold.
+  push_action_menu(task->id, ACTX_TODAY, false);
 #else
   task->done = !task->done;
   save_tasks();
@@ -4402,31 +4385,6 @@ static void hide_notes_overlay(void) {
   window_stack_pop(true);
 }
 
-// Commits a single-click task-done toggle once the double-click window passes.
-// Looks the task up by id - a background sync can rebuild s_tasks while this
-// timer is pending, dangling a raw Task*.
-static void pending_toggle_timer_callback(void *data) {
-  s_pending_toggle_timer = NULL;
-  Task *task = find_task_by_id(s_pending_toggle_task_id);
-  s_pending_toggle_task_id[0] = '\0';
-  if (!task) {
-    return; // The list changed underneath the pending click - nothing to commit.
-  }
-#ifdef PBL_PLATFORM_EMERY
-  // Marking a task done opens its own 5s cancel window rather than committing
-  // now; un-completing one is immediate. emery only.
-  if (!task->done) {
-    begin_pending_done(task->id);
-    return;
-  }
-#endif
-  task->done = !task->done;
-  save_tasks();
-  menu_layer_reload_data(s_menu_layer);
-  send_task_toggle(task);
-  refresh_scroll_state(false);
-}
-
 #ifdef PBL_PLATFORM_EMERY
 // Opens (or restarts) the "Marking done..." cancel window for a task by id. The
 // task is not marked done until pending_done_commit_callback fires; a Select in
@@ -4568,14 +4526,9 @@ static void begin_pending_reschedule(RescheduleKind kind) {
   if (!task_id) {
     return;
   }
-  // A pending done-toggle on the same tap sequence would otherwise commit
-  // mid-window - drop it in favour of this.
-  if (s_pending_toggle_timer) {
-    app_timer_cancel(s_pending_toggle_timer);
-    s_pending_toggle_timer = NULL;
-    s_pending_toggle_task_id[0] = '\0';
-  }
 #ifdef PBL_PLATFORM_EMERY
+  // A pending "Marking done..." window on the same task would otherwise commit
+  // mid-window - drop it in favour of this reschedule.
   if (s_pending_done_timer) {
     app_timer_cancel(s_pending_done_timer);
     s_pending_done_timer = NULL;
@@ -7530,21 +7483,22 @@ static void push_reflect_window(void) {
 // opens this. The one home for per-task actions. Each row pops this menu, then
 // launches its target, so Back from the target returns to the list.
 enum {
-  ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
+  ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
   ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG,
   ACT_REPEAT, // appended by act_rows() only for a recurring task
 };
-// The visible rows, in order, per context. Tags / Move open the browse window
+// The visible rows, in order, per context. ACT_DONE is first (the commonest
+// action, so Select-Select completes a task). Tags / Move open the browse window
 // as a picker, so they're only offered from the today list (from the browser
 // that window is already on the stack). Backlog is a project-task concept.
 static const int s_act_rows_today[] = {
-  ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
+  ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
   ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE };
 static const int s_act_rows_project[] = {
-  ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
+  ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
   ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG };
 static const int s_act_rows_tag[] = {
-  ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
+  ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
   ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE };
 
 // ActionCtx declared with the forward decls.
@@ -7557,7 +7511,7 @@ static bool s_action_in_backlog = false;
 // "Repeat" row: pattern text (MSG_TASK_REPEAT_DATA) + pause state, per open.
 static char s_action_repeat_text[24] = "";
 static bool s_action_repeat_paused = false;
-static int s_act_rows_buf[12];
+static int s_act_rows_buf[14];
 
 static Task *resolve_action_task(void);
 
@@ -7626,6 +7580,11 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
   const char *label = "";
   const char *sub = NULL;
   switch (rows[idx->row]) {
+    case ACT_DONE: {
+      Task *dt = resolve_action_task();
+      label = (dt && dt->done) ? "Mark not done" : "Mark done";
+      break;
+    }
     case ACT_TRACK:      label = action_task_is_tracked() ? "Stop tracking" : "Start tracking"; break;
     case ACT_TODAY:      label = "Schedule today"; break;
     case ACT_TOMORROW:   label = "Schedule tomorrow"; break;
@@ -7663,6 +7622,27 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
   }
   window_stack_pop(true); // close the menu; targets push onto the list below it
   switch (row) {
+    case ACT_DONE:
+      if (t) {
+#ifdef PBL_PLATFORM_EMERY
+        // Marking done rides the today list's 5s "Marking done..." cancel window
+        // (a Select undoes it) when the task is really on that list.
+        if (!t->done && s_action_ctx == ACTX_TODAY && find_task_by_id(t->id)) {
+          begin_pending_done(t->id);
+          break;
+        }
+#endif
+        t->done = !t->done;
+        save_tasks();
+        send_task_toggle(t);
+        menu_layer_reload_data(s_menu_layer);
+#if PROJECTS_BROWSER
+        if (s_browse_menu) {
+          menu_layer_reload_data(s_browse_menu);
+        }
+#endif
+      }
+      break;
     case ACT_TRACK:
       if (!t) {
         break;
@@ -8910,10 +8890,6 @@ static void window_unload(Window *window) {
 #endif
   text_layer_destroy(s_error_layer);
 #ifndef PBL_PLATFORM_APLITE
-  if (s_pending_toggle_timer) {
-    app_timer_cancel(s_pending_toggle_timer);
-    s_pending_toggle_timer = NULL;
-  }
   if (s_pending_reschedule_timer) {
     app_timer_cancel(s_pending_reschedule_timer);
     s_pending_reschedule_timer = NULL;
