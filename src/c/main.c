@@ -2020,11 +2020,11 @@ static int16_t pingpong_offset(int16_t travel);
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
     if (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) {
-      // "No tasks for today." above the still-reachable section-0 rows.
+      // "Nothing left for today." above the still-reachable section-0 rows.
       GRect bounds = layer_get_bounds(cell_layer);
       fill_bg(ctx, bounds, GColorWhite);
       graphics_context_set_text_color(ctx, GColorBlack);
-      draw_text(ctx, "No tasks for today.", EMPTY_MSG_FONT_KEY, bounds, GTextOverflowModeWordWrap, GTextAlignmentCenter);
+      draw_text(ctx, "Nothing left for today.", EMPTY_MSG_FONT_KEY, bounds, GTextOverflowModeWordWrap, GTextAlignmentCenter);
     }
     return;
   }
@@ -5437,11 +5437,24 @@ static void stop_habit_tracking_tick(void) {
 
 // A "di-di-daah" for a genuine win - streak milestone, day's last habit, a focus
 // session run to completion. Distinct from the plain pulses that just mean
-// "registered" or "heads up".
+// "registered" or "heads up". On a speaker watch, a rising four-note figure too
+// when the user has audible notifications on.
 static void vibe_celebrate(void) {
   static const uint32_t segs[] = { 70, 90, 70, 90, 260 };
   VibePattern pat = { .durations = segs, .num_segments = ARRAY_LENGTH(segs) };
   vibes_enqueue_custom_pattern(pat);
+#ifdef PBL_SPEAKER
+  if (s_audible_notify && !speaker_is_muted()) {
+    static const SpeakerNote win[] = {
+      { .midi_note = 72, .waveform = SpeakerWaveformSine, .duration_ms = 80, .velocity = 0 },
+      { .midi_note = 76, .waveform = SpeakerWaveformSine, .duration_ms = 80, .velocity = 0 },
+      { .midi_note = 79, .waveform = SpeakerWaveformSine, .duration_ms = 80, .velocity = 0 },
+      { .midi_note = 84, .waveform = SpeakerWaveformSine, .duration_ms = 180, .velocity = 0 },
+    };
+    speaker_play_notes(win, ARRAY_LENGTH(win),
+                       s_audible_volume < 0 ? 0 : (s_audible_volume > 100 ? 100 : s_audible_volume));
+  }
+#endif
 }
 
 #ifdef PBL_PLATFORM_EMERY
