@@ -3495,13 +3495,30 @@ static void start_reflect_dictation(void) {
 
 #ifndef PBL_PLATFORM_APLITE
 #ifdef PBL_PLATFORM_EMERY
-// Slide-out finished (or was interrupted) - actually hide the strip and park its
-// frame back at rest so the next show_top_banner starts clean.
+// The one in-flight banner slide, so we can cancel just it - never
+// animation_unschedule_all(), which also kills the window-stack push/pop
+// transitions and leaves the screen frozen on a stale frame (the whole
+// "stop tracking locks up the app" bug).
+static PropertyAnimation *s_banner_anim = NULL;
+
+// Slide finished or was interrupted. Clears the handle; for a slide-OUT (ctx
+// non-NULL) also hides the strip and parks its frame at rest so the next
+// show_top_banner starts clean.
 static void banner_anim_stopped(Animation *anim, bool finished, void *ctx) {
-  if (s_overtime_banner_layer) {
+  s_banner_anim = NULL;
+  if (ctx && s_overtime_banner_layer) {
     Layer *bl = text_layer_get_layer(s_overtime_banner_layer);
     layer_set_hidden(bl, true);
     layer_set_frame(bl, s_banner_frame);
+  }
+}
+
+static void banner_cancel_anim(void) {
+  if (s_banner_anim) {
+    // Fires banner_anim_stopped (finished=false), which nulls s_banner_anim;
+    // the animation auto-destroys itself on unschedule.
+    animation_unschedule(property_animation_get_animation(s_banner_anim));
+    s_banner_anim = NULL;
   }
 }
 
@@ -3514,7 +3531,7 @@ static void banner_slide(bool in) {
     return;
   }
   Layer *bl = text_layer_get_layer(s_overtime_banner_layer);
-  animation_unschedule_all(); // a re-fire mid-slide must not leave a stale handler
+  banner_cancel_anim(); // just our slide - NOT animation_unschedule_all
   GRect rest = s_banner_frame;
   GRect off = rest;
   off.origin.y -= rest.size.h; // just clear of the content top
@@ -3525,16 +3542,17 @@ static void banner_slide(bool in) {
   if (!pa) {
     layer_set_frame(bl, to);
     if (!in) {
-      banner_anim_stopped(NULL, true, NULL);
+      banner_anim_stopped(NULL, true, (void *)1);
     }
     return;
   }
   Animation *a = property_animation_get_animation(pa);
   animation_set_duration(a, 200);
   animation_set_curve(a, in ? AnimationCurveEaseOut : AnimationCurveEaseIn);
-  if (!in) {
-    animation_set_handlers(a, (AnimationHandlers) { .stopped = banner_anim_stopped }, NULL);
-  }
+  // ctx: non-NULL on a slide-OUT so banner_anim_stopped also hides the strip.
+  animation_set_handlers(a, (AnimationHandlers) { .stopped = banner_anim_stopped },
+                         in ? NULL : (void *)1);
+  s_banner_anim = pa;
   animation_schedule(a);
 }
 #else
@@ -3560,7 +3578,7 @@ static void hide_overtime_banner(void) {
   if (s_overtime_banner_layer) {
     Layer *bl = text_layer_get_layer(s_overtime_banner_layer);
 #ifdef PBL_PLATFORM_EMERY
-    animation_unschedule_all(); // drop any in-flight slide before we hide / destroy
+    banner_cancel_anim(); // just our slide - animation_unschedule_all froze the app
     layer_set_frame(bl, s_banner_frame);
 #endif
     layer_set_hidden(bl, true);
@@ -7683,9 +7701,6 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
         }
         menu_layer_reload_data(s_menu_layer);
 #ifndef PBL_PLATFORM_APLITE
-        // Start -> full-screen tracking page. Stop -> nothing extra: the menu
-        // was already popped, which lands back on the task list (window_stack_
-        // pop_all here exited the whole app on hardware).
         if (!was) {
           push_live_window();
         }
@@ -8942,6 +8957,20 @@ static void window_load(Window *window) {
   }
 }
 
+// Returning to the list from a sub-window (the action menu especially) lands
+// here. Sub-windows change the list underneath them - a task gets marked done,
+// tracking stops - and reload their target inline, but a reload issued while
+// the sub-window is still animating out gets swallowed by the transition and
+// the list shows a stale frame until the next button press. Re-issuing it on
+// .appear, after the transition settles, is the reliable repaint.
+static void window_appear(Window *window) {
+  if (!s_menu_layer) {
+    return;
+  }
+  menu_layer_reload_data(s_menu_layer);
+  refresh_scroll_state(true);
+}
+
 static void window_unload(Window *window) {
   stop_scroll_timer();
   // NOT stopping tracking here - only this window's redraw timer, since
@@ -9258,6 +9287,7 @@ static void init(void) {
   s_main_window = window_create();
   window_set_window_handlers(s_main_window, (WindowHandlers) {
     .load = window_load,
+    .appear = window_appear,
     .unload = window_unload,
   });
   window_stack_push(s_main_window, true);
