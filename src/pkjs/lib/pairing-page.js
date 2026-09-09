@@ -168,6 +168,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  .checkbox-row label { display: inline; margin: 0; font-weight: normal; }\n' +
 '  .checkbox-row.sub { margin-left: 26px; margin-top: 8px; }\n' +
 '  p.hint.sub, label.sub { margin-left: 26px; }\n' +
+'  select.sub { width: calc(100% - 26px); margin-left: 26px; }\n' +
 '  input[type=range] { padding: 0; border: none; background: none; width: calc(100% - 26px); margin-left: 26px; }\n' +
 '  input:disabled, input[type=range]:disabled { opacity: 0.4; }\n' +
 '  button { width: 100%; padding: 12px; font-size: 15px; margin-top: 16px; border: none; border-radius: 6px; background: #1a73e8; color: #fff; }\n' +
@@ -184,11 +185,11 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '<body>\n' +
 '  <h1>Pair Super Productivity with your watch</h1>\n' +
 '  <p class="hint">\n' +
-'    This app relays over Bluetooth via your phone (Pebble watchapps have no\n' +
-'    networking of their own), so pairing happens here in the phone browser,\n' +
-'    not on the watch.\n' +
+'    Pebble watchapps have no network of their own, so pairing happens here\n' +
+'    in the phone browser and syncs over Bluetooth.\n' +
 '  </p>\n' +
 '\n' +
+'  <h2>Account</h2>\n' +
 '  <label for="baseUrl">SuperSync server URL</label>\n' +
 '  <input id="baseUrl" type="url" value="' + escapeHtmlAttr(baseUrl) + '">\n' +
 '\n' +
@@ -198,376 +199,215 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  <label for="password">Sync encryption password</label>\n' +
 '  <input id="password" type="password" placeholder="' + escapeHtmlAttr(passwordPlaceholder) + '">\n' +
 '  <p class="hint">\n' +
-'    This is the end-to-end encryption password you set in Super\n' +
-'    Productivity\'s sync settings (not your login password, if those\n' +
-'    differ). It never leaves this device: it\'s used locally to derive the\n' +
-'    AES key that decrypts your tasks.' + (hasPassword ? ' Already saved on this\n' +
-'    watch/phone - only re-enter it here if it changed.' : '') + '\n' +
+'    The end-to-end encryption password from Super Productivity\'s sync\n' +
+'    settings. Stays on this device - used to derive the key that decrypts\n' +
+'    your tasks.' + (hasPassword ? ' Already saved; re-enter only if it changed.' : '') + '\n' +
 '  </p>\n' +
 '\n' +
 '  <label for="jwt">SuperSync access token</label>\n' +
 '  <input id="jwt" type="text" placeholder="' + escapeHtmlAttr(jwtPlaceholder) + '">\n' +
 '  <p class="hint">\n' +
-'    SuperSync accounts are authenticated via an emailed magic link or a\n' +
-'    passkey, not a password, so there\'s no login form here. Tap "Open\n' +
-'    SuperSync login" below, sign in there, copy the token it shows you\n' +
-'    ("Connection Successful - copy this token and paste it in Super\n' +
-'    Productivity\'s sync settings"), then come back here and paste it above.\n' +
-'    It\'s the same token you\'d paste into Super Productivity\'s own\n' +
-'    Settings → Sync → SuperSync screen.' + (hasToken ? ' Already saved on this\n' +
-'    watch/phone - only re-enter it here if it changed or expired.' : '') + '\n' +
+'    SuperSync logs in by magic link / passkey, not a password. Tap "Open\n' +
+'    SuperSync login", sign in, copy the token it shows, and paste it\n' +
+'    above.' + (hasToken ? ' Already saved; re-enter only if it changed or expired.' : '') + '\n' +
 '  </p>\n' +
 '\n' +
 '  <button id="openLoginBtn" class="secondary">Open SuperSync login</button>\n' +
 '  <p id="status"></p>\n' +
 '\n' +
-'  <h2>Watch display</h2>\n' +
+'  <h2>Watch list</h2>\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="groupByProject" type="checkbox"' + (groupByProject ? ' checked' : '') + '>\n' +
 '    <label for="groupByProject">Group tasks by project</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Shows a bold, underlined project name on a green header above each\n' +
-'    group of tasks on the watch, instead of one flat list.\n' +
-'  </p>\n' +
+'  <p class="hint">Green project headers above each group, instead of one flat list.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="todayOnly" type="checkbox"' + (todayOnly ? ' checked' : '') + '>\n' +
 '    <label for="todayOnly">Only show today\'s tasks</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Only shows tasks planned for today - hides undated, overdue, and\n' +
-'    future-dated tasks.\n' +
-'  </p>\n' +
+'  <p class="hint">Hide undated, overdue and future-dated tasks.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="hideDoneTasks" type="checkbox"' + (hideDoneTasks ? ' checked' : '') + '>\n' +
 '    <label for="hideDoneTasks">Hide completed tasks</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Removes a completed task from the watch\'s list entirely instead of\n' +
-'    showing it dimmed. A completed subtask under a still-open task is\n' +
-'    hidden the same way; a completed task with subtasks is hidden along\n' +
-'    with all of them. A task you complete on the watch itself stays\n' +
-'    visible for about 10 seconds first, so you can see it happen before it\n' +
-'    disappears.\n' +
-'  </p>\n' +
+'  <p class="hint">Drop completed tasks instead of dimming them. One you complete on the watch lingers ~10s first.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="autoMarkParentDone" type="checkbox"' + (autoMarkParentDone ? ' checked' : '') + '>\n' +
 '    <label for="autoMarkParentDone">Complete main task when all subtasks are done</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Completing the last remaining open subtask (from the watch) also\n' +
-'    completes its main task, matching Super Productivity\'s own "Automatically\n' +
-'    mark parent task done" setting. Only fires forward - undoing a subtask\n' +
-'    never reopens an already-completed main task.\n' +
-'  </p>\n' +
+'  <p class="hint">Completing the last open subtask completes its parent. Never reopens one.</p>\n' +
 '\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="overtimeNotify" type="checkbox"' + (overtimeNotify ? ' checked' : '') + '>\n' +
-'    <label for="overtimeNotify">Notify when a task runs over its estimate</label>\n' +
-'  </div>\n' +
-'  <p class="hint">\n' +
-'    While you\'re tracking time on a task that has a time estimate, the\n' +
-'    watch vibrates and shows a banner the moment the time spent on it\n' +
-'    reaches that estimate. Fires once per tracking session unless the\n' +
-'    repeat option below is on. Not available on original Pebble/Pebble\n' +
-'    Steel (aplite) - too little free memory left on that hardware for the\n' +
-'    banner.\n' +
-'  </p>\n' +
-'\n' +
-'  <div class="checkbox-row sub">\n' +
-'    <input id="overtimeRepeat" type="checkbox"' + (overtimeRepeat ? ' checked' : '') + (overtimeNotify ? '' : ' disabled') + '>\n' +
-'    <label for="overtimeRepeat">Repeat the notification every 5 minutes</label>\n' +
-'  </div>\n' +
-'  <p class="hint sub">\n' +
-'    Keeps re-vibrating and re-showing the banner every 5 minutes for as\n' +
-'    long as the task you\'re tracking stays over its estimate, instead of\n' +
-'    only once. Stops when you stop tracking.\n' +
-'  </p>\n' +
-'\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="audibleNotifications" type="checkbox"' + (audibleNotifications ? ' checked' : '') + '>\n' +
-'    <label for="audibleNotifications">Enable audible notifications</label>\n' +
-'  </div>\n' +
-'  <p class="hint">\n' +
-'    Plays a short ping alongside every watch banner - over-estimate, take\n' +
-'    a break, idle, and task-due. Only the Pebble Time 2 has a speaker;\n' +
-'    other watches just vibrate. Respects the watch\'s system mute\n' +
-'    (Settings &rarr; Notifications).\n' +
-'  </p>\n' +
-'\n' +
-'  <label for="audibleVolume" class="sub">Ping volume: <span id="audibleVolumeOut">' + audibleVolume + '</span></label>\n' +
-'  <input class="sub" id="audibleVolume" type="range" min="0" max="100" step="5" value="' + audibleVolume + '"' + (audibleNotifications ? '' : ' disabled') + '>\n' +
-'\n' +
-'  <label for="breakReminderMin">Remind me to take a break</label>\n' +
-'  <select id="breakReminderMin">\n' +
-breakReminderOptions + '\n' +
-'  </select>\n' +
-'  <p class="hint">\n' +
-'    Adds up the time you spend tracking tasks on the watch and vibrates\n' +
-'    with a "time for a break" banner once it reaches this much without a\n' +
-'    pause. Stopping the timer for 5 minutes or more counts as a break and\n' +
-'    resets the count; shorter gaps (switching tasks) carry it over. Only\n' +
-'    counts time tracked on the watch, and only fires while the watchapp is\n' +
-'    open. Not available on original Pebble/Pebble Steel (aplite).\n' +
-'  </p>\n' +
-'\n' +
-'  <label for="idleReminderMin">Remind me when idle</label>\n' +
-'  <select id="idleReminderMin">\n' +
-idleReminderOptions + '\n' +
-'  </select>\n' +
-'  <p class="hint">\n' +
-'    Purely time-based, no step count. Once this long passes with nothing\n' +
-'    tracked, it vibrates "not tracking Y min", then repeats every interval\n' +
-'    after that until you start tracking again. Independent of "Remind me to\n' +
-'    take a break" above. Not available on original Pebble/Pebble Steel\n' +
-'    (aplite).\n' +
-'  </p>\n' +
-'\n' +
-'  <label for="dueReminderMin">Notify before a task is due</label>\n' +
-'  <select id="dueReminderMin">\n' +
-dueReminderOptions + '\n' +
-'  </select>\n' +
-'  <p class="hint">\n' +
-'    Vibrates with a "Due at ..." banner this far ahead of the next task\n' +
-'    that has a time on it. One reminder per task time. Only fires while\n' +
-'    the watchapp is open. Not available on original Pebble/Pebble Steel\n' +
-'    (aplite).\n' +
-'  </p>\n' +
-'\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="enableTimeline" type="checkbox"' + (enableTimeline ? ' checked' : '') + '>\n' +
-'    <label for="enableTimeline">Add scheduled tasks to the timeline</label>\n' +
-'  </div>\n' +
-'  <p class="hint">\n' +
-'    Pushes a PebbleOS timeline pin for every task that has a set time, for\n' +
-'    the next two weeks, with a reminder using the "Notify before a task is\n' +
-'    due" lead time above. Pins update and disappear as you reschedule or\n' +
-'    finish tasks. The pin shows the task title and project name to Rebble\'s\n' +
-'    timeline service - that part is not end-to-end encrypted, which is why\n' +
-'    this is off by default. Needs timeline enabled for this app in the\n' +
-'    Rebble developer portal.\n' +
-'  </p>\n' +
-'\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="stopAtMidnight" type="checkbox"' + (stopAtMidnight ? ' checked' : '') + '>\n' +
-'    <label for="stopAtMidnight">Stop tracking at midnight</label>\n' +
-'  </div>\n' +
-'  <p class="hint">\n' +
-'    If a task is still being tracked when the local day rolls over - on this\n' +
-'    watch or on another device - stop it. A watch timer logs only the time\n' +
-'    up to midnight. Runs while the watchapp is open, so a timer left going\n' +
-'    overnight is closed out the next time you open the app.\n' +
-'  </p>\n' +
-'\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="liveTracking" type="checkbox"' + (liveTracking ? ' checked' : '') + '>\n' +
-'    <label for="liveTracking">Show live tracking from other devices</label>\n' +
-'  </div>\n' +
-'  <p class="hint">\n' +
-'    While the watchapp is open, shows what you\'re tracking on your desktop\n' +
-'    or phone in the pinned TRACKING section, and lets you stop that timer\n' +
-'    from the watch. Updates only while the app is open - it is a glance, not\n' +
-'    a notification. SuperSync only. Not available on original Pebble/Pebble\n' +
-'    Steel (aplite).\n' +
-'  </p>\n' +
-'\n' +
-'  <label for="focusType">Focus timer</label>\n' +
-'  <select id="focusType">\n' +
-focusTypeOptions + '\n' +
-'  </select>\n' +
-'  <p class="hint">\n' +
-'    On the full-screen tracking page, hold Up or Down to start / end a\n' +
-'    focus session (Back is trapped so a stray press can\'t drop you to the\n' +
-'    watchface). <b>Countdown</b> uses the length below. <b>Pomodoro</b> uses\n' +
-'    your desktop\'s work / break lengths and loops them. <b>Flowtime</b> just\n' +
-'    counts up. Watch-local. Not on original Pebble / Pebble Steel (aplite).\n' +
-'  </p>\n' +
-'\n' +
-'  <label for="focusLenMin">Countdown length</label>\n' +
-'  <select id="focusLenMin">\n' +
-focusLenOptions + '\n' +
-'  </select>\n' +
-'\n' +
-'  <label for="backlightMode">Backlight</label>\n' +
-'  <select id="backlightMode">\n' +
-backlightOptions + '\n' +
-'  </select>\n' +
-'  <p class="hint">\n' +
-'    "System default" never touches the backlight - it behaves exactly as\n' +
-'    your watch\'s own Settings say. Any other option overrides that while\n' +
-'    this app is open, relighting the screen on every button press (Select,\n' +
-'    long-select, or scrolling) and keeping it lit for the chosen duration\n' +
-'    (or indefinitely, for "Always on") before handing control back. Not\n' +
-'    available on original Pebble/Pebble Steel (aplite) - too little free\n' +
-'    memory left on that hardware for this; it always uses your watch\'s\n' +
-'    own Settings regardless of this option.\n' +
-'  </p>\n' +
-'\n' +
-'  <label for="defaultProjectId">Default project for "Add Task"</label>\n' +
-'  <select id="defaultProjectId">\n' +
-'    <option value="">Inbox (default)</option>\n' +
-projectOptions + '\n' +
-'  </select>\n' +
-'  <p class="hint">\n' +
-'    A task you dictate on the watch (the "Add Task" row, on watches with a\n' +
-'    microphone) is filed into this project.\n' +
-'  </p>\n' +
-'\n' +
-'  <label for="defaultTaskEstimateMin">Default time estimate for "Add Task"</label>\n' +
-'  <select id="defaultTaskEstimateMin">\n' +
-taskEstimateOptions + '\n' +
-'  </select>\n' +
-'  <p class="hint">\n' +
-'    A task you dictate on the watch starts with this much time estimated\n' +
-'    against it, the same as typing an estimate when you add it on the\n' +
-'    desktop. "None" leaves the estimate unset.\n' +
-'  </p>\n' +
-'\n' +
-'  <h2>Features</h2>\n' +
+'  <h2>Extra rows</h2>\n' +
+'  <p class="hint">Optional rows on the watch\'s main list. Not available on aplite.</p>\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableHabits" type="checkbox"' + (enableHabits ? ' checked' : '') + '>\n' +
-'    <label for="enableHabits">Enable Habits</label>\n' +
+'    <label for="enableHabits">Habits</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Shows the Habits row on the watch and syncs habit data to it. Turn off\n' +
-'    if you don\'t use Super Productivity\'s habit tracking.\n' +
-'  </p>\n' +
-'\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="habitStreakNudge" type="checkbox"' + (habitStreakNudge ? ' checked' : '') + '>\n' +
-'    <label for="habitStreakNudge">Nudge me about unfinished streaks</label>\n' +
-'  </div>\n' +
-'  <p class="hint">\n' +
-'    From 6pm, once a day, vibrates a "Keep your streak" banner if a habit\n' +
-'    with a 2+ day streak still isn\'t done. Only fires while the watchapp is\n' +
-'    open. Not available on original Pebble/Pebble Steel (aplite).\n' +
-'  </p>\n' +
+'  <p class="hint">Habit tracking synced to the watch.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableProjects" type="checkbox"' + (enableProjects ? ' checked' : '') + '>\n' +
-'    <label for="enableProjects">Enable Projects</label>\n' +
+'    <label for="enableProjects">Projects</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Shows a Projects row on the watch. Open it to browse every project and\n' +
-'    the tasks (and backlog) inside each one, not just today\'s list.\n' +
-'  </p>\n' +
+'  <p class="hint">Browse every project\'s tasks and backlog.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableStats" type="checkbox"' + (enableStats ? ' checked' : '') + '>\n' +
-'    <label for="enableStats">Enable Stats</label>\n' +
+'    <label for="enableStats">Stats</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Shows a Stats row on the watch: estimated time remaining today, time\n' +
-'    worked today, the current tracking session, and every project\'s task\n' +
-'    count.\n' +
-'  </p>\n' +
-'\n' +
-'  <div class="checkbox-row">\n' +
+'  <p class="hint">Time remaining and worked today, current session, per-project counts.</p>\n' +
+'  <div class="checkbox-row sub">\n' +
 '    <input id="yesterdayStats" type="checkbox"' + (yesterdayStats ? ' checked' : '') + '>\n' +
-'    <label for="yesterdayStats">Yesterdays tasks on Stats page</label>\n' +
+'    <label for="yesterdayStats">Include yesterday</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    On the Stats page, hold Up or Down to flip between today and yesterday.\n' +
-'    Yesterday shows worked time and completed count for that day; the\n' +
-'    live figures (current session, without a break, break time, focus\n' +
-'    sessions) show a dash.\n' +
-'  </p>\n' +
+'  <p class="hint sub">Hold Up / Down on the Stats page to flip to yesterday.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableSchedule" type="checkbox"' + (enableSchedule ? ' checked' : '') + '>\n' +
-'    <label for="enableSchedule">Enable Schedule</label>\n' +
+'    <label for="enableSchedule">Schedule</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Shows a Schedule row on the watch: today\'s tasks that have a set time,\n' +
-'    listed in time order like the desktop\'s schedule panel. Select toggles\n' +
-'    done, long-press starts/stops tracking.\n' +
-'  </p>\n' +
+'  <p class="hint">Today\'s timed tasks in time order. Select toggles done, long-press tracks.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableUpcoming" type="checkbox"' + (enableUpcoming ? ' checked' : '') + '>\n' +
-'    <label for="enableUpcoming">Enable Upcoming</label>\n' +
+'    <label for="enableUpcoming">Upcoming</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Shows an Upcoming row on the watch: tasks scheduled for a day after\n' +
-'    today, grouped by day, like the desktop\'s planner. Recurring tasks show\n' +
-'    once the desktop has created their next instance.\n' +
-'  </p>\n' +
+'  <p class="hint">Future-dated tasks grouped by day.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableNotesPage" type="checkbox"' + (enableNotesPage ? ' checked' : '') + '>\n' +
-'    <label for="enableNotesPage">Enable Notes page</label>\n' +
+'    <label for="enableNotesPage">Notes</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Shows a Notes row on the watch: your notes pinned to Today, read-only,\n' +
-'    scrollable. Not available on original Pebble/Pebble Steel (aplite).\n' +
-'  </p>\n' +
+'  <p class="hint">Today-pinned notes, read-only.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
-'    <input id="enableSearch" type="checkbox"' + (enableSearch ? ' checked' : '') + '>\n' +
-'    <label for="enableSearch">Enable voice search</label>\n' +
+'    <input id="enableTags" type="checkbox"' + (enableTags ? ' checked' : '') + '>\n' +
+'    <label for="enableTags">Tags</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Adds a Search row on the watch. Dictate a few words and the phone\n' +
-'    searches every task - all projects, backlog, future, done - for titles\n' +
-'    that contain them. Results are a read-only list showing each task and\n' +
-'    the project it lives in. Not available on aplite.\n' +
-'  </p>\n' +
+'  <p class="hint">Each tag with its open-task count. Off by default.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableReflect" type="checkbox"' + (enableReflect ? ' checked' : '') + '>\n' +
 '    <label for="enableReflect">Day review on Finish Day</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Press Select on the Finish Day row for a quick review: energy\n' +
-'    (low / ok / good), a 1-4 day rating, and one thing to improve (dictated).\n' +
-'    Each is saved to the day\'s metric and synced to the desktop\'s\n' +
-'    productivity history. Long-press Finish Day still archives done tasks.\n' +
-'    Not available on original Pebble/Pebble Steel (aplite).\n' +
-'  </p>\n' +
+'  <p class="hint">Select on Finish Day for a quick energy / rating / improvement review, synced to the desktop. Long-press still archives.</p>\n' +
 '\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="enableTags" type="checkbox"' + (enableTags ? ' checked' : '') + '>\n' +
-'    <label for="enableTags">Enable Tags</label>\n' +
-'  </div>\n' +
-'  <p class="hint">\n' +
-'    Shows a Tags row on the watch: every tag with its open-task count.\n' +
-'    Select a tag to see its tasks, from any project. Off by default.\n' +
-'  </p>\n' +
-'\n' +
+'  <h2>Voice</h2>\n' +
+'  <p class="hint">Dictation rows - microphone watches only (Pebble Time 2).</p>\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableAddTask" type="checkbox"' + (enableAddTask ? ' checked' : '') + '>\n' +
-'    <label for="enableAddTask">Enable Add Task (voice)</label>\n' +
+'    <label for="enableAddTask">Add Task</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Shows the microphone "Add Task" row on watches with a microphone.\n' +
-'    Watches without a microphone never show this row regardless of this\n' +
-'    setting.\n' +
-'  </p>\n' +
+'  <p class="hint">Dictate a new task from the watch.</p>\n' +
+'  <label for="defaultProjectId" class="sub">New task goes to</label>\n' +
+'  <select class="sub" id="defaultProjectId">\n' +
+'    <option value="">Inbox (default)</option>\n' +
+projectOptions + '\n' +
+'  </select>\n' +
+'  <label for="defaultTaskEstimateMin" class="sub">New task estimate</label>\n' +
+'  <select class="sub" id="defaultTaskEstimateMin">\n' +
+taskEstimateOptions + '\n' +
+'  </select>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="enableSearch" type="checkbox"' + (enableSearch ? ' checked' : '') + '>\n' +
+'    <label for="enableSearch">Search</label>\n' +
+'  </div>\n' +
+'  <p class="hint">Dictate a few words; the phone searches every task\'s title (all projects, backlog, future, done) and lists matches with their project.</p>\n' +
+'\n' +
+'  <h2>Time tracking &amp; focus</h2>\n' +
+'  <label for="focusType">Focus timer</label>\n' +
+'  <select id="focusType">\n' +
+focusTypeOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">Hold Up / Down on the tracking page to start / end a session. Countdown uses the length below; Pomodoro loops your desktop work / break; Flowtime counts up. Not on aplite.</p>\n' +
+'  <label for="focusLenMin" class="sub">Countdown length</label>\n' +
+'  <select class="sub" id="focusLenMin">\n' +
+focusLenOptions + '\n' +
+'  </select>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="overtimeNotify" type="checkbox"' + (overtimeNotify ? ' checked' : '') + '>\n' +
+'    <label for="overtimeNotify">Notify when a task runs over its estimate</label>\n' +
+'  </div>\n' +
+'  <p class="hint">Buzz + banner the moment tracked time reaches the estimate. Not on aplite.</p>\n' +
+'  <div class="checkbox-row sub">\n' +
+'    <input id="overtimeRepeat" type="checkbox"' + (overtimeRepeat ? ' checked' : '') + (overtimeNotify ? '' : ' disabled') + '>\n' +
+'    <label for="overtimeRepeat">Repeat every 5 minutes</label>\n' +
+'  </div>\n' +
+'  <p class="hint sub">Keep buzzing while the tracked task stays over. Stops when you stop tracking.</p>\n' +
+'\n' +
+'  <label for="breakReminderMin">Remind me to take a break</label>\n' +
+'  <select id="breakReminderMin">\n' +
+breakReminderOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">Buzz once watch-tracked time reaches this without a 5-min pause. App-open only. Not on aplite.</p>\n' +
+'\n' +
+'  <label for="idleReminderMin">Remind me when idle</label>\n' +
+'  <select id="idleReminderMin">\n' +
+idleReminderOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">Buzz "not tracking N min" after this long idle, then every interval. App-open only. Not on aplite.</p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="stopAtMidnight" type="checkbox"' + (stopAtMidnight ? ' checked' : '') + '>\n' +
+'    <label for="stopAtMidnight">Stop tracking at midnight</label>\n' +
+'  </div>\n' +
+'  <p class="hint">Stop a timer running past local midnight; a watch timer logs only up to 00:00.</p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="liveTracking" type="checkbox"' + (liveTracking ? ' checked' : '') + '>\n' +
+'    <label for="liveTracking">Show live tracking from other devices</label>\n' +
+'  </div>\n' +
+'  <p class="hint">See what you\'re tracking on desktop / phone in the pinned TRACKING section, and stop it from the watch. SuperSync only, app-open only. Not on aplite.</p>\n' +
+'\n' +
+'  <h2>Notifications</h2>\n' +
+'  <label for="dueReminderMin">Notify before a task is due</label>\n' +
+'  <select id="dueReminderMin">\n' +
+dueReminderOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">Buzz "Due at ..." this far before the next timed task. One per task time, app-open only. Not on aplite.</p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="habitStreakNudge" type="checkbox"' + (habitStreakNudge ? ' checked' : '') + '>\n' +
+'    <label for="habitStreakNudge">Nudge me about unfinished streaks</label>\n' +
+'  </div>\n' +
+'  <p class="hint">From 6pm, once a day, buzz if a habit with a 2+ day streak still isn\'t done. Not on aplite.</p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="audibleNotifications" type="checkbox"' + (audibleNotifications ? ' checked' : '') + '>\n' +
+'    <label for="audibleNotifications">Play a sound with banners</label>\n' +
+'  </div>\n' +
+'  <p class="hint">A short ping alongside every banner. Speaker on Pebble Time 2 only; respects system mute.</p>\n' +
+'  <label for="audibleVolume" class="sub">Ping volume: <span id="audibleVolumeOut">' + audibleVolume + '</span></label>\n' +
+'  <input class="sub" id="audibleVolume" type="range" min="0" max="100" step="5" value="' + audibleVolume + '"' + (audibleNotifications ? '' : ' disabled') + '>\n' +
+'\n' +
+'  <h2>Timeline</h2>\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="enableTimeline" type="checkbox"' + (enableTimeline ? ' checked' : '') + '>\n' +
+'    <label for="enableTimeline">Add scheduled tasks to the timeline</label>\n' +
+'  </div>\n' +
+'  <p class="hint">A PebbleOS timeline pin for each timed task (next 2 weeks), reminding with the lead time above. Title + project reach Rebble\'s timeline unencrypted, so off by default. Needs timeline enabled in the Rebble dev portal.</p>\n' +
+'\n' +
+'  <h2>Appearance &amp; input</h2>\n' +
+'  <label for="backlightMode">Backlight</label>\n' +
+'  <select id="backlightMode">\n' +
+backlightOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">"System default" leaves the backlight alone. Any other option overrides it while the app is open, relighting on each button press. Not on aplite.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="touchNav" type="checkbox"' + (touchNav ? ' checked' : '') + '>\n' +
 '    <label for="touchNav">Touch navigation</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Experimental, for the Pebble Time 2: swipe to scroll, tap a row to\n' +
-'    toggle/open it, long-press for the press-and-hold action, swipe right\n' +
-'    to go back. The physical buttons keep working too. Off by default -\n' +
-'    the current Time 2 touch firmware misreads taps near the screen edges,\n' +
-'    so it works best for rows in the middle of the screen for now. No\n' +
-'    effect on watches without a touchscreen.\n' +
-'  </p>\n' +
+'  <p class="hint">Experimental Pebble Time 2 touch: swipe to scroll, tap to select, long-press to act, swipe right for back. Buttons still work. Off by default - the current touch firmware misreads edge taps.</p>\n' +
 '\n' +
 (showStatsExport ?
 '  <h2>Stats export</h2>\n' +
-'  <p class="hint">\n' +
-'    A snapshot of your Stats page as Markdown with mermaid charts - a\n' +
-'    today/yesterday table, worked minutes over the last 7 days, open tasks\n' +
-'    by project, and habit streaks. Copy it into a notes app or anywhere\n' +
-'    that renders mermaid. Regenerated each time you open this page.\n' +
-'  </p>\n' +
+'  <p class="hint">Your Stats page as Markdown + mermaid charts (today/yesterday table, week hours, project pie, habit streaks). Copy it anywhere that renders mermaid. Rebuilt each time you open this page.</p>\n' +
 '  <textarea id="statsExport" readonly>' + escapeHtmlAttr(statsMarkdown) + '</textarea>\n' +
 '  <button id="copyStatsBtn" class="secondary">Copy to clipboard</button>\n'
 : '') +
@@ -576,28 +416,13 @@ taskEstimateOptions + '\n' +
 '    <input id="autoSyncOnComplete" type="checkbox"' + (autoSyncOnComplete ? ' checked' : '') + '>\n' +
 '    <label for="autoSyncOnComplete">Sync automatically after a watch change</label>\n' +
 '  </div>\n' +
-'  <p class="hint">\n' +
-'    Pulls the latest changes from the server right after you complete a\n' +
-'    task, track time, adjust a habit, or add a task on the watch, instead\n' +
-'    of waiting for the next manual Resync or app launch. Uses a bit more\n' +
-'    battery/data per action.\n' +
-'  </p>\n' +
+'  <p class="hint">Pull from the server right after a watch change, instead of waiting for a manual Resync. Uses a little more battery / data.</p>\n' +
 '\n' +
 '  <h2>Danger zone</h2>\n' +
-'  <p class="hint">\n' +
-'    Wipes this watch/phone\'s locally cached task list and resync position,\n' +
-'    then re-downloads everything from the server from scratch. Your\n' +
-'    SuperSync account, saved token, and password are untouched - use this\n' +
-'    if the watch\'s list ever looks stuck or out of sync, not to unpair.\n' +
-'  </p>\n' +
+'  <p class="hint">Wipe this device\'s cached list + resync position and re-download everything. Account, token and password are untouched. Use it if the list looks stuck, not to unpair.</p>\n' +
 '  <button id="clearDataBtn" class="danger">Clear all data &amp; resync</button>\n' +
 '\n' +
-'  <p class="hint">\n' +
-'    Wipes only the watch\'s stored copy of the task, habit, and project\n' +
-'    lists - what it shows when the phone is out of range. The watch\n' +
-'    re-downloads them from the phone straight away. Use this if the watch\n' +
-'    keeps showing a stale list after a resync.\n' +
-'  </p>\n' +
+'  <p class="hint">Wipe only the watch\'s offline copy of the task / habit / project lists. It re-downloads from the phone at once. Use it if the watch keeps showing a stale list.</p>\n' +
 '  <button id="wipeWatchCacheBtn" class="danger">Wipe watch cache</button>\n' +
 '\n' +
 '  <button id="saveBtn">Save &amp; sync</button>\n' +
