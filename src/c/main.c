@@ -1395,13 +1395,21 @@ static time_t s_last_sync_epoch = 0;
 // comes straight back if the firmware's inactivity timeout closed the app.
 static const uint32_t PERSIST_KEY_FOCUS_END = 114;
 static const uint32_t PERSIST_KEY_FOCUS_ON_BREAK = 121;
+static const uint32_t PERSIST_KEY_FOCUS_START = 123;
 static time_t s_focus_end_epoch = 0;
+// Start of the current focus session - drives Flowtime's count-up and is the
+// "session is live" marker there (where s_focus_end_epoch stays 0).
+static time_t s_focus_start_epoch = 0;
 static int s_focus_len_min = 25;
-// Inherit the desktop Pomodoro timing (globalConfig.pomodoro) instead of the
-// FOCUS_LEN_MIN dropdown - config.usePomodoroCfg. When on, a completed focus
-// session chains straight into a s_pomodoro_break_min break (s_focus_on_break),
-// then buzzes "Break over". MSG_POMODORO_CFG pushes the two minute values.
-static bool s_use_pomodoro_cfg = false;
+// The focus timer style, from the pairing page (config.focusType, sent over the
+// KEY_USE_POMODORO_CFG slot as 0/1/2 to avoid a new message key):
+//   COUNTDOWN - one session of s_focus_len_min, buzz at zero, done.
+//   POMODORO  - s_pomodoro_work_min work, then a s_pomodoro_break_min break,
+//               looping work/break until a long-hold ends it.
+//   FLOWTIME  - counts up, no end; long-hold ends it. MSG_POMODORO_CFG pushes
+//               the work/break minutes used by POMODORO.
+typedef enum { FOCUS_COUNTDOWN, FOCUS_POMODORO, FOCUS_FLOWTIME } FocusType;
+static FocusType s_focus_type = FOCUS_COUNTDOWN;
 static int s_pomodoro_work_min = 25;
 static int s_pomodoro_break_min = 5;
 static bool s_focus_on_break = false;
@@ -1422,7 +1430,11 @@ static int s_focus_completed_today = 0;
 static int s_focus_done_day = 0;
 
 static bool focus_active(void) {
-  return s_focus_end_epoch != 0 && s_tracking_task_id[0] != '\0';
+  if (s_tracking_task_id[0] == '\0') {
+    return false;
+  }
+  return s_focus_end_epoch != 0 ||
+         (s_focus_type == FOCUS_FLOWTIME && s_focus_start_epoch != 0);
 }
 
 // A local-calendar day id for "resets at midnight" counters (focus sessions,
@@ -1444,11 +1456,13 @@ static void focus_roll_day(void) {
 }
 
 static void save_focus(void) {
-  if (s_focus_end_epoch != 0) {
+  if (s_focus_end_epoch != 0 || s_focus_start_epoch != 0) {
     persist_write_int(PERSIST_KEY_FOCUS_END, (int)s_focus_end_epoch);
+    persist_write_int(PERSIST_KEY_FOCUS_START, (int)s_focus_start_epoch);
     persist_write_int(PERSIST_KEY_FOCUS_ON_BREAK, s_focus_on_break ? 1 : 0);
   } else {
     persist_delete(PERSIST_KEY_FOCUS_END);
+    persist_delete(PERSIST_KEY_FOCUS_START);
     persist_delete(PERSIST_KEY_FOCUS_ON_BREAK);
   }
   persist_write_int(PERSIST_KEY_FOCUS_DONE_COUNT, s_focus_completed_today);
@@ -1458,6 +1472,7 @@ static void save_focus(void) {
 static void load_focus(void) {
   if (persist_exists(PERSIST_KEY_FOCUS_END)) {
     s_focus_end_epoch = (time_t)persist_read_int(PERSIST_KEY_FOCUS_END);
+    s_focus_start_epoch = (time_t)persist_read_int(PERSIST_KEY_FOCUS_START);
     s_focus_on_break = persist_exists(PERSIST_KEY_FOCUS_ON_BREAK) &&
                        persist_read_int(PERSIST_KEY_FOCUS_ON_BREAK) != 0;
   }
@@ -2034,7 +2049,10 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
     GRect hb = layer_get_bounds(cell_layer);
     fill_bg(ctx, hb, GColorGreen);
     graphics_context_set_text_color(ctx, GColorBlack);
-    const char *label = !focus_active() ? "TRACKING" : s_focus_on_break ? "BREAK" : "FOCUSING";
+    const char *label = !focus_active() ? "TRACKING"
+                        : s_focus_on_break ? "BREAK"
+                        : s_focus_end_epoch == 0 ? "FLOWING"
+                        : "FOCUSING";
     GFont label_font = fonts_get_system_font(CHROME_FONT_BOLD_KEY);
     int16_t avail = hb.size.w - TITLE_BOX_X * 2;
     int16_t word_w = title_natural_width_font(label, label_font);
@@ -5167,7 +5185,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       // Focus-mode session length in minutes. Only the NEXT session picks up a
       // change; a running one keeps its already-computed end time.
       s_focus_len_min = tuple_int(iterator, KEY_FOCUS_LEN_MIN, s_focus_len_min);
-      s_use_pomodoro_cfg = tuple_int(iterator, KEY_USE_POMODORO_CFG, s_use_pomodoro_cfg) != 0;
+      {
+        int ft = tuple_int(iterator, KEY_USE_POMODORO_CFG, (int)s_focus_type);
+        s_focus_type = (ft < 0 || ft > FOCUS_FLOWTIME) ? FOCUS_COUNTDOWN : (FocusType)ft;
+      }
       // "Stop tracking at midnight" - absent-means-unchanged.
       s_stop_at_midnight = tuple_int(iterator, KEY_STOP_AT_MIDNIGHT, s_stop_at_midnight) != 0;
       // "Nudge me about unfinished streaks" - absent-means-unchanged.
@@ -8392,12 +8413,13 @@ static void stop_live_tick(void) {
 // strip. `notify` = ran to completion (long buzz + banner); else a plain stop.
 // Nothing to undo for the backlight - the pulses fade themselves.
 static void focus_end(bool ran_out) {
-  // A break that ran out. With Pomodoro timing on and a live track, loop back
-  // into the next work session (work -> break -> work -> ... until a long-hold
-  // ends it or tracking stops); otherwise focus mode is fully done.
+  // POMODORO: a break that ran out loops back into the next work session
+  // (work -> break -> work -> ... until a long-hold ends it or tracking stops).
   if (ran_out && s_focus_on_break) {
     s_focus_on_break = false;
-    if (s_use_pomodoro_cfg && s_pomodoro_work_min > 0 && s_tracking_task_id[0] != '\0') {
+    if (s_focus_type == FOCUS_POMODORO && s_pomodoro_work_min > 0 &&
+        s_tracking_task_id[0] != '\0') {
+      s_focus_start_epoch = time(NULL);
       s_focus_end_epoch = time(NULL) + (time_t)s_pomodoro_work_min * 60;
       save_focus();
       vibes_double_pulse();
@@ -8406,16 +8428,18 @@ static void focus_end(bool ran_out) {
       return;
     }
     s_focus_end_epoch = 0;
+    s_focus_start_epoch = 0;
     save_focus();
     vibes_double_pulse();
     show_top_banner("Break over");
     menu_layer_reload_data(s_menu_layer);
     return;
   }
-  // A work session that ran out, with Pomodoro timing on: chain into a break.
-  if (ran_out && s_use_pomodoro_cfg && s_pomodoro_break_min > 0) {
+  // POMODORO: a work session that ran out chains into a break.
+  if (ran_out && s_focus_type == FOCUS_POMODORO && s_pomodoro_break_min > 0) {
     focus_bump_completed(); // the work session counts for the Stats page
     s_focus_on_break = true;
+    s_focus_start_epoch = time(NULL);
     s_focus_end_epoch = time(NULL) + (time_t)s_pomodoro_break_min * 60;
     save_focus();
     vibe_celebrate();
@@ -8425,9 +8449,11 @@ static void focus_end(bool ran_out) {
     menu_layer_reload_data(s_menu_layer);
     return;
   }
-  // Plain end - a manual stop, or completion with no break to chain.
+  // Plain end - a manual stop (COUNTDOWN / FLOWTIME / an early Pomodoro stop),
+  // or a COUNTDOWN reaching zero.
   s_focus_on_break = false;
   s_focus_end_epoch = 0;
+  s_focus_start_epoch = 0;
   save_focus();
   if (ran_out) {
     vibe_celebrate();
@@ -8442,15 +8468,20 @@ static void focus_end(bool ran_out) {
 // Toggles focus on the current LOCAL tracking session. A no-op when nothing
 // is tracked locally. Bound to long-press UP and DOWN on the tracking window.
 static void focus_toggle(void) {
-  if (s_focus_end_epoch != 0) {
+  if (focus_active()) {
     focus_end(false);
   } else {
     if (s_tracking_task_id[0] == '\0') {
       return;
     }
     s_focus_on_break = false;
-    int len = s_use_pomodoro_cfg ? s_pomodoro_work_min : s_focus_len_min;
-    s_focus_end_epoch = time(NULL) + (time_t)len * 60;
+    s_focus_start_epoch = time(NULL);
+    if (s_focus_type == FOCUS_FLOWTIME) {
+      s_focus_end_epoch = 0; // counts up, no end
+    } else {
+      int len = s_focus_type == FOCUS_POMODORO ? s_pomodoro_work_min : s_focus_len_min;
+      s_focus_end_epoch = time(NULL) + (time_t)len * 60;
+    }
     save_focus();
     vibes_short_pulse();
     light_enable_interaction();
@@ -8516,12 +8547,27 @@ static void live_window_refresh(void) {
       focus_end(true);
     }
     if (focus_active()) {
-      int left_s = (int)(s_focus_end_epoch - time(NULL));
-      if (left_s < 0) {
-        left_s = 0;
+      if (s_focus_end_epoch == 0) {
+        // FLOWTIME: count up from the session start.
+        int up_s = (int)(time(NULL) - s_focus_start_epoch);
+        if (up_s < 0) {
+          up_s = 0;
+        }
+        int h = up_s / 3600;
+        if (h > 0) {
+          snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d:%02d", h, (up_s % 3600) / 60, up_s % 60);
+        } else {
+          snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d", up_s / 60, up_s % 60);
+        }
+        text_layer_set_text(s_live_state_layer, "Flowing");
+      } else {
+        int left_s = (int)(s_focus_end_epoch - time(NULL));
+        if (left_s < 0) {
+          left_s = 0;
+        }
+        snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d", left_s / 60, left_s % 60);
+        text_layer_set_text(s_live_state_layer, s_focus_on_break ? "Break" : "Focusing");
       }
-      snprintf(elapsed_buf, sizeof(elapsed_buf), "%d:%02d", left_s / 60, left_s % 60);
-      text_layer_set_text(s_live_state_layer, s_focus_on_break ? "Break" : "Focusing");
       text_layer_set_text(s_live_task_layer, t->title);
       text_layer_set_font(s_live_elapsed_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
       text_layer_set_text(s_live_elapsed_layer, elapsed_buf);
@@ -8650,11 +8696,11 @@ static void live_window_click_config_provider(void *context) {
 // the focus session's time runs out. Draws nothing outside a focus session, so
 // plain tracking / remote presence keep the clean text-only look.
 static void live_arc_update_proc(Layer *layer, GContext *ctx) {
-  if (!focus_active()) {
-    return;
+  if (!focus_active() || s_focus_end_epoch == 0) {
+    return; // no depleting ring for Flowtime (counts up, no end)
   }
   int total_min = s_focus_on_break ? s_pomodoro_break_min
-                  : (s_use_pomodoro_cfg ? s_pomodoro_work_min : s_focus_len_min);
+                  : (s_focus_type == FOCUS_POMODORO ? s_pomodoro_work_min : s_focus_len_min);
   int total_s = total_min * 60;
   if (total_s <= 0) {
     return;
@@ -9133,11 +9179,14 @@ static void init(void) {
 #ifndef PBL_PLATFORM_APLITE
   load_habit_tracking();
   load_focus();
-  // Drop a stale session: focus needs a live local track, and a session
-  // already past its end is over (the app was closed when it expired).
-  if (s_focus_end_epoch != 0 &&
-      (s_tracking_task_id[0] == '\0' || time(NULL) >= s_focus_end_epoch)) {
+  // Drop a stale session: focus needs a live local track, and a timed session
+  // already past its end is over (the app was closed when it expired). A
+  // Flowtime session (no end) survives only while the track is still live.
+  if ((s_focus_end_epoch != 0 || s_focus_start_epoch != 0) &&
+      (s_tracking_task_id[0] == '\0' ||
+       (s_focus_end_epoch != 0 && time(NULL) >= s_focus_end_epoch))) {
     s_focus_end_epoch = 0;
+    s_focus_start_epoch = 0;
     s_focus_on_break = false;
     save_focus();
   }

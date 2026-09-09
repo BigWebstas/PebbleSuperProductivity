@@ -464,9 +464,18 @@ function sendStatus(code, message) {
     // Focus-mode session length in minutes (watch-local pomodoro on the
     // full-screen tracking page - main.c's s_focus_len_min). Default 25.
     FOCUS_LEN_MIN: config.focusLenMin || 25,
-    // Inherit the desktop's Pomodoro work/break timing for focus mode instead
-    // of FOCUS_LEN_MIN, and chain a break after each session.
-    USE_POMODORO_CFG: config.usePomodoroCfg ? 1 : 0,
+    // Focus timer style (config.focusType). Sent over the old USE_POMODORO_CFG
+    // key slot as 0/1/2 to avoid adding a message key: 0 = countdown (one
+    // FOCUS_LEN_MIN session), 1 = pomodoro (work/break loop off the desktop's
+    // pomodoro lengths - see sendPomodoroCfg), 2 = flowtime (counts up, manual
+    // end). Falls back to the legacy usePomodoroCfg checkbox.
+    USE_POMODORO_CFG: (function () {
+      var m = { countdown: 0, pomodoro: 1, flowtime: 2 };
+      if (config.focusType != null && m[config.focusType] != null) {
+        return m[config.focusType];
+      }
+      return config.usePomodoroCfg ? 1 : 0;
+    })(),
     // "Stop tracking at midnight" - watch-side (main.c's maybe_stop_at_midnight).
     STOP_AT_MIDNIGHT: config.stopAtMidnight ? 1 : 0,
     // "Nudge me in the evening about unfinished streaks" - watch-side
@@ -3525,7 +3534,7 @@ Pebble.addEventListener('showConfiguration', function () {
       liveTracking: !!config.liveTracking,
       enableTimeline: !!config.enableTimeline,
       focusLenMin: config.focusLenMin || 25,
-      usePomodoroCfg: !!config.usePomodoroCfg,
+      focusType: config.focusType || (config.usePomodoroCfg ? 'pomodoro' : 'countdown'),
       stopAtMidnight: !!config.stopAtMidnight,
       habitStreakNudge: !!config.habitStreakNudge,
       enableReflect: !!config.enableReflect,
@@ -3629,7 +3638,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     liveTracking: !!result.liveTracking,
     enableTimeline: !!result.enableTimeline,
     focusLenMin: parseInt(result.focusLenMin, 10) || 25,
-    usePomodoroCfg: !!result.usePomodoroCfg,
+    focusType: result.focusType || 'countdown',
     stopAtMidnight: !!result.stopAtMidnight,
     habitStreakNudge: !!result.habitStreakNudge,
     enableReflect: !!result.enableReflect,

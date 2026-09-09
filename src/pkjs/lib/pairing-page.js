@@ -50,7 +50,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var stopAtMidnight = !!options.stopAtMidnight;
   var enableTimeline = !!options.enableTimeline;
   var focusLenMin = options.focusLenMin || 25;
-  var usePomodoroCfg = !!options.usePomodoroCfg;
+  var focusType = options.focusType || (options.usePomodoroCfg ? 'pomodoro' : 'countdown');
   var appVersion = options.appVersion || '';
   var backlightMode = options.backlightMode || 0;
   var passwordPlaceholder = hasPassword
@@ -120,6 +120,14 @@ function buildPairingPageUrl(baseUrl, email, options) {
     [60, '60 minutes'],
   ].map(function (opt) {
     var selected = opt[0] === focusLenMin ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
+  var focusTypeOptions = [
+    ['countdown', 'Countdown - one session, buzz at zero'],
+    ['pomodoro', 'Pomodoro - work / break, looping'],
+    ['flowtime', 'Flowtime - counts up, you end it'],
+  ].map(function (opt) {
+    var selected = opt[0] === focusType ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var backlightOptions = [
@@ -360,27 +368,22 @@ dueReminderOptions + '\n' +
 '    Steel (aplite).\n' +
 '  </p>\n' +
 '\n' +
-'  <label for="focusLenMin">Focus mode session length</label>\n' +
+'  <label for="focusType">Focus timer</label>\n' +
+'  <select id="focusType">\n' +
+focusTypeOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">\n' +
+'    On the full-screen tracking page, hold Up or Down to start / end a\n' +
+'    focus session (Back is trapped so a stray press can\'t drop you to the\n' +
+'    watchface). <b>Countdown</b> uses the length below. <b>Pomodoro</b> uses\n' +
+'    your desktop\'s work / break lengths and loops them. <b>Flowtime</b> just\n' +
+'    counts up. Watch-local. Not on original Pebble / Pebble Steel (aplite).\n' +
+'  </p>\n' +
+'\n' +
+'  <label for="focusLenMin">Countdown length</label>\n' +
 '  <select id="focusLenMin">\n' +
 focusLenOptions + '\n' +
 '  </select>\n' +
-'  <p class="hint">\n' +
-'    On the full-screen tracking page, hold Up or Down to start a focus\n' +
-'    session of this length - a countdown, a buzz at zero, and the Back\n' +
-'    button trapped so a stray press can\'t drop you to the watchface. Hold\n' +
-'    Up or Down again to end it. Watch-local, separate from the desktop\'s\n' +
-'    focus mode. Not available on original Pebble/Pebble Steel (aplite).\n' +
-'  </p>\n' +
-'\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="usePomodoroCfg" type="checkbox"' + (usePomodoroCfg ? ' checked' : '') + '>\n' +
-'    <label for="usePomodoroCfg">Use desktop Pomodoro timing</label>\n' +
-'  </div>\n' +
-'  <p class="hint">\n' +
-'    Focus sessions use your desktop Pomodoro work length instead of the\n' +
-'    dropdown above, and a completed session rolls straight into a break of\n' +
-'    the configured length before buzzing "Break over".\n' +
-'  </p>\n' +
 '\n' +
 '  <label for="backlightMode">Backlight</label>\n' +
 '  <select id="backlightMode">\n' +
@@ -663,7 +666,7 @@ taskEstimateOptions + '\n' +
 '      stopAtMidnight: document.getElementById(\'stopAtMidnight\').checked,\n' +
 '      enableTimeline: document.getElementById(\'enableTimeline\').checked,\n' +
 '      focusLenMin: parseInt(document.getElementById(\'focusLenMin\').value, 10) || 25,\n' +
-'      usePomodoroCfg: document.getElementById(\'usePomodoroCfg\').checked,\n' +
+'      focusType: document.getElementById(\'focusType\').value,\n' +
 '      backlightMode: parseInt(document.getElementById(\'backlightMode\').value, 10) || 0\n' +
 '    });\n' +
 '  });\n' +
