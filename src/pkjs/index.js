@@ -104,6 +104,12 @@ var MSG_TASK_REPEAT_REQUEST = 57;  // watch -> phone: TASK_ID
 var MSG_TASK_REPEAT_DATA = 58;     // phone -> watch: TASK_ID + TASK_REPEAT_TEXT + TASK_REPEAT_PAUSED
 var MSG_TASK_REPEAT_PAUSE = 59;    // watch -> phone: TASK_ID + TASK_REPEAT_PAUSED
 var MSG_POMODORO_CFG = 60;         // phone -> watch: POMODORO_WORK_MIN + POMODORO_BREAK_MIN (1 pause / 0 resume)
+// Optional voice search (config.enableSearch). The watch dictates a query; the
+// phone searches every task and replies with a preformatted, read-only result
+// blob (one "\x02" header line + "title  · project" lines), reusing
+// UPCOMING_TEXT and the shared page window.
+var MSG_SEARCH_REQUEST = 61;       // watch -> phone: TASK_TITLE (the dictated query)
+var MSG_SEARCH_DATA = 62;          // phone -> watch: UPCOMING_TEXT
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -408,6 +414,9 @@ function sendStatus(code, message) {
     // Notes page row (default off). Drives main.c's s_notespage_enabled /
     // SECTION0_ROW_NOTESPAGE - today-pinned standalone notes.
     NOTESPAGE_ENABLED: config.enableNotesPage ? 1 : 0,
+    // Voice search row (default off). Drives main.c's s_search_enabled /
+    // SECTION0_ROW_SEARCH - dictate a query, phone searches every task.
+    SEARCH_ENABLED: config.enableSearch ? 1 : 0,
     // Tags page row - default OFF (unlike the others). Drives main.c's
     // s_tags_enabled / SECTION0_ROW_TAGS: every tag with its open-task count,
     // drill in for that tag's tasks. Reuses the projects-browser plumbing with
@@ -985,6 +994,50 @@ function handleUpcomingRequest() {
     UPCOMING_TEXT: text,
   }, function () {}, function (e) {
     console.log('[pkjs] giving up on UPCOMING_DATA after retries: ' + JSON.stringify(e));
+  });
+}
+
+// Answers MSG_SEARCH_REQUEST: a dictated query -> store.computeSearch over
+// every task -> one read-only blob (a "\x02" header line, then one line per
+// hit "title  · project [· done] [· MM-DD]") in UPCOMING_TEXT, shown in the
+// shared page window.
+function handleSearchRequest(query) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (!config.enableSearch) {
+    return;
+  }
+  var q = String(query || '').trim();
+  var state = loadState();
+  store.setStartOfNextDayFromState(state);
+  var hits = store.computeSearch(state, q, 24);
+  console.log('[pkjs] search ' + JSON.stringify(q) + ' over ' +
+    Object.keys(state.task || {}).length + ' tasks -> ' + hits.length + ' hits');
+  var clean = function (s, n) { return String(s).replace(/[\t\n\x02\x03]/g, ' ').slice(0, n); };
+  var lines = [];
+  lines.push('\x02' + (hits.length
+    ? hits.length + (hits.length === 1 ? ' match' : ' matches')
+    : 'No matches') + ' · ' + clean(q, 32));
+  hits.forEach(function (h) {
+    lines.push(clean(h.title, 44));
+    // "\x03" = subtext line: the project it lives in, then done / due markers.
+    var sub = [clean(h.backlog ? h.project + ' (backlog)' : h.project, 30)];
+    if (h.done) { sub.push('done'); }
+    if (h.dueDay) { sub.push(h.dueDay.slice(5)); } // MM-DD
+    lines.push('\x03' + sub.join('  ·  '));
+  });
+  var text = lines.join('\n');
+  if (text.length > 620) {
+    text = text.slice(0, 620);
+  }
+  sendWithRetry({
+    MSG_TYPE: MSG_SEARCH_DATA,
+    UPCOMING_TEXT: text,
+  }, function () {}, function (e) {
+    console.log('[pkjs] giving up on SEARCH_DATA after retries: ' + JSON.stringify(e));
   });
 }
 
@@ -3476,6 +3529,9 @@ Pebble.addEventListener('appmessage', function (e) {
     case MSG_UPCOMING_REQUEST:
       handleUpcomingRequest();
       break;
+    case MSG_SEARCH_REQUEST:
+      handleSearchRequest(payload.TASK_TITLE);
+      break;
     default:
       break;
   }
@@ -3487,6 +3543,16 @@ Pebble.addEventListener('showConfiguration', function () {
   var projects = Object.keys(state.project || {}).map(function (id) {
     return { id: id, title: state.project[id].title };
   });
+  // Markdown + mermaid stats report for the settings page's copy-out box.
+  var statsMarkdown = '';
+  if (config.enableStats !== false) {
+    try {
+      statsMarkdown = store.statsToMarkdown(
+        store.computeStats(state), store.getActiveHabits(state, 999));
+    } catch (e) {
+      console.log('[pkjs] statsToMarkdown failed: ' + JSON.stringify(e));
+    }
+  }
   var url = pairingPage.buildPairingPageUrl(
     config.baseUrl || supersync.DEFAULT_BASE_URL,
     config.email || '',
@@ -3519,6 +3585,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableSchedule: config.enableSchedule !== false,
       enableUpcoming: config.enableUpcoming !== false,
       enableNotesPage: !!config.enableNotesPage,
+      enableSearch: !!config.enableSearch,
       enableTags: config.enableTags === true,
       yesterdayStats: !!config.yesterdayStats,
       backlightMode: config.backlightMode || 0,
@@ -3538,6 +3605,7 @@ Pebble.addEventListener('showConfiguration', function () {
       stopAtMidnight: !!config.stopAtMidnight,
       habitStreakNudge: !!config.habitStreakNudge,
       enableReflect: !!config.enableReflect,
+      statsMarkdown: statsMarkdown,
       appVersion: APP_VERSION,
     }
   );
@@ -3623,6 +3691,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableSchedule: !!result.enableSchedule,
     enableUpcoming: !!result.enableUpcoming,
     enableNotesPage: !!result.enableNotesPage,
+    enableSearch: !!result.enableSearch,
     enableTags: !!result.enableTags,
     yesterdayStats: !!result.yesterdayStats,
     backlightMode: parseInt(result.backlightMode, 10) || 0,

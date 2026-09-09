@@ -1980,6 +1980,163 @@ function computeStats(state) {
   };
 }
 
+// A shareable Markdown report of computeStats() + getActiveHabits(): a
+// today/yesterday table, a 7-day worked-minutes bar (mermaid xychart-beta),
+// an open-tasks-by-project pie, and a habit-streak bar + table. Rendered
+// read-only on the settings page for the user to copy out - the watch/phone
+// has nowhere to write a file. Pure formatting, no state access.
+function statsToMarkdown(stats, habits) {
+  stats = stats || {};
+  habits = habits || [];
+  var week = stats.week || [];
+
+  function fmtDur(ms) {
+    if (!ms || ms <= 0) { return '\u2014'; }
+    var m = Math.round(ms / 60000);
+    if (m < 1) { return '<1m'; }
+    var h = Math.floor(m / 60);
+    return h > 0 ? (h + 'h ' + (m % 60) + 'm') : (m + 'm');
+  }
+  function fmtClock(min) {
+    if (min == null || min < 0) { return null; }
+    return Math.floor(min / 60) + ':' + (min % 60 < 10 ? '0' : '') + (min % 60);
+  }
+  function fmtSpan(cell) {
+    var a = fmtClock(cell && cell.startMin);
+    var b = fmtClock(cell && cell.endMin);
+    return (a && b) ? (a + '\u2013' + b) : '\u2014';
+  }
+  // mermaid category label - quote it, drop the chars that break the parser.
+  function lbl(s) {
+    return '"' + String(s).replace(/["\r\n[\]]/g, ' ').trim() + '"';
+  }
+  function cell(s) { return String(s).replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' '); }
+
+  var d = new Date();
+  var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+  var stamp = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) +
+              ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes());
+
+  var today = week.length ? week[week.length - 1] : {};
+  var yest = week.length >= 2 ? week[week.length - 2] : {};
+
+  var L = [];
+  L.push('# Super Productivity \u2014 stats');
+  L.push('');
+  L.push('_Exported ' + stamp + '_');
+  L.push('');
+  L.push('## Today & yesterday');
+  L.push('');
+  L.push('| | Today | Yesterday |');
+  L.push('| --- | --- | --- |');
+  L.push('| Worked | ' + fmtDur(stats.workedTodayMs) + ' | ' + fmtDur(stats.workedYesterdayMs) + ' |');
+  L.push('| Tasks done | ' + (stats.completedTodayCount || 0) + ' | ' + (stats.completedYesterdayCount || 0) + ' |');
+  L.push('| Est. remaining | ' + fmtDur(stats.estimateRemainingMs) + ' | \u2014 |');
+  L.push('| Session | ' + fmtSpan(today) + ' | ' + fmtSpan(yest) + ' |');
+  L.push('| Breaks | ' + ((today && today.breaks) || 0) + ' | ' + ((yest && yest.breaks) || 0) + ' |');
+  L.push('');
+
+  if (week.length) {
+    L.push('## Minutes worked, last 7 days');
+    L.push('');
+    L.push('```mermaid');
+    L.push('xychart-beta');
+    L.push('    title "Minutes worked per day"');
+    L.push('    x-axis [' + week.map(function (w) { return lbl(w.label); }).join(', ') + ']');
+    L.push('    y-axis "Minutes"');
+    L.push('    bar [' + week.map(function (w) { return Math.round((w.ms || 0) / 60000); }).join(', ') + ']');
+    L.push('```');
+    L.push('');
+    L.push('Week total: **' + fmtDur(stats.workedWeekMs) + '**');
+    L.push('');
+  }
+
+  var projs = (stats.projects || []).filter(function (x) { return x.taskCount > 0; });
+  L.push('## Open tasks by project');
+  L.push('');
+  if (projs.length) {
+    L.push('```mermaid');
+    L.push('pie showData');
+    L.push('    title Open tasks by project');
+    projs.forEach(function (x) { L.push('    ' + lbl(x.title) + ' : ' + x.taskCount); });
+    L.push('```');
+  } else {
+    L.push('_No open tasks._');
+  }
+  L.push('');
+
+  var streaked = habits.filter(function (h) { return (h.streak || 0) > 0 || (h.bestStreak || 0) > 0; });
+  if (streaked.length) {
+    L.push('## Habit streaks');
+    L.push('');
+    L.push('```mermaid');
+    L.push('xychart-beta');
+    L.push('    title "Current streak (days)"');
+    L.push('    x-axis [' + streaked.map(function (h) { return lbl(h.title); }).join(', ') + ']');
+    L.push('    y-axis "Days"');
+    L.push('    bar [' + streaked.map(function (h) { return h.streak || 0; }).join(', ') + ']');
+    L.push('```');
+    L.push('');
+    L.push('| Habit | Current | Best |');
+    L.push('| --- | --- | --- |');
+    streaked.forEach(function (h) {
+      L.push('| ' + cell(h.title) + ' | ' + (h.streak || 0) + ' | ' + (h.bestStreak || 0) + ' |');
+    });
+    L.push('');
+  }
+
+  return L.join('\n');
+}
+
+// Voice-search the whole task set (every project, backlog, future, done - the
+// replayed state.task has them all) for tasks whose title contains every
+// whitespace-separated token of `query`, case-insensitive. Undone first, then
+// title order. Read-only result rows: title + the project it lives in (or
+// "Backlog" / "No project" / a parent-task title for a subtask), plus done /
+// due markers for the watch's line formatter.
+function computeSearch(state, query, limit) {
+  var tasks = state.task || {};
+  // Split on anything that isn't a letter or digit (Latin + Latin-1/Extended)
+  // so a dictated trailing "." or a hyphen doesn't wreck the match.
+  var tokens = String(query || '').toLowerCase()
+    .split(/[^a-z0-9À-ɏ]+/)
+    .filter(Boolean);
+  if (!tokens.length) {
+    return [];
+  }
+  var projTitle = {};
+  Object.keys(state.project || {}).forEach(function (id) {
+    if (state.project[id]) { projTitle[id] = state.project[id].title; }
+  });
+  var hits = [];
+  Object.keys(tasks).forEach(function (id) {
+    var t = tasks[id];
+    if (!t || !t.title) {
+      return;
+    }
+    var hay = t.title.toLowerCase();
+    if (!tokens.every(function (tok) { return hay.indexOf(tok) !== -1; })) {
+      return;
+    }
+    var parent = t.parentId && tasks[t.parentId];
+    var project = (t.projectId && projTitle[t.projectId]) ? projTitle[t.projectId]
+      : (parent && parent.title) ? parent.title
+      : 'No project';
+    hits.push({
+      title: (parent ? '» ' : '') + t.title,
+      project: project,
+      backlog: !!t.__inBacklog,
+      done: !!t.isDone,
+      dueDay: t.dueDay || null,
+    });
+  });
+  hits.sort(function (a, b) {
+    if (a.done !== b.done) { return a.done ? 1 : -1; }
+    return titleCompare(a.title, b.title);
+  });
+  return hits.slice(0, limit || 40);
+}
+
 // ---- recurring-task occurrence projection (Upcoming page, phase B) ----
 // A day-by-day scan mirroring super-productivity's getNextRepeatOccurrence
 // predicates (DAILY/WEEKLY/MONTHLY/YEARLY, monthly Nth-weekday + last-day
@@ -2257,6 +2414,8 @@ module.exports = {
   getTagList: getTagList,
   getTagTasks: getTagTasks,
   computeStats: computeStats,
+  statsToMarkdown: statsToMarkdown,
+  computeSearch: computeSearch,
   computeUpcoming: computeUpcoming,
   computeNotes: computeNotes,
   formatRepeatCfg: formatRepeatCfg,

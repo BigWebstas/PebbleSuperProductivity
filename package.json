@@ -191,7 +191,8 @@
       "TASK_REPEAT_PAUSED",
       "POMODORO_WORK_MIN",
       "POMODORO_BREAK_MIN",
-      "USE_POMODORO_CFG"
+      "USE_POMODORO_CFG",
+      "SEARCH_ENABLED"
     ]
   }
 }

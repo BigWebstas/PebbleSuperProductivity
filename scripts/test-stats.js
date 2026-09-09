@@ -194,6 +194,70 @@ check('week entries carry session start/end + break count from timeTracking', ()
   assert.strictEqual(wk[0].breaks, 0);
 });
 
+check('statsToMarkdown: renders the sections + mermaid fences, escapes labels', () => {
+  const s = build([
+    addProject({ id: 'p1', title: 'Wo|rk' }),
+    addTask({ id: 'a', title: 'A', projectId: 'p1' }),
+    addTask({ id: 'b', title: 'B', dueDay: today, isDone: true, timeSpentOnDay: dayMap(600000) }),
+  ]);
+  const habits = [
+    { id: 'h1', title: 'Read "daily"', streak: 4, bestStreak: 9 },
+    { id: 'h2', title: 'Nothing', streak: 0, bestStreak: 0 },
+  ];
+  const md = store.statsToMarkdown(store.computeStats(s), habits);
+  assert.ok(md.indexOf('# Super Productivity') === 0);
+  assert.ok(md.indexOf('## Today & yesterday') !== -1);
+  assert.ok(md.indexOf('```mermaid\nxychart-beta') !== -1);
+  assert.ok(md.indexOf('```mermaid\npie showData') !== -1);
+  assert.ok(md.indexOf('## Habit streaks') !== -1);
+  // habit with no streak is dropped; the quotes in a label are sanitised
+  assert.ok(md.indexOf('Nothing') === -1);
+  assert.ok(md.indexOf('Read \'daily\'') !== -1 || md.indexOf('Read  daily') !== -1);
+  // the pie label keeps the raw pipe (it is not a table there)
+  assert.ok(md.indexOf('"Wo|rk" : 1') !== -1);
+});
+
+check('statsToMarkdown: no habits section when none have a streak', () => {
+  const md = store.statsToMarkdown(store.computeStats(store.emptyState()), []);
+  assert.ok(md.indexOf('## Habit streaks') === -1);
+  assert.ok(md.indexOf('_No open tasks._') !== -1);
+});
+
+check('computeSearch: token AND match across every task, undone first', () => {
+  const s = build([
+    addProject({ id: 'p1', title: 'Work' }),
+    addTask({ id: 'a', title: 'buy milk carton', projectId: 'p1' }),
+    addTask({ id: 'b', title: 'Milk the cow', isDone: true }),
+    addTask({ id: 'c', title: 'Paint the fence' }),
+    addTask({ id: 'd', title: 'buy milk again', __inBacklog: true }),
+  ]);
+  const hits = store.computeSearch(s, 'BUY milk', 40);
+  assert.deepStrictEqual(hits.map((h) => h.title), ['buy milk again', 'buy milk carton']);
+  assert.strictEqual(hits[0].project, 'No project'); // 'again' has no projectId
+  assert.strictEqual(hits[1].project, 'Work');       // 'carton' lives in Work
+  // a lone "milk" token also finds the done one, and it sorts last
+  const all = store.computeSearch(s, 'milk', 40);
+  assert.strictEqual(all.length, 3);
+  assert.strictEqual(all[all.length - 1].done, true);
+});
+
+check('computeSearch: empty / whitespace query returns nothing', () => {
+  const s = build([addTask({ id: 'a', title: 'Anything' })]);
+  assert.deepStrictEqual(store.computeSearch(s, '   ', 40), []);
+  assert.deepStrictEqual(store.computeSearch(s, '', 40), []);
+});
+
+check('computeSearch: dictated punctuation in the query still matches', () => {
+  const s = build([
+    addTask({ id: 'a', title: 'Buy milk' }),
+    addTask({ id: 'b', title: 'Call the plumber' }),
+  ]);
+  // a trailing period / stray comma the way dictation returns it
+  assert.strictEqual(store.computeSearch(s, 'milk.', 40).length, 1);
+  assert.strictEqual(store.computeSearch(s, 'buy, milk', 40).length, 1);
+  assert.strictEqual(store.computeSearch(s, 'Plumber!', 40).length, 1);
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);

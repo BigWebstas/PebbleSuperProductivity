@@ -33,9 +33,12 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var enableProjects = options.enableProjects !== false;
   var enableStats = options.enableStats !== false;
   var yesterdayStats = !!options.yesterdayStats;
+  var statsMarkdown = options.statsMarkdown || '';
+  var showStatsExport = enableStats && !!statsMarkdown;
   var enableSchedule = options.enableSchedule !== false;
   var enableUpcoming = options.enableUpcoming !== false;
   var enableNotesPage = !!options.enableNotesPage;
+  var enableSearch = !!options.enableSearch;
   var enableTags = options.enableTags === true; // default off, unlike the others
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
@@ -173,6 +176,9 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  p.hint { font-size: 12px; color: var(--hint); }\n' +
 '  p.error { font-size: 13px; color: var(--danger); }\n' +
 '  p.success { font-size: 13px; color: var(--ok); }\n' +
+'  textarea { width: 100%; box-sizing: border-box; height: 160px; margin-top: 4px; padding: 10px;\n' +
+'    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; white-space: pre;\n' +
+'    border: 1px solid var(--field-border); border-radius: 6px; background: var(--field-bg); color: var(--fg); }\n' +
 '</style>\n' +
 '</head>\n' +
 '<body>\n' +
@@ -500,6 +506,17 @@ taskEstimateOptions + '\n' +
 '  </p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableSearch" type="checkbox"' + (enableSearch ? ' checked' : '') + '>\n' +
+'    <label for="enableSearch">Enable voice search</label>\n' +
+'  </div>\n' +
+'  <p class="hint">\n' +
+'    Adds a Search row on the watch. Dictate a few words and the phone\n' +
+'    searches every task - all projects, backlog, future, done - for titles\n' +
+'    that contain them. Results are a read-only list showing each task and\n' +
+'    the project it lives in. Not available on aplite.\n' +
+'  </p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableReflect" type="checkbox"' + (enableReflect ? ' checked' : '') + '>\n' +
 '    <label for="enableReflect">Day review on Finish Day</label>\n' +
 '  </div>\n' +
@@ -543,6 +560,17 @@ taskEstimateOptions + '\n' +
 '    effect on watches without a touchscreen.\n' +
 '  </p>\n' +
 '\n' +
+(showStatsExport ?
+'  <h2>Stats export</h2>\n' +
+'  <p class="hint">\n' +
+'    A snapshot of your Stats page as Markdown with mermaid charts - a\n' +
+'    today/yesterday table, worked minutes over the last 7 days, open tasks\n' +
+'    by project, and habit streaks. Copy it into a notes app or anywhere\n' +
+'    that renders mermaid. Regenerated each time you open this page.\n' +
+'  </p>\n' +
+'  <textarea id="statsExport" readonly>' + escapeHtmlAttr(statsMarkdown) + '</textarea>\n' +
+'  <button id="copyStatsBtn" class="secondary">Copy to clipboard</button>\n'
+: '') +
 '  <h2>Sync</h2>\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="autoSyncOnComplete" type="checkbox"' + (autoSyncOnComplete ? ' checked' : '') + '>\n' +
@@ -652,6 +680,7 @@ taskEstimateOptions + '\n' +
 '      enableSchedule: document.getElementById(\'enableSchedule\').checked,\n' +
 '      enableUpcoming: document.getElementById(\'enableUpcoming\').checked,\n' +
 '      enableNotesPage: document.getElementById(\'enableNotesPage\').checked,\n' +
+'      enableSearch: document.getElementById(\'enableSearch\').checked,\n' +
 '      enableReflect: document.getElementById(\'enableReflect\').checked,\n' +
 '      enableTags: document.getElementById(\'enableTags\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
@@ -684,6 +713,29 @@ taskEstimateOptions + '\n' +
 '    }\n' +
 '    returnToWatchApp({ wipeWatchCache: true });\n' +
 '  });\n' +
+'\n' +
+'  var copyStatsBtn = document.getElementById(\'copyStatsBtn\');\n' +
+'  if (copyStatsBtn) {\n' +
+'    copyStatsBtn.addEventListener(\'click\', function () {\n' +
+'      var ta = document.getElementById(\'statsExport\');\n' +
+'      var done = function () { setStatus(\'Stats copied.\', false); };\n' +
+'      var fail = function () {\n' +
+'        ta.focus(); ta.select();\n' +
+'        setStatus(\'Press and hold the box, then Copy.\', true);\n' +
+'      };\n' +
+'      try {\n' +
+'        if (navigator.clipboard && navigator.clipboard.writeText) {\n' +
+'          navigator.clipboard.writeText(ta.value).then(done, function () {\n' +
+'            try { ta.focus(); ta.select(); document.execCommand(\'copy\') ? done() : fail(); }\n' +
+'            catch (e2) { fail(); }\n' +
+'          });\n' +
+'        } else {\n' +
+'          ta.focus(); ta.select();\n' +
+'          document.execCommand(\'copy\') ? done() : fail();\n' +
+'        }\n' +
+'      } catch (e) { fail(); }\n' +
+'    });\n' +
+'  }\n' +
 '\n' +
 '  document.getElementById(\'cancelBtn\').addEventListener(\'click\', function () {\n' +
 '    returnToWatchApp({ cancelled: true });\n' +

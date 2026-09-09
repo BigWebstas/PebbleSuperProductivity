@@ -96,6 +96,7 @@
 #define KEY_UPCOMING_TEXT MESSAGE_KEY_UPCOMING_TEXT
 #define KEY_NOTESPAGE_ENABLED MESSAGE_KEY_NOTESPAGE_ENABLED
 #define KEY_NOTESPAGE_TEXT MESSAGE_KEY_NOTESPAGE_TEXT
+#define KEY_SEARCH_ENABLED MESSAGE_KEY_SEARCH_ENABLED
 #define KEY_TASK_REPEAT_TEXT MESSAGE_KEY_TASK_REPEAT_TEXT
 #define KEY_TASK_REPEAT_PAUSED MESSAGE_KEY_TASK_REPEAT_PAUSED
 
@@ -213,6 +214,12 @@ enum {
   // Desktop Pomodoro timing (globalConfig.pomodoro) for the watch's focus mode,
   // pushed once per sync. Only used when config.usePomodoroCfg is on.
   MSG_POMODORO_CFG = 60,            // phone -> watch: POMODORO_WORK_MIN + POMODORO_BREAK_MIN
+  // Optional voice search (config.enableSearch, non-aplite, mic only). The
+  // watch dictates a query; the phone searches every task and replies with a
+  // read-only "\x02"-header result blob, reusing UPCOMING_TEXT + the shared
+  // page window (PAGE_SEARCH).
+  MSG_SEARCH_REQUEST = 61,          // watch -> phone: TASK_TITLE (the dictated query)
+  MSG_SEARCH_DATA = 62,             // phone -> watch: UPCOMING_TEXT
 };
 
 // STATUS_CODE values sent from the phone.
@@ -391,6 +398,9 @@ static int s_habit_incoming_total = 0;
 
 static Window *s_main_window;
 static MenuLayer *s_menu_layer;
+#ifdef PBL_PLATFORM_EMERY
+static Layer *s_scroll_pip_layer = NULL; // faint scrollbar overlay on the task list
+#endif
 static Window *s_habits_window;
 static MenuLayer *s_habits_menu_layer;
 static TextLayer *s_habits_empty_layer;
@@ -539,7 +549,7 @@ static AppTimer *s_notes_load_timeout_timer = NULL;
 #define NOTES_LOAD_TIMEOUT_MS 20000
 // Routes a dictation_status_callback: Add Task, a note-append, or a Reflect
 // "improvement" entry - all share the single s_dictation_session/pending pair.
-typedef enum { DICT_ADD_TASK, DICT_NOTE_APPEND, DICT_REFLECT } DictationTarget;
+typedef enum { DICT_ADD_TASK, DICT_NOTE_APPEND, DICT_REFLECT, DICT_SEARCH } DictationTarget;
 static DictationTarget s_dictation_target = DICT_ADD_TASK;
 // Long-press Up (unschedule) and long-press Down / swipe-left (move to tomorrow)
 // each open a 5s cancel window on the selected task: the row's subtitle shows
@@ -625,6 +635,19 @@ static bool s_habit_flash_gold = false;
 // Habit id whose streak crossed a milestone in the batch currently arriving;
 // the pop fires on MSG_HABIT_SYNC_END once the row data is in place.
 static char s_habit_milestone_id[MAX_HABIT_ID_LEN] = "";
+// A non-milestone streak increment (old>=2, new==old+1) rolls the "N streak"
+// label up one on that row. Milestone crossings keep the gold pop instead.
+#define STREAK_ROLL_MS 200
+#define STREAK_ROLL_STEP_MS 33
+static AppTimer *s_streak_roll_timer = NULL;
+static char s_streak_roll_id[MAX_HABIT_ID_LEN] = "";
+static char s_streak_roll_prev[16] = "";
+static int s_streak_roll_tick = 0;
+// The focus ring flashes bright white the instant a work / break segment ends.
+#define ARC_FLASH_MS 300
+#define ARC_FLASH_STEP_MS 40
+static AppTimer *s_arc_flash_timer = NULL;
+static int s_arc_flash_tick = 0;
 // Marquee for an overflowing habit title on the selected row - the habits menu
 // isn't wired to the main scroll timer, so it runs its own (shared offset).
 static AppTimer *s_habits_marquee_timer = NULL;
@@ -868,7 +891,13 @@ static int s_stats_done_yesterday = 0;
 // sends and which empty-state text it shows.
 static bool s_upcoming_enabled = true;
 static bool s_notespage_enabled = false;
-typedef enum { PAGE_UPCOMING, PAGE_NOTES } PageMode;
+// The same window also shows read-only voice-search results
+// (config.enableSearch, default off, mic): dictate a query ->
+// MSG_SEARCH_REQUEST -> MSG_SEARCH_DATA blob (one "\x02" header + "title  ·
+// project" lines), rendered by upcoming_content_update_proc.
+static bool s_search_enabled = false;
+static char s_search_query[48] = "";
+typedef enum { PAGE_UPCOMING, PAGE_NOTES, PAGE_SEARCH } PageMode;
 static PageMode s_page_mode = PAGE_UPCOMING;
 // Heap-backed, alive only while the shared page window is open (see
 // s_stats_projects for the same pattern / rationale). NULL when closed.
@@ -1647,6 +1676,7 @@ static GRect window_chrome(Window *window, StatusBarLayer **status, Layer **root
 #ifndef PBL_PLATFORM_APLITE
 #ifdef PBL_PLATFORM_EMERY
 static void begin_habit_flash(const char *habit_id, bool milestone);
+static void begin_streak_roll(void);
 static void habits_marquee_refresh(bool reset_offset);
 #endif
 static void show_notes_overlay(Task *task);
@@ -1655,6 +1685,9 @@ static void hide_notes_overlay(void);
 static void push_notes_window(void);
 static bool try_open_checklist(void);
 static void push_reflect_window(void);
+#ifdef PBL_PLATFORM_EMERY
+static void push_finishday_window(void);
+#endif
 typedef enum { PICK_ESTIMATE, PICK_DEADLINE, PICK_HABIT, PICK_TIME } PickKind;
 // task_id is a habit id for PICK_HABIT. current: ms (estimate) / days-from-today
 // or DEADLINE_NONE (deadline) / the counter's value (habit) / hour 0-23 (time).
@@ -1707,6 +1740,7 @@ typedef enum {
   SECTION0_ROW_SCHEDULE, // schedule page, between Stats and Add Task (non-aplite)
   SECTION0_ROW_UPCOMING, // upcoming page, between Schedule and Add Task (non-aplite)
   SECTION0_ROW_NOTESPAGE, // notes page, right after Upcoming, opt-in / default off (non-aplite)
+  SECTION0_ROW_SEARCH,    // voice search, right after Notes, opt-in / default off (non-aplite, mic)
   SECTION0_ROW_ADD_TASK,
 } Section0RowKind;
 
@@ -1755,9 +1789,12 @@ typedef enum {
 #ifdef PBL_PLATFORM_APLITE
 #define UPCOMING_ROW_ACTIVE() false
 #define NOTESPAGE_ROW_ACTIVE() false
+#define SEARCH_ROW_ACTIVE() false
 #else
 #define UPCOMING_ROW_ACTIVE() (s_upcoming_enabled)
 #define NOTESPAGE_ROW_ACTIVE() (s_notespage_enabled)
+// Voice search is dictation-driven, so a mic is required (same gate as Add Task).
+#define SEARCH_ROW_ACTIVE() (PBL_IF_MICROPHONE_ELSE(s_search_enabled, false))
 #endif
 
 // A remote presence session shows in the pinned "TRACKING" section
@@ -1789,6 +1826,9 @@ static int section0_row_count(void) {
     count++;
   }
   if (NOTESPAGE_ROW_ACTIVE()) {
+    count++;
+  }
+  if (SEARCH_ROW_ACTIVE()) {
     count++;
   }
   if (PBL_IF_MICROPHONE_ELSE(s_add_task_enabled, false)) {
@@ -1844,6 +1884,12 @@ static Section0RowKind section0_row_kind(int row) {
   if (NOTESPAGE_ROW_ACTIVE()) {
     if (row == next) {
       return SECTION0_ROW_NOTESPAGE;
+    }
+    next++;
+  }
+  if (SEARCH_ROW_ACTIVE()) {
+    if (row == next) {
+      return SECTION0_ROW_SEARCH;
     }
     next++;
   }
@@ -2496,6 +2542,11 @@ static void refresh_scroll_state(bool reset_offset) {
 static void menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, MenuIndex old_index, void *context) {
   refresh_scroll_state(true);
   backlight_touch();
+#ifdef PBL_PLATFORM_EMERY
+  if (s_scroll_pip_layer) {
+    layer_mark_dirty(s_scroll_pip_layer);
+  }
+#endif
 #if defined(PBL_TOUCH)
   // A tap that moved the highlight to a new row is select-only; a tap on the
   // already-selected row (no move) activates it - see menu_select_click.
@@ -2774,6 +2825,14 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     // draw. In the actionable case section 0 draws below as for a full list.
     return;
   }
+#ifdef PBL_PLATFORM_EMERY
+  // The scroll pip is a sibling layer, so it isn't repainted when the menu
+  // scrolls on its own (a touch drag especially). Any row repaint means the
+  // viewport moved - re-mark it so the thumb keeps up with the selection.
+  if (s_scroll_pip_layer) {
+    layer_mark_dirty(s_scroll_pip_layer);
+  }
+#endif
   if (cell_index->section == 0) {
     bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
                         menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
@@ -2953,6 +3012,27 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       for (int k = 0; k < 3; k++) {
         graphics_draw_line(ctx, GPoint(gx + 3, gy - 3 + k * 3), GPoint(gx + 10, gy - 3 + k * 3));
       }
+      return;
+    }
+#endif
+
+#ifndef PBL_PLATFORM_APLITE
+    if (kind == SECTION0_ROW_SEARCH) {
+      // Dictate a query; menu_select_click starts dictation. Cadet blue, its
+      // own colour, with a hand-drawn magnifier glyph on the right.
+      GColor fg = is_selected ? GColorWhite : GColorBlack;
+      fill_bg(ctx, bounds, is_selected ? GColorOxfordBlue : GColorCadetBlue);
+      graphics_context_set_text_color(ctx, fg);
+      GRect se_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                                  bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+      draw_text(ctx, "Search", HEADING_FONT_KEY, se_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      int16_t gx = bounds.size.w - ROW_ICON_SIZE - 2;
+      int16_t gy = bounds.size.h / 2 - 3;
+      graphics_context_set_stroke_color(ctx, fg);
+      graphics_context_set_stroke_width(ctx, 2);
+      graphics_draw_circle(ctx, GPoint(gx, gy), 6);
+      graphics_draw_line(ctx, GPoint(gx + 5, gy + 5), GPoint(gx + 10, gy + 10));
+      graphics_context_set_stroke_width(ctx, 1);
       return;
     }
 #endif
@@ -3225,6 +3305,7 @@ static void send_pending_retry(void) {
       dict_write_int32(iter, KEY_HABIT_DELTA, s_retry_int);
       break;
     case MSG_TASK_ADD:
+    case MSG_SEARCH_REQUEST:
       dict_write_cstring(iter, KEY_TASK_TITLE, s_retry_str);
       break;
     case MSG_HABIT_TRACK_STOP:
@@ -3464,6 +3545,9 @@ static void dictation_status_callback(DictationSession *session, DictationSessio
   if (status == DictationSessionStatusSuccess) {
     if (s_dictation_target == DICT_NOTE_APPEND) {
       send_note_append(s_notes_overlay_subject_id, transcription, s_notes_overlay_is_project);
+    } else if (s_dictation_target == DICT_SEARCH) {
+      str_copy(s_search_query, transcription, sizeof(s_search_query));
+      push_page_window(PAGE_SEARCH); // its window_load fires MSG_SEARCH_REQUEST
     } else if (s_dictation_target == DICT_REFLECT) {
       begin_send(MSG_METRIC_REFLECT, transcription, NULL, 0);
       s_reflect_note_set = true;
@@ -3512,6 +3596,18 @@ static void start_note_append_dictation(void) {
     return;
   }
   s_dictation_target = DICT_NOTE_APPEND;
+  s_dictation_pending = true;
+  dictation_session_start(s_dictation_session);
+}
+
+// Section-0 "Search" row - dictate a query; the callback stashes it in
+// s_search_query and opens the shared page window in PAGE_SEARCH, whose load
+// fires MSG_SEARCH_REQUEST.
+static void start_search_dictation(void) {
+  if (s_dictation_pending || !s_dictation_session) {
+    return;
+  }
+  s_dictation_target = DICT_SEARCH;
   s_dictation_pending = true;
   dictation_session_start(s_dictation_session);
 }
@@ -4020,6 +4116,8 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
       push_page_window(PAGE_UPCOMING);
     } else if (kind == SECTION0_ROW_NOTESPAGE) {
       push_page_window(PAGE_NOTES);
+    } else if (kind == SECTION0_ROW_SEARCH) {
+      start_search_dictation();
     } else if (kind == SECTION0_ROW_ADD_TASK) {
       start_add_task_dictation();
 #endif
@@ -4087,9 +4185,18 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
   if ((int)cell_index->section - GROUP_SECTION_BASE == s_group_count) {
     // Finish Day row. No optimistic local change - archiving needs the phone's
     // full state.task cache; this is fire-and-forget and the phone pushes an
-    // updated list back. Closes the app once the send confirms, not eagerly.
+    // updated list back.
+#ifdef PBL_PLATFORM_EMERY
+    // The moment window owns the close (after its animation, or a button press);
+    // a send failure still routes to the error overlay, which it leaves up.
+    send_finish_day();
+    s_close_after_finish_day_sent = false;
+    push_finishday_window();
+#else
+    // Closes the app once the send confirms, not eagerly.
     s_close_after_finish_day_sent = true;
     send_finish_day();
+#endif
     return;
   }
   // The project row - long-Select opens its notes (Select opens its tasks).
@@ -5004,6 +5111,10 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
             (old_streak == 29 && new_streak == 30) ||
             (old_streak == 99 && new_streak == 100)) {
           str_copy(s_habit_milestone_id, s_habits[idx].id, MAX_HABIT_ID_LEN);
+        } else if (new_streak == old_streak + 1 && old_streak >= 2) {
+          // An ordinary +1 (not a milestone crossing) - roll the label up one.
+          str_copy(s_streak_roll_id, s_habits[idx].id, MAX_HABIT_ID_LEN);
+          snprintf(s_streak_roll_prev, sizeof(s_streak_roll_prev), "%d streak", old_streak);
         }
       }
 #else
@@ -5030,6 +5141,15 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
           begin_habit_flash(s_habit_milestone_id, true);
         }
         s_habit_milestone_id[0] = '\0';
+      }
+      // An ordinary streak +1 landed - roll its label now that the row data is
+      // in place (only worthwhile if the list is on screen).
+      if (s_streak_roll_id[0] != '\0') {
+        if (s_habits_menu_layer) {
+          begin_streak_roll();
+        } else {
+          s_streak_roll_id[0] = '\0';
+        }
       }
       if (s_habits_menu_layer) {
         habits_marquee_refresh(false); // the selected title may now overflow
@@ -5182,6 +5302,14 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       break;
     }
+    case MSG_SEARCH_DATA: {
+      if (s_upcoming_text && s_page_mode == PAGE_SEARCH) {
+        str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), PAGE_TEXT_CAP);
+        s_upcoming_have_data = true;
+        upcoming_render();
+      }
+      break;
+    }
     case MSG_TASK_REPEAT_DATA: {
       handle_repeat_data(iterator);
       break;
@@ -5216,6 +5344,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_schedule_enabled = tuple_int(iterator, KEY_SCHEDULE_ENABLED, s_schedule_enabled) != 0;
       s_upcoming_enabled = tuple_int(iterator, KEY_UPCOMING_ENABLED, s_upcoming_enabled) != 0;
       s_notespage_enabled = tuple_int(iterator, KEY_NOTESPAGE_ENABLED, s_notespage_enabled) != 0;
+      s_search_enabled = tuple_int(iterator, KEY_SEARCH_ENABLED, s_search_enabled) != 0;
       s_tags_enabled = tuple_int(iterator, KEY_TAGS_ENABLED, s_tags_enabled) != 0;
       s_yesterday_stats_enabled = tuple_int(iterator, KEY_YESTERDAY_STATS_ENABLED, s_yesterday_stats_enabled) != 0;
 #endif
@@ -5569,6 +5698,129 @@ static void vibe_celebrate(void) {
 }
 
 #ifdef PBL_PLATFORM_EMERY
+// A brief full-screen "day complete" moment on Finish Day: a big checkmark
+// strokes itself in, a celebratory buzz + chime, then - after FINISHDAY_HOLD_MS
+// or a button press - the app closes, the same close Finish Day always did,
+// just with a beat first. The archive send already went out before this pushed.
+#define FINISHDAY_DRAW_MS 440
+#define FINISHDAY_STEP_MS 30
+#define FINISHDAY_HOLD_MS 1900
+static Window *s_finishday_window = NULL;
+static Layer *s_finishday_layer = NULL;
+static AppTimer *s_finishday_anim_timer = NULL;
+static AppTimer *s_finishday_hold_timer = NULL;
+static int s_finishday_tick = 0;
+
+static void finishday_dismiss(void) {
+  // Leave a send-failure error overlay standing; otherwise close the app.
+  if (s_error_overlay_active) {
+    if (s_finishday_window) {
+      window_stack_pop(true);
+    }
+  } else {
+    window_stack_pop_all(true);
+  }
+}
+
+static void finishday_hold_cb(void *data) {
+  s_finishday_hold_timer = NULL;
+  finishday_dismiss();
+}
+
+static void finishday_anim_cb(void *data) {
+  s_finishday_anim_timer = NULL;
+  s_finishday_tick++;
+  if (s_finishday_tick * FINISHDAY_STEP_MS < FINISHDAY_DRAW_MS) {
+    s_finishday_anim_timer = app_timer_register(FINISHDAY_STEP_MS, finishday_anim_cb, NULL);
+  }
+  if (s_finishday_layer) {
+    layer_mark_dirty(s_finishday_layer);
+  }
+}
+
+static void finishday_update_proc(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, b, 0, GCornerNone);
+
+  int p = s_finishday_tick * FINISHDAY_STEP_MS * 1000 / FINISHDAY_DRAW_MS;
+  if (p > 1000) {
+    p = 1000;
+  }
+  GPoint c = grect_center_point(&b);
+  int s = (b.size.w < b.size.h ? b.size.w : b.size.h) / 3;
+  GPoint a = GPoint(c.x - s, c.y - s / 6);
+  GPoint elbow = GPoint(c.x - s / 3, c.y + s / 2);
+  GPoint e = GPoint(c.x + s, c.y - s / 2);
+  graphics_context_set_stroke_color(ctx, GColorGreen);
+  graphics_context_set_stroke_width(ctx, 8);
+  int leg1 = 380; // draw the short leg first, then the long one
+  if (p > 0 && p < leg1) {
+    graphics_draw_line(ctx, a,
+        GPoint(a.x + (elbow.x - a.x) * p / leg1, a.y + (elbow.y - a.y) * p / leg1));
+  } else if (p >= leg1) {
+    graphics_draw_line(ctx, a, elbow);
+    int q = p - leg1, d = 1000 - leg1;
+    graphics_draw_line(ctx, elbow,
+        GPoint(elbow.x + (e.x - elbow.x) * q / d, elbow.y + (e.y - elbow.y) * q / d));
+  }
+  graphics_context_set_stroke_width(ctx, 1);
+
+  if (p >= 1000) {
+    graphics_context_set_text_color(ctx, GColorWhite);
+    draw_text(ctx, "Day complete", FONT_KEY_GOTHIC_24_BOLD,
+              GRect(0, c.y + s + 6, b.size.w, 30), GTextOverflowModeFill, GTextAlignmentCenter);
+  }
+}
+
+static void finishday_skip_click(ClickRecognizerRef r, void *ctx) {
+  finishday_dismiss();
+}
+
+static void finishday_click_config(void *ctx) {
+  window_single_click_subscribe(BUTTON_ID_SELECT, finishday_skip_click);
+  window_single_click_subscribe(BUTTON_ID_BACK, finishday_skip_click);
+  window_single_click_subscribe(BUTTON_ID_UP, finishday_skip_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN, finishday_skip_click);
+}
+
+static void finishday_window_load(Window *window) {
+  Layer *wl = window_get_root_layer(window);
+  s_finishday_layer = layer_create(layer_get_bounds(wl));
+  layer_set_update_proc(s_finishday_layer, finishday_update_proc);
+  layer_add_child(wl, s_finishday_layer);
+  window_set_click_config_provider(window, finishday_click_config);
+  s_finishday_tick = 0;
+  s_finishday_anim_timer = app_timer_register(FINISHDAY_STEP_MS, finishday_anim_cb, NULL);
+  s_finishday_hold_timer = app_timer_register(FINISHDAY_HOLD_MS, finishday_hold_cb, NULL);
+  vibe_celebrate();
+}
+
+static void finishday_window_unload(Window *window) {
+  if (s_finishday_anim_timer) {
+    app_timer_cancel(s_finishday_anim_timer);
+    s_finishday_anim_timer = NULL;
+  }
+  if (s_finishday_hold_timer) {
+    app_timer_cancel(s_finishday_hold_timer);
+    s_finishday_hold_timer = NULL;
+  }
+  layer_destroy(s_finishday_layer);
+  s_finishday_layer = NULL;
+}
+
+static void push_finishday_window(void) {
+  if (!s_finishday_window) {
+    s_finishday_window = window_create();
+    window_set_background_color(s_finishday_window, GColorBlack);
+    window_set_window_handlers(s_finishday_window, (WindowHandlers) {
+      .load = finishday_window_load,
+      .unload = finishday_window_unload,
+    });
+  }
+  window_stack_push(s_finishday_window, true);
+}
+
 static void habit_flash_timer_cb(void *data) {
   s_habit_flash_timer = NULL;
   s_habit_flash_tick++;
@@ -5605,6 +5857,35 @@ static void stop_habit_flash(void) {
   }
   s_habit_flash_id[0] = '\0';
   s_habit_milestone_id[0] = '\0';
+  if (s_streak_roll_timer) {
+    app_timer_cancel(s_streak_roll_timer);
+    s_streak_roll_timer = NULL;
+  }
+  s_streak_roll_id[0] = '\0';
+}
+
+// A non-milestone streak +1: roll "N-1 streak" -> "N streak" up on that row over
+// STREAK_ROLL_MS. s_streak_roll_id / _prev are set in MSG_HABIT_ITEM; this just
+// (re)starts the ticker once MSG_HABIT_SYNC_END has the new count in place.
+static void streak_roll_timer_cb(void *data) {
+  s_streak_roll_timer = NULL;
+  s_streak_roll_tick++;
+  if (s_streak_roll_tick * STREAK_ROLL_STEP_MS < STREAK_ROLL_MS) {
+    s_streak_roll_timer = app_timer_register(STREAK_ROLL_STEP_MS, streak_roll_timer_cb, NULL);
+  } else {
+    s_streak_roll_id[0] = '\0';
+  }
+  if (s_habits_menu_layer) {
+    layer_mark_dirty(menu_layer_get_layer(s_habits_menu_layer));
+  }
+}
+
+static void begin_streak_roll(void) {
+  if (s_streak_roll_timer) {
+    app_timer_cancel(s_streak_roll_timer);
+  }
+  s_streak_roll_tick = 0;
+  s_streak_roll_timer = app_timer_register(STREAK_ROLL_STEP_MS, streak_roll_timer_cb, NULL);
 }
 
 // After a bump completes a habit: if that was the day's last unfinished one,
@@ -5972,8 +6253,35 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     } else if (at_risk) {
       graphics_context_set_text_color(ctx, GColorOrange);
     }
-    graphics_draw_text(ctx, st, sf, text_box,
-        GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+    bool rolling = false;
+#ifdef PBL_PLATFORM_EMERY
+    rolling = !milestone && s_streak_roll_id[0] != '\0' &&
+              strncmp(s_streak_roll_id, habit->id, MAX_HABIT_ID_LEN) == 0;
+    if (rolling) {
+      // "N-1 streak" slides up and out, "N streak" slides up into its place.
+      int rp = s_streak_roll_tick * STREAK_ROLL_STEP_MS * 1000 / STREAK_ROLL_MS;
+      if (rp > 1000) {
+        rp = 1000;
+      }
+      int16_t travel = text_box.size.h;
+      GRect wide = GRect(text_box.origin.x - 2, text_box.origin.y, sw + 4, travel);
+      graphics_draw_text(ctx, s_streak_roll_prev, sf,
+          GRect(wide.origin.x, wide.origin.y - travel * rp / 1000, wide.size.w, travel),
+          GTextOverflowModeFill, GTextAlignmentRight, NULL);
+      graphics_draw_text(ctx, st, sf,
+          GRect(wide.origin.x, wide.origin.y + travel * (1000 - rp) / 1000, wide.size.w, travel),
+          GTextOverflowModeFill, GTextAlignmentRight, NULL);
+      // Trim the slide's overshoot back to the row background, above and below.
+      graphics_context_set_fill_color(ctx, bg);
+      graphics_fill_rect(ctx, GRect(wide.origin.x, subtitle_box.origin.y - 6, wide.size.w, 6), 0, GCornerNone);
+      graphics_fill_rect(ctx, GRect(wide.origin.x, subtitle_box.origin.y + subtitle_box.size.h,
+                                    wide.size.w, 6), 0, GCornerNone);
+    }
+#endif
+    if (!rolling) {
+      graphics_draw_text(ctx, st, sf, text_box,
+          GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+    }
     if (milestone || at_risk) {
       graphics_context_set_text_color(ctx, fg);
     }
@@ -6675,6 +6983,54 @@ static bool s_touch_moved = false;       // finger has left the tap zone (scroll
 static bool s_touch_swipe_fired = false; // the left-swipe already handled this gesture
 // s_tap_moved_sel / s_touch_longpress_fired are declared up by s_touch_nav_enabled.
 
+#ifdef PBL_PLATFORM_EMERY
+// Scroll-pip drag (see scroll_pip_update_proc): a touch that starts in the
+// right-edge PIP_TOUCH_ZONE_PX and a list long enough to show the pip enters a
+// scrub - PositionUpdates map the finger's Y straight onto a list row.
+#define PIP_MIN_ROWS 7
+#define PIP_TOUCH_ZONE_PX 24
+static bool s_touch_pip_scrub = false;
+
+// Total rows across every section of the main list menu.
+static int pip_total_rows(void) {
+  if (!s_menu_layer || s_task_count == 0) {
+    return 0;
+  }
+  uint16_t nsec = menu_get_num_sections(s_menu_layer, NULL);
+  int total = 0;
+  for (uint16_t s = 0; s < nsec; s++) {
+    total += menu_get_num_rows(s_menu_layer, s, NULL);
+  }
+  return total;
+}
+
+// Map a screen-space Y to a flat list row and select it.
+static void pip_scrub_to(int16_t screen_y) {
+  int total = pip_total_rows();
+  if (total < PIP_MIN_ROWS || !s_scroll_pip_layer) {
+    return;
+  }
+  int16_t th = layer_get_bounds(s_scroll_pip_layer).size.h - 8;
+  int rel = screen_y - (STATUS_BAR_LAYER_HEIGHT + 4);
+  if (rel < 0) {
+    rel = 0;
+  } else if (rel > th) {
+    rel = th;
+  }
+  int flat = th > 0 ? rel * (total - 1) / th : 0;
+  uint16_t nsec = menu_get_num_sections(s_menu_layer, NULL);
+  for (uint16_t s = 0; s < nsec; s++) {
+    int n = menu_get_num_rows(s_menu_layer, s, NULL);
+    if (flat < n) {
+      menu_layer_set_selected_index(s_menu_layer, MenuIndex(s, (uint16_t)flat),
+                                    MenuRowAlignCenter, false);
+      return;
+    }
+    flat -= n;
+  }
+}
+#endif
+
 static void touch_longpress_timer_cancel(void) {
   if (s_touch_longpress_timer) {
     app_timer_cancel(s_touch_longpress_timer);
@@ -6759,6 +7115,9 @@ static void touch_handler(const TouchEvent *event, void *context) {
     s_touch_swipe_fired = false;
     s_tap_moved_sel = false;
     s_touch_longpress_fired = false;
+#ifdef PBL_PLATFORM_EMERY
+    s_touch_pip_scrub = false;
+#endif
     // non_navigational: contact without the watch being woken first - don't arm.
     s_touch_armed = !event->non_navigational;
     if (!s_touch_armed) {
@@ -6770,9 +7129,26 @@ static void touch_handler(const TouchEvent *event, void *context) {
     // Arm now - the bridge can synthesise its tap SELECT click before the raw
     // Liftoff even reaches us. Re-armed on Liftoff to cover a late one.
     arm_tap_select_guard();
+#ifdef PBL_PLATFORM_EMERY
+    // A touch on the right-edge scrollbar zone (long lists only) starts a scrub.
+    if (window_stack_get_top_window() == s_main_window && s_scroll_pip_layer &&
+        pip_total_rows() >= PIP_MIN_ROWS &&
+        event->x >= layer_get_bounds(s_scroll_pip_layer).size.w - PIP_TOUCH_ZONE_PX) {
+      s_touch_pip_scrub = true;
+      s_tap_moved_sel = true;  // its trailing SELECT must not activate a row
+      touch_longpress_timer_cancel();
+      pip_scrub_to(event->y);
+    }
+#endif
     break;
 
   case TouchEvent_PositionUpdate: {
+#ifdef PBL_PLATFORM_EMERY
+    if (s_touch_pip_scrub) {
+      pip_scrub_to(event->y);
+      break;
+    }
+#endif
     if (!s_touch_armed || s_touch_swipe_fired) {
       break;
     }
@@ -6800,6 +7176,14 @@ static void touch_handler(const TouchEvent *event, void *context) {
 
   case TouchEvent_Liftoff: {
     touch_longpress_timer_cancel();
+#ifdef PBL_PLATFORM_EMERY
+    if (s_touch_pip_scrub) {
+      s_touch_pip_scrub = false;
+      arm_tap_select_guard();  // swallow the bridge's release SELECT
+      s_touch_armed = false;
+      break;
+    }
+#endif
     if (s_touch_armed && !s_touch_swipe_fired) {
       int dx = event->x - s_touch_down_point.x;
       int dy = event->y - s_touch_down_point.y;
@@ -7904,6 +8288,10 @@ static void push_action_menu(const char *task_id, ActionCtx ctx, bool in_backlog
 #endif
 #define STATS_GAP 6
 #define STATS_PAD_X 6
+// A "\x03"-prefixed line in the shared page-window text is a subtext line -
+// small grey, indented, shorter row height. Only the search blob emits it
+// (the project a result lives in, under its title).
+#define PAGE_SUB_H (STATS_LINE_H * 2 / 3)
 static Window *s_stats_window;
 static StatusBarLayer *s_stats_status_bar;
 static ScrollLayer *s_stats_scroll_layer;
@@ -8202,7 +8590,7 @@ static int16_t upcoming_content_height(void) {
   bool at_line_start = true;
   for (; *p; p++) {
     if (at_line_start) {
-      h += (*p == '\x02') ? STATS_LABEL_H : STATS_LINE_H;
+      h += (*p == '\x02') ? STATS_LABEL_H : (*p == '\x03') ? PAGE_SUB_H : STATS_LINE_H;
     }
     at_line_start = (*p == '\n');
   }
@@ -8216,7 +8604,8 @@ static void upcoming_content_update_proc(Layer *layer, GContext *ctx) {
 
   if (!s_upcoming_have_data || !s_upcoming_text || s_upcoming_text[0] == '\0') {
     graphics_context_set_text_color(ctx, GColorBlack);
-    const char *empty = s_page_mode == PAGE_NOTES ? "No pinned notes" : "Nothing scheduled";
+    const char *empty = s_page_mode == PAGE_NOTES ? "No pinned notes"
+                        : s_page_mode == PAGE_SEARCH ? "No matches" : "Nothing scheduled";
     draw_text(ctx, s_upcoming_have_data ? empty : "Loading…", STATS_LINE_FONT,
               GRect(STATS_PAD_X, 8, w - STATS_PAD_X * 2, STATS_LINE_H),
               GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
@@ -8229,19 +8618,25 @@ static void upcoming_content_update_proc(Layer *layer, GContext *ctx) {
   while (*p) {
     const char *nl = strchr(p, '\n');
     size_t len = nl ? (size_t)(nl - p) : strlen(p);
-    bool header = (*p == '\x02');
-    const char *src = header ? p + 1 : p;
-    size_t slen = header ? (len ? len - 1 : 0) : len;
+    char kind = (*p == '\x02' || *p == '\x03') ? *p : 0;
+    const char *src = kind ? p + 1 : p;
+    size_t slen = kind ? (len ? len - 1 : 0) : len;
     if (slen >= sizeof(line)) {
       slen = sizeof(line) - 1;
     }
     memcpy(line, src, slen);
     line[slen] = '\0';
-    if (header) {
+    if (kind == '\x02') {
       fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
       graphics_context_set_text_color(ctx, GColorWhite);
       draw_text(ctx, line, STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       y += STATS_LABEL_H;
+    } else if (kind == '\x03') {
+      graphics_context_set_text_color(ctx, GColorDarkGray);
+      draw_text(ctx, line, FONT_KEY_GOTHIC_14,
+                GRect(STATS_PAD_X + 10, y - 2, w - STATS_PAD_X * 2 - 10, PAGE_SUB_H + 2),
+                GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      y += PAGE_SUB_H;
     } else {
       graphics_context_set_text_color(ctx, GColorBlack);
       draw_text(ctx, line, STATS_LINE_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LINE_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
@@ -8268,6 +8663,10 @@ static void upcoming_render(void) {
 }
 
 static void request_upcoming(void) {
+  if (s_page_mode == PAGE_SEARCH) {
+    begin_send(MSG_SEARCH_REQUEST, s_search_query, NULL, 0);
+    return;
+  }
   begin_send(s_page_mode == PAGE_NOTES ? MSG_NOTESPAGE_REQUEST : MSG_UPCOMING_REQUEST, NULL, NULL, 0);
 }
 
@@ -8499,6 +8898,36 @@ static void stop_live_tick(void) {
   }
 }
 
+#ifdef PBL_PLATFORM_EMERY
+// Bright ring pulse when a focus segment ends - drawn by live_arc_update_proc
+// ahead of its depleting-ring guard, so it still shows after a terminal
+// focus_end (when focus_active() is already false).
+static void arc_flash_timer_cb(void *data) {
+  s_arc_flash_timer = NULL;
+  s_arc_flash_tick++;
+  if (s_arc_flash_tick * ARC_FLASH_STEP_MS < ARC_FLASH_MS) {
+    s_arc_flash_timer = app_timer_register(ARC_FLASH_STEP_MS, arc_flash_timer_cb, NULL);
+  } else {
+    s_arc_flash_tick = 0;
+  }
+  if (s_live_arc_layer) {
+    layer_mark_dirty(s_live_arc_layer);
+  }
+}
+
+static void begin_arc_flash(void) {
+  if (!s_live_arc_layer) {
+    return; // not on the live window - nothing to flash
+  }
+  if (s_arc_flash_timer) {
+    app_timer_cancel(s_arc_flash_timer);
+  }
+  s_arc_flash_tick = 1;
+  s_arc_flash_timer = app_timer_register(ARC_FLASH_STEP_MS, arc_flash_timer_cb, NULL);
+  layer_mark_dirty(s_live_arc_layer);
+}
+#endif
+
 // ---- focus mode ----
 // There is NO API to disable PebbleOS's inactivity auto-close. The lever we
 // have: the tracking tick (live_tick_callback) calls light_enable_interaction()
@@ -8511,6 +8940,11 @@ static void stop_live_tick(void) {
 // strip. `notify` = ran to completion (long buzz + banner); else a plain stop.
 // Nothing to undo for the backlight - the pulses fade themselves.
 static void focus_end(bool ran_out) {
+#ifdef PBL_PLATFORM_EMERY
+  if (ran_out) {
+    begin_arc_flash(); // punctuate the segment boundary (loop or terminal)
+  }
+#endif
   // POMODORO: a break that ran out loops back into the next work session
   // (work -> break -> work -> ... until a long-hold ends it or tracking stops).
   if (ran_out && s_focus_on_break) {
@@ -8794,6 +9228,51 @@ static void live_window_click_config_provider(void *context) {
 // the focus session's time runs out. Draws nothing outside a focus session, so
 // plain tracking / remote presence keep the clean text-only look.
 static void live_arc_update_proc(Layer *layer, GContext *ctx) {
+  // Segment-boundary flash: a full white ring that thins to nothing over
+  // ARC_FLASH_MS. Drawn ahead of the focus-session guard so it still shows on a
+  // terminal focus_end (focus_active() already false by then).
+  if (s_arc_flash_tick > 0) {
+    GRect fb = layer_get_bounds(layer);
+    int fr = (fb.size.w < fb.size.h ? fb.size.w : fb.size.h) / 2 - 6;
+    GPoint fc = grect_center_point(&fb);
+    int fw = 10 - s_arc_flash_tick * ARC_FLASH_STEP_MS * 10 / ARC_FLASH_MS;
+    if (fw > 0) {
+      graphics_context_set_stroke_color(ctx, GColorWhite);
+      graphics_context_set_stroke_width(ctx, fw);
+      graphics_draw_arc(ctx, GRect(fc.x - fr, fc.y - fr, 2 * fr, 2 * fr),
+                        GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
+      graphics_context_set_stroke_width(ctx, 1);
+    }
+  }
+  // Budget bar: while tracking locally (not in a focus session - the depleting
+  // ring tells that story) and the task carries an estimate, a thin bar shows
+  // spent / estimate, green -> amber (>=75%) -> red (over).
+  if (!focus_active() && s_tracking_task_id[0] != '\0') {
+    Task *bt = find_task_by_id(s_tracking_task_id);
+    if (bt && bt->time_estimate_ms > 0) {
+      int spent_s = bt->time_spent_ms / 1000;
+      time_t el = time(NULL) - s_tracking_start_epoch;
+      if (el > 0) {
+        spent_s += (int)el;
+      }
+      int est_s = bt->time_estimate_ms / 1000;
+      if (est_s < 1) {
+        est_s = 1;
+      }
+      int pct = spent_s * 100 / est_s;          // int-safe: spent_s well under 2^24
+      int fill = pct > 100 ? 100 : pct;
+      GRect bb = layer_get_bounds(layer);
+      int16_t bw = bb.size.w - 48;
+      int16_t bx = bb.origin.x + 24;
+      int16_t by = bb.origin.y + bb.size.h * 62 / 100;
+      graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorDarkGray, GColorBlack));
+      graphics_fill_rect(ctx, GRect(bx, by, bw, 6), 2, GCornersAll);
+      graphics_context_set_fill_color(ctx,
+          pct > 100 ? GColorRed : pct >= 75 ? GColorChromeYellow : GColorJaegerGreen);
+      graphics_fill_rect(ctx, GRect(bx, by, bw * fill / 100, 6), 2, GCornersAll);
+    }
+  }
+
   if (!focus_active() || s_focus_end_epoch == 0) {
     return; // no depleting ring for Flowtime (counts up, no end)
   }
@@ -8881,6 +9360,11 @@ static void live_window_load(Window *window) {
 static void live_window_unload(Window *window) {
   stop_live_tick();
 #ifdef PBL_PLATFORM_EMERY
+  if (s_arc_flash_timer) {
+    app_timer_cancel(s_arc_flash_timer);
+    s_arc_flash_timer = NULL;
+  }
+  s_arc_flash_tick = 0;
   layer_destroy(s_live_arc_layer);
   s_live_arc_layer = NULL;
 #endif
@@ -8919,6 +9403,47 @@ static void push_live_window(void) {
 // single (toggle / double-click notes) and long (the per-task action menu, where
 // scheduling now lives - it used to be long-press UP/DOWN here).
 
+#ifdef PBL_PLATFORM_EMERY
+// A scrollbar on the far right of the task list - a faint track with a red
+// thumb whose position tracks the selected row's flat index over the row
+// total. Hidden when the whole list fits (< PIP_MIN_ROWS). Its own overlay
+// layer (s_scroll_pip_layer, declared up by s_menu_layer) above s_menu_layer;
+// redrawn on selection change and on .appear. On a touch watch, dragging the
+// right edge scrubs the selection - pip_total_rows / pip_scrub_to are defined
+// up by touch_handler.
+static void scroll_pip_update_proc(Layer *layer, GContext *ctx) {
+  int total = pip_total_rows();
+  if (total < PIP_MIN_ROWS) {
+    return;
+  }
+  MenuIndex sel = menu_layer_get_selected_index(s_menu_layer);
+  int flat = 0;
+  for (uint16_t s = 0; s < sel.section; s++) {
+    flat += menu_get_num_rows(s_menu_layer, s, NULL);
+  }
+  flat += sel.row;
+  if (flat < 0) {
+    flat = 0;
+  } else if (flat > total - 1) {
+    flat = total - 1;
+  }
+
+  GRect b = layer_get_bounds(layer);
+  int16_t tx = b.origin.x + b.size.w - 4;
+  int16_t top = b.origin.y + 4;
+  int16_t th = b.size.h - 8;
+  graphics_context_set_fill_color(ctx, GColorLightGray);
+  graphics_fill_rect(ctx, GRect(tx + 1, top, 2, th), 1, GCornersAll);
+  int thumb = th / 5;
+  if (thumb < 14) {
+    thumb = 14;
+  }
+  int ty = top + (total > 1 ? (th - thumb) * flat / (total - 1) : 0);
+  graphics_context_set_fill_color(ctx, GColorRed);
+  graphics_fill_rect(ctx, GRect(tx, ty, 3, thumb), 1, GCornersAll);
+}
+#endif
+
 static void window_load(Window *window) {
   Layer *window_layer;
   GRect content_bounds = window_chrome(window, &s_status_bar, &window_layer);
@@ -8936,6 +9461,11 @@ static void window_load(Window *window) {
   });
   menu_layer_set_click_config_onto_window(s_menu_layer, window);
   layer_add_child(window_layer, menu_layer_get_layer(s_menu_layer));
+#ifdef PBL_PLATFORM_EMERY
+  s_scroll_pip_layer = layer_create(content_bounds);
+  layer_set_update_proc(s_scroll_pip_layer, scroll_pip_update_proc);
+  layer_add_child(window_layer, s_scroll_pip_layer);
+#endif
   // A cached list may already have a selection that needs to scroll.
   refresh_scroll_state(true);
 
@@ -9048,6 +9578,11 @@ static void window_appear(Window *window) {
   }
   menu_layer_reload_data(s_menu_layer);
   refresh_scroll_state(true);
+#ifdef PBL_PLATFORM_EMERY
+  if (s_scroll_pip_layer) {
+    layer_mark_dirty(s_scroll_pip_layer);
+  }
+#endif
 }
 
 static void window_unload(Window *window) {
@@ -9060,6 +9595,10 @@ static void window_unload(Window *window) {
   cancel_unpin_timer();   // the pinned-section grace timer
 #endif
   stop_syncing_animation();
+#ifdef PBL_PLATFORM_EMERY
+  layer_destroy(s_scroll_pip_layer);
+  s_scroll_pip_layer = NULL;
+#endif
   menu_layer_destroy(s_menu_layer);
   text_layer_destroy(s_empty_layer);
 #ifndef PBL_PLATFORM_APLITE
