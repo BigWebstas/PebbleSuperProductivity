@@ -1026,6 +1026,10 @@ static bool remote_in_pinned_section(void) {
 // "Touch navigation" (config.touchNav), off by default (see the touch block's
 // HARDWARE STATE comment). PBL_TOUCH-only. See apply_touch_nav().
 static bool s_touch_nav_enabled = false;
+// Per-tap flags the menu handlers read (declared up here so menu_selection_changed
+// / menu_select_click can see them); set in the touch handler far below.
+static bool s_tap_moved_sel = false;
+static bool s_touch_longpress_fired = false;
 #endif
 // Backlight override: 0 (system default) until the first sync, so an unconfigured
 // watch never touches the backlight API. Negative (BACKLIGHT_MODE_ALWAYS_ON)
@@ -2499,6 +2503,11 @@ static void refresh_scroll_state(bool reset_offset) {
 static void menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, MenuIndex old_index, void *context) {
   refresh_scroll_state(true);
   backlight_touch();
+#if defined(PBL_TOUCH)
+  // A tap that moved the highlight to a new row is select-only; a tap on the
+  // already-selected row (no move) activates it - see menu_select_click.
+  s_tap_moved_sel = true;
+#endif
 }
 
 #ifndef PBL_PLATFORM_APLITE
@@ -3849,15 +3858,28 @@ static void stop_tracking_and_report(void) {
   stop_tracking_at(time(NULL));
 }
 
+static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context);
+
 static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
 #if defined(PBL_TOUCH)
-  // A touch tap: the bridge has already moved the highlight to the tapped row,
-  // so just leave it selected - don't toggle it done, don't cancel a pending
-  // reschedule (a swipe's own synthesised SELECT lands here too). Checked
-  // before everything else. Physical Select is never guarded.
+  // A touch tap. The bridge has already moved the highlight to the tapped row.
+  //  - moved to a NEW row (s_tap_moved_sel), or a long-press already fired:
+  //    select-only, this synthesised SELECT is a no-op.
+  //  - tap on the row that was ALREADY selected: activate it. A real task row
+  //    opens its action menu (not toggle-done); every other row (the pinned
+  //    "TRACKING" row, the nav rows, a project row) falls through to do exactly
+  //    what a physical Select would.
   if (consume_tap_select_guard()) {
-    return;
+    if (s_tap_moved_sel || s_touch_longpress_fired) {
+      return;
+    }
+    bool pinned_row = has_pinned_row() && cell_index->section == 1;
+    if (!pinned_row && resolve_task_at(*cell_index)) {
+      menu_select_long_click(s_menu_layer, cell_index, NULL);
+      return;
+    }
+    // fall through: pinned / nav / project / Finish Day -> normal Select routing
   }
 #endif
 #ifndef PBL_PLATFORM_APLITE
@@ -6561,7 +6583,8 @@ static AppTimer *s_touch_longpress_timer = NULL;
 static GPoint s_touch_down_point;
 static bool s_touch_armed = false;       // a gesture is in progress (armed at Touchdown)
 static bool s_touch_moved = false;       // finger has left the tap zone (scroll / swipe)
-static bool s_touch_swipe_fired = false; // left-swipe already handled this gesture
+static bool s_touch_swipe_fired = false; // the left-swipe already handled this gesture
+// s_tap_moved_sel / s_touch_longpress_fired are declared up by s_touch_nav_enabled.
 
 static void touch_longpress_timer_cancel(void) {
   if (s_touch_longpress_timer) {
@@ -6615,6 +6638,7 @@ static bool consume_tap_select_guard(void) {
 static void touch_longpress_fire(void *data) {
   s_touch_longpress_timer = NULL;
   s_touch_armed = false;  // consumed - the eventual liftoff does nothing more
+  s_touch_longpress_fired = true;  // the trailing synthesised SELECT is a no-op
   arm_tap_select_guard();  // swallow any SELECT the bridge emits on the release
   backlight_touch();
   vibes_short_pulse();  // the only "it registered" cue before the action lands
@@ -6644,6 +6668,8 @@ static void touch_handler(const TouchEvent *event, void *context) {
     touch_longpress_timer_cancel();
     s_touch_moved = false;
     s_touch_swipe_fired = false;
+    s_tap_moved_sel = false;
+    s_touch_longpress_fired = false;
     // non_navigational: contact without the watch being woken first - don't arm.
     s_touch_armed = !event->non_navigational;
     if (!s_touch_armed) {
@@ -6671,10 +6697,15 @@ static void touch_handler(const TouchEvent *event, void *context) {
     }
     // Keep evaluating dx for the whole drag - the old code disarmed at the slop,
     // so a swipe that started even slightly vertical could never be recognised.
+    // s_tap_moved_sel too: a swipe's trailing synthesised SELECT must not
+    // land on the tap-to-activate branch in menu_select_click.
     if (touch_is_left_swipe(dx, dy) && window_stack_get_top_window() == s_main_window) {
       s_touch_swipe_fired = true;
+      s_tap_moved_sel = true;
       begin_pending_reschedule(RESCHEDULE_TOMORROW);
     }
+    // Right-swipe Back is the system bridge's job - a handler of our own here
+    // double-popped straight out of the app (see the touch-nav memory).
     break;
   }
 
@@ -6683,11 +6714,12 @@ static void touch_handler(const TouchEvent *event, void *context) {
     if (s_touch_armed && !s_touch_swipe_fired) {
       int dx = event->x - s_touch_down_point.x;
       int dy = event->y - s_touch_down_point.y;
+      // A fast flick can arrive as Touchdown -> Liftoff with no PositionUpdate
+      // between - catch it from the endpoint delta.
       if (touch_is_left_swipe(dx, dy) && window_stack_get_top_window() == s_main_window) {
-        // A fast flick can arrive as Touchdown -> Liftoff with no
-        // PositionUpdate between - catch it from the endpoint delta.
         begin_pending_reschedule(RESCHEDULE_TOMORROW);
         s_touch_swipe_fired = true;
+        s_tap_moved_sel = true;
       }
     }
     // Re-arm the tap guard so a SELECT the bridge emits just after the release
@@ -6713,6 +6745,8 @@ static void apply_touch_nav(void) {
     s_touch_armed = false;
     s_touch_moved = false;
     s_touch_swipe_fired = false;
+    s_tap_moved_sel = false;
+    s_touch_longpress_fired = false;
   }
 }
 #endif  // PBL_TOUCH
