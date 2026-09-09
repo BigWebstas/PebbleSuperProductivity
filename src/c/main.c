@@ -8392,9 +8392,19 @@ static void stop_live_tick(void) {
 // strip. `notify` = ran to completion (long buzz + banner); else a plain stop.
 // Nothing to undo for the backlight - the pulses fade themselves.
 static void focus_end(bool ran_out) {
-  // A break that ran out: fully done.
+  // A break that ran out. With Pomodoro timing on and a live track, loop back
+  // into the next work session (work -> break -> work -> ... until a long-hold
+  // ends it or tracking stops); otherwise focus mode is fully done.
   if (ran_out && s_focus_on_break) {
     s_focus_on_break = false;
+    if (s_use_pomodoro_cfg && s_pomodoro_work_min > 0 && s_tracking_task_id[0] != '\0') {
+      s_focus_end_epoch = time(NULL) + (time_t)s_pomodoro_work_min * 60;
+      save_focus();
+      vibes_double_pulse();
+      show_top_banner("Back to work");
+      menu_layer_reload_data(s_menu_layer);
+      return;
+    }
     s_focus_end_epoch = 0;
     save_focus();
     vibes_double_pulse();
