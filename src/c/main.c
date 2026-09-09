@@ -576,28 +576,31 @@ static AppTimer *s_pending_reschedule_timer = NULL;
 static char s_pending_reschedule_task_id[MAX_ID_LEN] = "";
 static RescheduleKind s_pending_reschedule_kind = RESCHEDULE_NONE;
 // Frame ticks (one per scroll_timer_callback, SCROLL_INTERVAL_MS apart) since
-// the pending-reschedule window opened - drives the shrinking countdown bar
-// under its subtitle. Kept alive via refresh_scroll_state.
+// the pending-reschedule window opened - drives the emery shrinking countdown
+// bar under its subtitle. Kept alive via refresh_scroll_state.
 static int s_pending_reschedule_tick = 0;
-// RESCHEDULE_AT's target hour (0-23) - see send path in the commit callback.
-static int s_pending_reschedule_at_hour = 0;
-// The done-toggle gets its own copy of the same cancel window: mark a task done
-// and its subtitle shows "Marking done..." with the shrinking bar for
-// DONE_WINDOW_MS, a Select cancels, the timer commits. Un-completing a task is
-// immediate (no window). By id, like the reschedule window.
-#define DONE_WINDOW_MS 5000
-static AppTimer *s_pending_done_timer = NULL;
-static char s_pending_done_task_id[MAX_ID_LEN] = "";
-static int s_pending_done_tick = 0;
 // Set when the gesture came from the Projects browser task view - the phone
 // uses it to move a scheduled backlog task into the regular list and re-push
 // that view. Empty for a today-list reschedule.
 static char s_pending_reschedule_project_id[MAX_PROJECT_ID_LEN] = "";
-// The Resync row flashes green for SYNC_CHECK_MS when a sync finishes
-// (SYNCING -> OK). Driven by the scroll timer's tick, like the pending bars.
+#ifdef PBL_PLATFORM_EMERY
+// RESCHEDULE_AT's target hour (0-23) - see the commit callback's send path.
+static int s_pending_reschedule_at_hour = 0;
+// The done-toggle gets its own copy of the same cancel window: mark a task done
+// and its subtitle shows "Marking done..." + the shrinking bar for
+// DONE_WINDOW_MS, a Select cancels, the timer commits. Un-completing a task is
+// immediate. By id, like the reschedule window. emery only - the 144px slice
+// has no code-space headroom, and commits the toggle straight away.
+#define DONE_WINDOW_MS 5000
+static AppTimer *s_pending_done_timer = NULL;
+static char s_pending_done_task_id[MAX_ID_LEN] = "";
+static int s_pending_done_tick = 0;
+// The Resync row flashes green for SYNC_CHECK_MS on a SYNCING -> OK edge.
+// Driven by the scroll timer's tick, like the bar. emery only.
 #define SYNC_CHECK_MS 700
 static bool s_sync_check_active = false;
 static int s_sync_check_tick = 0;
+#endif
 #endif
 
 #if defined(PBL_TOUCH)
@@ -972,9 +975,12 @@ static TextLayer *s_live_elapsed_layer = NULL;
 static TextLayer *s_live_hint_layer = NULL;
 static StatusBarLayer *s_live_status_bar = NULL;
 static AppTimer *s_live_tick_timer = NULL;
+#ifdef PBL_PLATFORM_EMERY
 // A depleting ring drawn behind the M:SS during a focus session (only). Its own
 // canvas layer, alive only while the live window is - see live_arc_update_proc.
+// emery only - no code-space headroom on the 144px slice.
 static Layer *s_live_arc_layer = NULL;
+#endif
 
 // A remote presence session shows in the pinned "TRACKING" section (the same
 // slot local tracking uses) whenever nothing is tracked locally - keeps
@@ -1600,9 +1606,11 @@ static void pending_toggle_timer_callback(void *data);
 static void pending_reschedule_timer_callback(void *data);
 static void cancel_pending_reschedule(void);
 static void begin_pending_reschedule(RescheduleKind kind);
+#ifdef PBL_PLATFORM_EMERY
 static void pending_done_commit_callback(void *data);
 static void begin_pending_done(const char *task_id);
 static void cancel_pending_done(void);
+#endif
 static void send_task_reschedule(const char *task_id, RescheduleKind kind, const char *project_id);
 static TaskGroup *resolve_project_row_at(MenuIndex index);
 #endif
@@ -2258,6 +2266,8 @@ static void scroll_timer_callback(void *data) {
   if (s_pending_reschedule_kind != RESCHEDULE_NONE) {
     s_pending_reschedule_tick++;
   }
+#endif
+#ifdef PBL_PLATFORM_EMERY
   if (s_pending_done_task_id[0] != '\0') {
     s_pending_done_tick++;
   }
@@ -2371,8 +2381,11 @@ static void refresh_scroll_state(bool reset_offset) {
   bool needs_scroll = selected && title_natural_width(selected->title) > available;
 #ifndef PBL_PLATFORM_APLITE
   // Keep the repaint timer alive while a transient row animation is running.
-  if (s_pending_reschedule_kind != RESCHEDULE_NONE || s_pending_done_task_id[0] != '\0' ||
-      s_sync_check_active) {
+  if (s_pending_reschedule_kind != RESCHEDULE_NONE
+#ifdef PBL_PLATFORM_EMERY
+      || s_pending_done_task_id[0] != '\0' || s_sync_check_active
+#endif
+     ) {
     needs_scroll = true;
   }
   if (!needs_scroll && selected && !selected->done) {
@@ -2507,15 +2520,16 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
                               bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
 
 #ifndef PBL_PLATFORM_APLITE
-  // A pending reschedule or a pending done-toggle takes over the whole subtitle
-  // line (over "Done" and the due/time text) with a centred message and a
-  // centre-anchored bar that shrinks as the cancel window runs out - a Select
-  // commits early / cancels. See begin_pending_reschedule / begin_pending_done.
+  // A pending reschedule (and, on emery, a pending done-toggle) takes over the
+  // whole subtitle line with a centred message; emery also draws a centre-
+  // anchored bar that shrinks as the cancel window runs out. A Select commits
+  // early / cancels. See begin_pending_reschedule / begin_pending_done.
   {
     const char *pending_msg = NULL;
     int pend_total_ms = 0, pend_tick = 0;
     if (s_pending_reschedule_kind != RESCHEDULE_NONE &&
         strncmp(s_pending_reschedule_task_id, task->id, MAX_ID_LEN) == 0) {
+#ifdef PBL_PLATFORM_EMERY
       static char at_msg[28];
       if (s_pending_reschedule_kind == RESCHEDULE_AT) {
         int h = s_pending_reschedule_at_hour;
@@ -2529,7 +2543,9 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
           snprintf(at_msg, sizeof(at_msg), "Scheduling %d %s...", h12, h < 12 ? "AM" : "PM");
         }
         pending_msg = at_msg;
-      } else {
+      } else
+#endif
+      {
         pending_msg = s_pending_reschedule_kind == RESCHEDULE_TOMORROW ? "Moving to tomorrow..."
                       : s_pending_reschedule_kind == RESCHEDULE_TODAY ? "Scheduling for today..."
                       : s_pending_reschedule_kind == RESCHEDULE_TO_BACKLOG ? "Moving to backlog..."
@@ -2538,16 +2554,20 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
       }
       pend_total_ms = RESCHEDULE_WINDOW_MS;
       pend_tick = s_pending_reschedule_tick;
-    } else if (s_pending_done_task_id[0] != '\0' &&
-               strncmp(s_pending_done_task_id, task->id, MAX_ID_LEN) == 0) {
+    }
+#ifdef PBL_PLATFORM_EMERY
+    else if (s_pending_done_task_id[0] != '\0' &&
+             strncmp(s_pending_done_task_id, task->id, MAX_ID_LEN) == 0) {
       pending_msg = "Marking done...";
       pend_total_ms = DONE_WINDOW_MS;
       pend_tick = s_pending_done_tick;
     }
+#endif
     if (pending_msg) {
       GColor pend_crisp = is_selected ? GColorWhite : GColorBlack;
       graphics_context_set_text_color(ctx, pend_crisp);
       draw_text(ctx, pending_msg, SUBTITLE_FONT_KEY, subtitle_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+#ifdef PBL_PLATFORM_EMERY
       int rem_ms = pend_total_ms - pend_tick * SCROLL_INTERVAL_MS;
       if (rem_ms < 0) {
         rem_ms = 0;
@@ -2559,6 +2579,10 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
                          GRect(subtitle_box.origin.x + (full_w - bar_w) / 2,
                                subtitle_box.origin.y + subtitle_box.size.h - 3, bar_w, 2),
                          0, GCornerNone);
+#else
+      (void)pend_total_ms;
+      (void)pend_tick;
+#endif
       return;
     }
   }
@@ -2824,11 +2848,11 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
     // Background stays red regardless of selection so this row reads as a
     // standing call-to-action, not a task; the text still inverts on select.
-    // Right after a clean sync it flashes green for SYNC_CHECK_MS.
+    // On emery it flashes green for SYNC_CHECK_MS right after a clean sync.
     GColor resync_bg = GColorRed;
-#ifndef PBL_PLATFORM_APLITE
+#ifdef PBL_PLATFORM_EMERY
     if (s_sync_check_active) {
-      resync_bg = PBL_IF_COLOR_ELSE(GColorIslamicGreen, GColorRed);
+      resync_bg = GColorIslamicGreen;
     }
 #endif
     fill_bg(ctx, bounds, resync_bg);
@@ -3712,6 +3736,7 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     cancel_pending_reschedule();
     return;
   }
+#ifdef PBL_PLATFORM_EMERY
   if (s_pending_done_task_id[0] != '\0') {
     Task *pd_sel = resolve_selected_task();
     if (pd_sel && strncmp(pd_sel->id, s_pending_done_task_id, MAX_ID_LEN) == 0) {
@@ -3725,6 +3750,7 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
       pending_done_commit_callback(NULL);
     }
   }
+#endif
   // The over-estimate banner is a plain layer on the menu - a Select while
   // it's up just dismisses it, like the error overlay.
   if (s_overtime_banner_layer &&
@@ -4231,9 +4257,9 @@ static void pending_toggle_timer_callback(void *data) {
   if (!task) {
     return; // The list changed underneath the pending click - nothing to commit.
   }
-#ifndef PBL_PLATFORM_APLITE
+#ifdef PBL_PLATFORM_EMERY
   // Marking a task done opens its own 5s cancel window rather than committing
-  // now; un-completing one is immediate.
+  // now; un-completing one is immediate. emery only.
   if (!task->done) {
     begin_pending_done(task->id);
     return;
@@ -4246,7 +4272,7 @@ static void pending_toggle_timer_callback(void *data) {
   refresh_scroll_state(false);
 }
 
-#ifndef PBL_PLATFORM_APLITE
+#ifdef PBL_PLATFORM_EMERY
 // Opens (or restarts) the "Marking done..." cancel window for a task by id. The
 // task is not marked done until pending_done_commit_callback fires; a Select in
 // the meantime calls cancel_pending_done.
@@ -4333,9 +4359,12 @@ static void pending_reschedule_timer_callback(void *data) {
   s_pending_reschedule_timer = NULL;
   RescheduleKind kind = s_pending_reschedule_kind;
   s_pending_reschedule_kind = RESCHEDULE_NONE;
+#ifdef PBL_PLATFORM_EMERY
   if (kind == RESCHEDULE_AT && s_pending_reschedule_task_id[0] != '\0') {
     send_task_set_due_time(s_pending_reschedule_task_id, s_pending_reschedule_at_hour);
-  } else if (kind != RESCHEDULE_NONE && s_pending_reschedule_task_id[0] != '\0') {
+  } else
+#endif
+  if (kind != RESCHEDULE_NONE && s_pending_reschedule_task_id[0] != '\0') {
     send_task_reschedule(s_pending_reschedule_task_id, kind, s_pending_reschedule_project_id);
   }
   s_pending_reschedule_task_id[0] = '\0';
@@ -4389,12 +4418,14 @@ static void begin_pending_reschedule(RescheduleKind kind) {
     s_pending_toggle_timer = NULL;
     s_pending_toggle_task_id[0] = '\0';
   }
+#ifdef PBL_PLATFORM_EMERY
   if (s_pending_done_timer) {
     app_timer_cancel(s_pending_done_timer);
     s_pending_done_timer = NULL;
     s_pending_done_task_id[0] = '\0';
     s_pending_done_tick = 0;
   }
+#endif
   if (s_pending_reschedule_timer) {
     app_timer_cancel(s_pending_reschedule_timer);
   }
@@ -4542,8 +4573,8 @@ static void set_status_code(int32_t new_status_code) {
 #endif
   }
 #endif
-#ifndef PBL_PLATFORM_APLITE
-  // A sync just finished cleanly - fire the Resync-row check-ping.
+#ifdef PBL_PLATFORM_EMERY
+  // A sync just finished cleanly - flash the Resync row green.
   if (s_status_code == STATUS_SYNCING && new_status_code == STATUS_OK) {
     s_sync_check_active = true;
     s_sync_check_tick = 0;
@@ -6783,16 +6814,23 @@ static void pick_select_click(ClickRecognizerRef r, void *c) {
     window_stack_pop(true);
     return;
   }
+  Task *t = find_task_by_id(s_pick_task_id);
   if (s_pick_kind == PICK_TIME) {
+#ifdef PBL_PLATFORM_EMERY
     // Hand off to the shared cancel window - "Scheduling 3 PM..." + bar on the
     // task row below, commit (send_task_set_due_time) after RESCHEDULE_WINDOW_MS.
+    (void)t;
     s_pending_reschedule_at_hour = v;
     window_stack_pop(true);
     begin_pending_reschedule(RESCHEDULE_AT);
     return;
-  }
-  Task *t = find_task_by_id(s_pick_task_id);
-  if (s_pick_kind == PICK_ESTIMATE) {
+#else
+    if (t) {
+      t->due_min = v * 60; // the phone decides today vs tomorrow
+    }
+    send_task_set_due_time(s_pick_task_id, v);
+#endif
+  } else if (s_pick_kind == PICK_ESTIMATE) {
     int32_t ms = (int32_t)v * 60000;
     if (t) {
       t->time_estimate_ms = (int)ms;
@@ -7931,9 +7969,11 @@ static void live_window_refresh(void) {
   if (!s_live_window || window_stack_get_top_window() != s_live_window) {
     return;
   }
+#ifdef PBL_PLATFORM_EMERY
   if (s_live_arc_layer) {
     layer_mark_dirty(s_live_arc_layer); // depletes with the focus countdown
   }
+#endif
   static char elapsed_buf[32];
 
   if (s_tracking_task_id[0] != '\0') {
@@ -8078,6 +8118,7 @@ static void live_window_click_config_provider(void *context) {
   window_long_click_subscribe(BUTTON_ID_DOWN, 0, focus_long_click_handler, NULL);
 }
 
+#ifdef PBL_PLATFORM_EMERY
 // Frames the live window with a ring that depletes clockwise from 12 o'clock as
 // the focus session's time runs out. Draws nothing outside a focus session, so
 // plain tracking / remote presence keep the clean text-only look.
@@ -8115,6 +8156,7 @@ static void live_arc_update_proc(Layer *layer, GContext *ctx) {
   graphics_draw_arc(ctx, ring, GOvalScaleModeFitCircle, 0, sweep);
   graphics_context_set_stroke_width(ctx, 1);
 }
+#endif // PBL_PLATFORM_EMERY
 
 static void live_window_load(Window *window) {
   Layer *window_layer;
@@ -8125,10 +8167,12 @@ static void live_window_load(Window *window) {
   int16_t y = content.origin.y + 6;
   int16_t bottom = content.origin.y + content.size.h;
 
+#ifdef PBL_PLATFORM_EMERY
   // The focus ring sits behind everything (added first).
   s_live_arc_layer = layer_create(content);
   layer_set_update_proc(s_live_arc_layer, live_arc_update_proc);
   layer_add_child(window_layer, s_live_arc_layer);
+#endif
 
   // Task name first (what the user asked to see), wrapping to two lines.
   s_live_task_layer = make_text_layer(window_layer, GRect(x, y, w, 50),
@@ -8154,8 +8198,10 @@ static void live_window_load(Window *window) {
 
 static void live_window_unload(Window *window) {
   stop_live_tick();
+#ifdef PBL_PLATFORM_EMERY
   layer_destroy(s_live_arc_layer);
   s_live_arc_layer = NULL;
+#endif
   text_layer_destroy(s_live_state_layer);
   text_layer_destroy(s_live_task_layer);
   text_layer_destroy(s_live_elapsed_layer);
@@ -8337,11 +8383,13 @@ static void window_unload(Window *window) {
   }
   s_pending_reschedule_kind = RESCHEDULE_NONE;
   s_pending_reschedule_task_id[0] = '\0';
+#ifdef PBL_PLATFORM_EMERY
   if (s_pending_done_timer) {
     app_timer_cancel(s_pending_done_timer);
     s_pending_done_timer = NULL;
   }
   s_pending_done_task_id[0] = '\0';
+#endif
 #endif
 #if defined(PBL_TOUCH)
   clear_tap_select_guard();
