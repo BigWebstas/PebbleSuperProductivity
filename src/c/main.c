@@ -606,12 +606,18 @@ static int s_sync_check_tick = 0;
 static bool s_addtask_flash_active = false;
 static int s_addtask_flash_tick = 0;
 // A habit row pulses green for HABIT_FLASH_MS the moment a bump takes it to its
-// goal. Its own short repeating timer (the habits list has no idle ticker).
+// goal, or gold for the longer HABIT_MILESTONE_MS when the streak just crossed
+// 7 / 30 / 100. Its own short repeating timer (the habits list has no ticker).
 #define HABIT_FLASH_MS 720
+#define HABIT_MILESTONE_MS 2000
 #define HABIT_FLASH_STEP_MS 90
 static AppTimer *s_habit_flash_timer = NULL;
 static char s_habit_flash_id[MAX_HABIT_ID_LEN] = "";
 static int s_habit_flash_tick = 0;
+static bool s_habit_flash_gold = false;
+// Habit id whose streak crossed a milestone in the batch currently arriving;
+// the pop fires on MSG_HABIT_SYNC_END once the row data is in place.
+static char s_habit_milestone_id[MAX_HABIT_ID_LEN] = "";
 #endif
 #endif
 
@@ -1601,6 +1607,9 @@ static GRect window_chrome(Window *window, StatusBarLayer **status, Layer **root
                b.size.w, b.size.h - STATUS_BAR_LAYER_HEIGHT);
 }
 #ifndef PBL_PLATFORM_APLITE
+#ifdef PBL_PLATFORM_EMERY
+static void begin_habit_flash(const char *habit_id, bool milestone);
+#endif
 static void show_notes_overlay(Task *task);
 static void show_project_notes_overlay(TaskGroup *group);
 static void hide_notes_overlay(void);
@@ -4787,7 +4796,21 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habits[idx].is_stopwatch = habit_type == 1;
       s_habits[idx].is_countdown = habit_type == 2;
       s_habits[idx].countdown_ms = tuple_int(iterator, KEY_HABIT_COUNTDOWN_MS, 0);
+#ifdef PBL_PLATFORM_EMERY
+      {
+        int old_streak = s_habits[idx].streak;
+        int new_streak = tuple_int(iterator, KEY_HABIT_STREAK, 0);
+        s_habits[idx].streak = new_streak;
+        // Exact day-N crossing only, so a cold load (old 0 -> N) never pops.
+        if ((old_streak == 6 && new_streak == 7) ||
+            (old_streak == 29 && new_streak == 30) ||
+            (old_streak == 99 && new_streak == 100)) {
+          str_copy(s_habit_milestone_id, s_habits[idx].id, MAX_HABIT_ID_LEN);
+        }
+      }
+#else
       s_habits[idx].streak = tuple_int(iterator, KEY_HABIT_STREAK, 0);
+#endif
       s_habits[idx].best_streak = tuple_int(iterator, KEY_HABIT_BEST_STREAK, 0);
 #endif
       break;
@@ -4801,6 +4824,16 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       if (s_habits_empty_layer) {
         update_habits_empty_layer();
       }
+#ifdef PBL_PLATFORM_EMERY
+      // A streak just hit 7 / 30 / 100 in this batch - gold-pop that row, but
+      // only if the list is actually on screen to see it.
+      if (s_habit_milestone_id[0] != '\0') {
+        if (s_habits_menu_layer) {
+          begin_habit_flash(s_habit_milestone_id, true);
+        }
+        s_habit_milestone_id[0] = '\0';
+      }
+#endif
       break;
     }
 #if PROJECTS_BROWSER
@@ -5306,7 +5339,8 @@ static void stop_habit_tracking_tick(void) {
 static void habit_flash_timer_cb(void *data) {
   s_habit_flash_timer = NULL;
   s_habit_flash_tick++;
-  if (s_habit_flash_tick * HABIT_FLASH_STEP_MS < HABIT_FLASH_MS) {
+  int limit = s_habit_flash_gold ? HABIT_MILESTONE_MS : HABIT_FLASH_MS;
+  if (s_habit_flash_tick * HABIT_FLASH_STEP_MS < limit) {
     s_habit_flash_timer = app_timer_register(HABIT_FLASH_STEP_MS, habit_flash_timer_cb, NULL);
   } else {
     s_habit_flash_id[0] = '\0';
@@ -5316,14 +5350,19 @@ static void habit_flash_timer_cb(void *data) {
   }
 }
 
-// Pulse the given habit's row green - called when a bump just took it to goal.
-static void begin_habit_flash(const char *habit_id) {
+// Pulse the given habit's row: green when a bump just took it to goal, gold
+// (longer) when the streak crossed a 7 / 30 / 100 milestone.
+static void begin_habit_flash(const char *habit_id, bool milestone) {
   if (s_habit_flash_timer) {
     app_timer_cancel(s_habit_flash_timer);
   }
   str_copy(s_habit_flash_id, habit_id, MAX_HABIT_ID_LEN);
   s_habit_flash_tick = 0;
+  s_habit_flash_gold = milestone;
   s_habit_flash_timer = app_timer_register(HABIT_FLASH_STEP_MS, habit_flash_timer_cb, NULL);
+  if (milestone) {
+    vibes_double_pulse();
+  }
 }
 
 static void stop_habit_flash(void) {
@@ -5332,6 +5371,7 @@ static void stop_habit_flash(void) {
     s_habit_flash_timer = NULL;
   }
   s_habit_flash_id[0] = '\0';
+  s_habit_milestone_id[0] = '\0';
 }
 #endif
 
@@ -5483,11 +5523,11 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // habit ties back to the row that brought you here.
   GColor bg = is_selected ? GColorVividCerulean : GColorWhite;
 #ifdef PBL_PLATFORM_EMERY
-  // Just hit its goal - pulse the row green a couple of times over HABIT_FLASH_MS.
+  // Bump-to-goal green pulse, or the longer gold pulse for a streak milestone.
   if (s_habit_flash_id[0] != '\0' &&
       strncmp(s_habit_flash_id, habit->id, MAX_HABIT_ID_LEN) == 0 &&
       (s_habit_flash_tick / 2) % 2 == 0) {
-    bg = GColorMintGreen;
+    bg = s_habit_flash_gold ? GColorYellow : GColorMintGreen;
   }
 #endif
   // A done habit's title stays full-strength (unlike a done task's, which dims):
@@ -5647,7 +5687,7 @@ static void adjust_habit(MenuIndex index, int32_t delta) {
   habit->done = habit->value >= habit->goal;
 #ifdef PBL_PLATFORM_EMERY
   if (habit->done && !was_done) {
-    begin_habit_flash(habit->id);
+    begin_habit_flash(habit->id, false);
   }
 #else
   (void)was_done;
@@ -6894,7 +6934,7 @@ static void pick_select_click(ClickRecognizerRef r, void *c) {
         send_habit_adjust(h, delta); // phone replaces countOnDay[today] with the sum
 #ifdef PBL_PLATFORM_EMERY
         if (h->done && !h_was_done) {
-          begin_habit_flash(h->id);
+          begin_habit_flash(h->id, false);
         }
 #else
         (void)h_was_done;
