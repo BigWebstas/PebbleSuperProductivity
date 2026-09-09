@@ -5226,6 +5226,13 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         s_presence_can_stop = false;
         s_presence_stopping = false;
       } else {
+        // A remote device just started (or switched) a session while this watch
+        // is tracking locally - yield: stop and report, so the remote session
+        // takes the pinned row instead of two timers running at once.
+        if (s_presence_state == 1 && s_tracking_task_id[0] != '\0' &&
+            tuple_int(iterator, KEY_PRESENCE_NEW_SESSION, 0) != 0) {
+          stop_tracking_and_report();
+        }
         str_copy(s_presence_task, tuple_str(iterator, KEY_PRESENCE_TASK_TITLE, ""), sizeof(s_presence_task));
         str_copy(s_presence_device, tuple_str(iterator, KEY_PRESENCE_DEVICE, ""), sizeof(s_presence_device));
         s_presence_elapsed_base = time(NULL) - (time_t)tuple_int(iterator, KEY_PRESENCE_ELAPSED_S, 0);
@@ -7675,6 +7682,13 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
           start_tracking(t);
         }
         menu_layer_reload_data(s_menu_layer);
+#ifndef PBL_PLATFORM_APLITE
+        if (!was) {
+          push_live_window();          // start -> full-screen tracking page
+        } else {
+          window_stack_pop_all(true);  // stop -> back to the main task list
+        }
+#endif
       }
       break;
     case ACT_TODAY:
