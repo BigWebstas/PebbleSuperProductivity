@@ -2225,7 +2225,22 @@ static int16_t pingpong_offset(int16_t travel) {
 
 // Formats due_min (minutes since local midnight) as "@ 9:41 AM" / "@ 21:41",
 // respecting the watch's 12h/24h setting. The phone already sent local time.
-static void format_due_time(int due_min, char *out, size_t out_len) {
+// relative: within the next 90 min show "in 25m" / "in 1h 05m" instead - more
+// useful on a task row, but NOT for the launcher glance (it would go stale).
+static void format_due_time(int due_min, bool relative, char *out, size_t out_len) {
+  if (relative) {
+    time_t nowt = time(NULL);
+    struct tm *lt = localtime(&nowt);
+    int delta = due_min - (lt->tm_hour * 60 + lt->tm_min);
+    if (delta > 0 && delta <= 90) {
+      if (delta < 60) {
+        snprintf(out, out_len, "in %dm", delta);
+      } else {
+        snprintf(out, out_len, "in 1h %02dm", delta - 60);
+      }
+      return;
+    }
+  }
   int h = due_min / 60;
   int m = due_min % 60;
   if (clock_is_24h_style()) {
@@ -2383,7 +2398,7 @@ static void build_task_subtitle(Task *task, char *out, size_t cap) {
   }
   if (task->due_min >= 0) {
     char due_text[16];
-    format_due_time(task->due_min, due_text, sizeof(due_text));
+    format_due_time(task->due_min, true, due_text, sizeof(due_text));
     size_t n = strlen(out);
     if (n > 0) {
       snprintf(out + n, cap - n, "  %s", due_text);
@@ -5696,6 +5711,16 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   } else {
     st[0] = '\0';
   }
+  // A live streak still unextended late in the day: the badge goes amber - a
+  // nudge without a notification.
+  bool at_risk = false;
+#ifdef PBL_COLOR
+  if (!habit->done && habit->streak >= 2) {
+    time_t nowt = time(NULL);
+    struct tm *lt = localtime(&nowt);
+    at_risk = lt->tm_hour >= 17;
+  }
+#endif
   if (st[0]) {
     GFont sf = fonts_get_system_font(milestone ? FONT_KEY_GOTHIC_14_BOLD : FONT_KEY_GOTHIC_14);
     GSize ss = graphics_text_layout_get_content_size(
@@ -5712,7 +5737,7 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     GRect text_box = GRect(badge_x + pad + pips_w, subtitle_box.origin.y + 2,
                            sw, subtitle_box.size.h - 2);
     if (milestone) {
-      graphics_context_set_fill_color(ctx, GColorBlack);
+      graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(at_risk ? GColorOrange : GColorBlack, GColorBlack));
       graphics_fill_rect(ctx, GRect(badge_x, subtitle_box.origin.y, badge_w, subtitle_box.size.h),
                          3, GCornersAll);
       graphics_context_set_fill_color(ctx, GColorWhite);
@@ -5722,10 +5747,12 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
                            0, GCornerNone);
       }
       graphics_context_set_text_color(ctx, GColorWhite);
+    } else if (at_risk) {
+      graphics_context_set_text_color(ctx, GColorOrange);
     }
     graphics_draw_text(ctx, st, sf, text_box,
         GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
-    if (milestone) {
+    if (milestone || at_risk) {
       graphics_context_set_text_color(ctx, fg);
     }
     left_sub.size.w -= (badge_w + 4);
@@ -8823,7 +8850,7 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
   }
   s_due_notified_min = soonest;
   char at[16];
-  format_due_time(soonest, at, sizeof(at)); // "@ 9:41 AM"
+  format_due_time(soonest, false, at, sizeof(at)); // "@ 9:41 AM"
   snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text), "Task due\n%s", at);
   show_top_banner(s_overtime_banner_text);
 }
@@ -8989,7 +9016,7 @@ static void glance_reload_cb(AppGlanceReloadSession *session, size_t limit,
     }
     if (soonest_idx >= 0) {
       char at[16];
-      format_due_time(soonest, at, sizeof(at)); // "@ 9:41 AM"
+      format_due_time(soonest, false, at, sizeof(at)); // "@ 9:41 AM"
       snprintf(subtitle, sizeof(subtitle), "%s  %s", at,
                s_tasks[soonest_idx].title);
     }
