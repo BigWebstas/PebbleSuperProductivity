@@ -588,6 +588,14 @@ static int s_pending_reschedule_at_hour = 0;
 static AppTimer *s_pending_done_timer = NULL;
 static char s_pending_done_task_id[MAX_ID_LEN] = "";
 static int s_pending_done_tick = 0;
+// Strike-through sweep: a line crosses a task's title L->R over STRIKE_MS the
+// moment its done-window commits. Own 40ms timer (strike_anim_cb / begin_strike,
+// defined by begin_pending_done); drawn in draw_task_row.
+#define STRIKE_MS 260
+#define STRIKE_STEP_MS 40
+static AppTimer *s_strike_timer = NULL;
+static char s_strike_task_id[MAX_ID_LEN] = "";
+static int s_strike_tick = 0;
 // The Resync row holds green for SYNC_GREEN_MS on a SYNCING -> OK edge - long
 // enough to actually register "it synced". The Add Task row flashes "Added" for
 // the briefer ADDTASK_FLASH_MS once a dictated task is sent. Both driven by the
@@ -2019,10 +2027,9 @@ static int16_t draw_project_marker(GContext *ctx, int16_t x, int16_t cell_h,
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
-// Defined further down with the marquee helpers; used by the pinned tracking
-// header's sweeping-word draw below.
+// Defined further down with the marquee helpers; used by the subtitle marquee
+// and the pinned tracking row below.
 static int16_t title_natural_width_font(const char *title, GFont font);
-static int16_t pingpong_offset(int16_t travel);
 #endif
 
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
@@ -2041,10 +2048,8 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   }
 #ifndef PBL_PLATFORM_APLITE
   // The pinned tracking header - a thin green strip. Bold (CHROME_FONT_BOLD_KEY,
-  // same point size as CHROME_FONT_KEY) so it reads at a glance. While THIS
-  // watch is the one tracking, the word sweeps gently left<->right across the
-  // strip to catch the eye; a remote presence session leaves it static,
-  // left-aligned.
+  // same point size as CHROME_FONT_KEY) so it reads at a glance. Static, centred;
+  // the "live" cue is the pulse dot on the row below.
   if (has_pinned_row() && section_index == 1) {
     GRect hb = layer_get_bounds(cell_layer);
     fill_bg(ctx, hb, GColorGreen);
@@ -2053,15 +2058,9 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
                         : s_focus_on_break ? "BREAK"
                         : s_focus_end_epoch == 0 ? "FLOWING"
                         : "FOCUSING";
-    GFont label_font = fonts_get_system_font(CHROME_FONT_BOLD_KEY);
-    int16_t avail = hb.size.w - TITLE_BOX_X * 2;
-    int16_t word_w = title_natural_width_font(label, label_font);
-    int16_t x = TITLE_BOX_X;
-    if (s_tracking_task_id[0] != '\0' && avail - word_w > 0) {
-      x += pingpong_offset(avail - word_w);
-    }
-    graphics_draw_text(ctx, label, label_font, GRect(x, 0, word_w + 4, hb.size.h),
-                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, label, fonts_get_system_font(CHROME_FONT_BOLD_KEY),
+                       GRect(0, 0, hb.size.w, hb.size.h),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
     graphics_context_set_stroke_color(ctx, GColorBlack);
     graphics_draw_line(ctx, GPoint(0, hb.size.h - 1), GPoint(hb.size.w, hb.size.h - 1));
     return;
@@ -2235,19 +2234,6 @@ static void draw_marquee_title(GContext *ctx, GRect box, const char *text, GFont
   }
 }
 
-// Triangle-wave position 0 -> travel -> 0, driven by the shared
-// s_scroll_offset_px counter, with a brief hold at each end. Drives the pinned
-// "TRACKING" header word's gentle left<->right sweep while a local session runs.
-static int16_t pingpong_offset(int16_t travel) {
-  if (travel <= 0) {
-    return 0;
-  }
-  const int32_t hold = 20;
-  int32_t leg = travel + hold;
-  int32_t phase = (int32_t)s_scroll_offset_px % (leg * 2);
-  int32_t pos = phase < leg ? phase : (leg * 2 - phase);
-  return (int16_t)(pos > travel ? travel : pos);
-}
 #endif
 
 // Formats due_min (minutes since local midnight) as "@ 9:41 AM" / "@ 21:41",
@@ -2596,7 +2582,16 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
 
   // Recurring-task glyph on the right of the title line: an open circle-arrow.
   // The title box shrinks to leave room so its ellipsis clears the glyph.
-  if (task->recurs && !needs_marquee) {
+  // Suppressed on the pinned row of the task being tracked - the live pulse dot
+  // (drawn by menu_draw_row) sits in that same corner. The recurrence is still
+  // visible where the task sits in its normal group.
+#ifdef PBL_PLATFORM_EMERY
+  bool pinned_tracking_row = show_project && s_tracking_task_id[0] != '\0' &&
+      strncmp(task->id, s_tracking_task_id, MAX_ID_LEN) == 0;
+#else
+  bool pinned_tracking_row = false;
+#endif
+  if (task->recurs && !needs_marquee && !pinned_tracking_row) {
     int16_t gx = bounds.size.w - TITLE_BOX_X - 12;
     int16_t gy = title_box.origin.y + title_box.size.h / 2;
     graphics_context_set_stroke_color(ctx, fg);
@@ -2620,6 +2615,25 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
     graphics_draw_text(ctx, task->title, title_font, title_box,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
+
+#ifdef PBL_PLATFORM_EMERY
+  // A just-committed completion strikes a line clear across the row label L->R.
+  if (s_strike_task_id[0] != '\0' && strncmp(task->id, s_strike_task_id, MAX_ID_LEN) == 0) {
+    int prog = s_strike_tick * STRIKE_STEP_MS * 1000 / STRIKE_MS;
+    if (prog > 1000) {
+      prog = 1000;
+    }
+    int16_t span = available; // full label width, not just the text extent
+    // +5: the glyph midline sits below the box centre (font top padding), so a
+    // plain centre line rides above the text instead of striking through it.
+    int16_t ly = title_box.origin.y + title_box.size.h / 2 + 5;
+    graphics_context_set_stroke_color(ctx, fg);
+    graphics_context_set_stroke_width(ctx, 4);
+    graphics_draw_line(ctx, GPoint(title_box.origin.x, ly),
+                       GPoint(title_box.origin.x + span * prog / 1000, ly));
+    graphics_context_set_stroke_width(ctx, 1);
+  }
+#endif
 
   GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, title_box_h, SUBTITLE_STRIP_H),
                               bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
@@ -2737,6 +2751,22 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
 #endif
   }
 }
+
+#ifdef PBL_PLATFORM_EMERY
+// A calm ~2s throb on the pinned tracking row: a small filled dot at the right
+// edge that grows and shrinks so the row reads as "live" at a glance. No timer
+// of its own - it rides s_scroll_offset_px, which the marquee scroll timer
+// keeps advancing the whole time a local session is pinned (refresh_scroll_state
+// forces needs_scroll while has_pinned_row() && tracking).
+static void draw_live_pulse(GContext *ctx, GRect row_bounds, bool is_selected) {
+  int ph = ((s_scroll_offset_px % 40) + 40) % 40;  // 0..39, ~2s at 100ms/2px
+  int up = ph < 20 ? ph : 40 - ph;                 // 0..20..0 triangle
+  int r = 2 + up / 5;                              // 2..6..2 px
+  GPoint c = GPoint(row_bounds.size.w - 12, row_bounds.size.h / 2);
+  graphics_context_set_fill_color(ctx, is_selected ? GColorMintGreen : GColorIslamicGreen);
+  graphics_fill_circle(ctx, c, r);
+}
+#endif
 
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
   if (s_task_count == 0 && !ACTIONABLE_EMPTY_ACTIVE()) {
@@ -3129,6 +3159,11 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
   is_pinned_row = has_pinned_row() && cell_index->section == 1;
 #endif
   draw_task_row(ctx, layer_get_bounds(cell_layer), task, is_selected, is_pinned_row);
+#ifdef PBL_PLATFORM_EMERY
+  if (is_pinned_row && s_tracking_task_id[0] != '\0' && !task->done) {
+    draw_live_pulse(ctx, layer_get_bounds(cell_layer), is_selected);
+  }
+#endif
 }
 
 // ---------- outbound send retry ----------
@@ -4422,6 +4457,36 @@ static void hide_notes_overlay(void) {
 }
 
 #ifdef PBL_PLATFORM_EMERY
+// A line strikes left-to-right through a task's title over STRIKE_MS the moment
+// its "Marking done..." window commits - the completion gets its own beat
+// before the row settles into the dim "Done" style. Own 40ms timer (like the
+// checklist checkmark), independent of the marquee scroll timer. State lives up
+// with s_pending_done_task_id (draw_task_row needs it).
+static void strike_anim_cb(void *data) {
+  s_strike_timer = NULL;
+  s_strike_tick++;
+  if (s_strike_tick * STRIKE_STEP_MS < STRIKE_MS) {
+    s_strike_timer = app_timer_register(STRIKE_STEP_MS, strike_anim_cb, NULL);
+  } else {
+    s_strike_task_id[0] = '\0';
+  }
+  if (s_menu_layer) {
+    layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
+  }
+}
+
+static void begin_strike(const char *task_id) {
+  if (!task_id || task_id[0] == '\0') {
+    return;
+  }
+  if (s_strike_timer) {
+    app_timer_cancel(s_strike_timer);
+  }
+  str_copy(s_strike_task_id, task_id, sizeof(s_strike_task_id));
+  s_strike_tick = 0;
+  s_strike_timer = app_timer_register(STRIKE_STEP_MS, strike_anim_cb, NULL);
+}
+
 // Opens (or restarts) the "Marking done..." cancel window for a task by id. The
 // task is not marked done until pending_done_commit_callback fires; a Select in
 // the meantime calls cancel_pending_done.
@@ -4443,6 +4508,8 @@ static void begin_pending_done(const char *task_id) {
 static void pending_done_commit_callback(void *data) {
   s_pending_done_timer = NULL;
   Task *task = find_task_by_id(s_pending_done_task_id);
+  char done_id[MAX_ID_LEN];
+  str_copy(done_id, s_pending_done_task_id, sizeof(done_id));
   s_pending_done_task_id[0] = '\0';
   s_pending_done_tick = 0;
   if (task && !task->done) {
@@ -4450,6 +4517,7 @@ static void pending_done_commit_callback(void *data) {
     save_tasks();
     send_task_toggle(task);
     vibes_short_pulse(); // the cancel window elapsed silently - confirm the commit
+    begin_strike(done_id);
   }
   if (s_menu_layer) {
     menu_layer_reload_data(s_menu_layer);
@@ -8753,8 +8821,19 @@ static void live_arc_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_stroke_width(ctx, 2);
   graphics_draw_arc(ctx, ring, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
 #endif
-  graphics_context_set_stroke_color(ctx,
-      PBL_IF_COLOR_ELSE(s_focus_on_break ? GColorVividCerulean : GColorJaegerGreen, GColorBlack));
+  // Work sessions warm from green to amber to red as the time drains (last
+  // third / last minute or sixth); a break stays calm cerulean.
+  GColor arc_color;
+  if (s_focus_on_break) {
+    arc_color = PBL_IF_COLOR_ELSE(GColorVividCerulean, GColorBlack);
+  } else if (left_s <= 60 || left_s * 6 <= total_s) {
+    arc_color = PBL_IF_COLOR_ELSE(GColorRed, GColorBlack);
+  } else if (left_s <= 180 || left_s * 3 <= total_s) {
+    arc_color = PBL_IF_COLOR_ELSE(GColorChromeYellow, GColorBlack);
+  } else {
+    arc_color = PBL_IF_COLOR_ELSE(GColorJaegerGreen, GColorBlack);
+  }
+  graphics_context_set_stroke_color(ctx, arc_color);
   graphics_context_set_stroke_width(ctx, 4);
   graphics_draw_arc(ctx, ring, GOvalScaleModeFitCircle, 0, sweep);
   graphics_context_set_stroke_width(ctx, 1);
@@ -9002,6 +9081,11 @@ static void window_unload(Window *window) {
     s_pending_done_timer = NULL;
   }
   s_pending_done_task_id[0] = '\0';
+  if (s_strike_timer) {
+    app_timer_cancel(s_strike_timer);
+    s_strike_timer = NULL;
+  }
+  s_strike_task_id[0] = '\0';
 #endif
 #endif
 #if defined(PBL_TOUCH)
