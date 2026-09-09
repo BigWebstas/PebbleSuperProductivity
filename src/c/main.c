@@ -1377,6 +1377,14 @@ static const uint32_t PERSIST_KEY_TRACKING_ID = 110;
 static const uint32_t PERSIST_KEY_TRACKING_START = 111;
 
 #ifndef PBL_PLATFORM_APLITE
+static const uint32_t PERSIST_KEY_LAST_SYNC = 122;
+// Epoch of the last SYNCING -> OK transition; drives the Resync row's
+// "Synced Nm ago" subtitle. 0 = never synced this install. aplite has no RAM
+// headroom for it and keeps a plain "Synced".
+static time_t s_last_sync_epoch = 0;
+#endif
+
+#ifndef PBL_PLATFORM_APLITE
 // Focus mode: a watch-local pomodoro wrapped around the current LOCAL
 // tracking session (the desktop's own focus mode is not in the SuperSync
 // op-log, so it can't be mirrored - this is the watch's own). s_focus_end_epoch
@@ -2914,6 +2922,22 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
         // E2EE replay (index.js's sendStatus); empty once past it.
         subtitle = s_status_msg[0] != '\0' ? s_status_msg : "Syncing...";
         break;
+#ifndef PBL_PLATFORM_APLITE
+      case STATUS_OK: {
+        // "Synced" while fresh, then how long ago so a stale list is obvious.
+        int age = s_last_sync_epoch ? (int)(time(NULL) - s_last_sync_epoch) : -1;
+        if (age >= 60 && age < 3600) {
+          snprintf(s_resync_subtitle, sizeof(s_resync_subtitle), "Synced %dm ago", age / 60);
+          subtitle = s_resync_subtitle;
+        } else if (age >= 3600 && age < 86400) {
+          snprintf(s_resync_subtitle, sizeof(s_resync_subtitle), "Synced %dh ago", age / 3600);
+          subtitle = s_resync_subtitle;
+        } else if (age >= 86400) {
+          subtitle = "Synced over a day ago";
+        }
+        break;
+      }
+#endif
       case STATUS_ERROR:
         if (s_status_msg[0] != '\0') {
           snprintf(s_resync_subtitle, sizeof(s_resync_subtitle), "Failed: %s", s_status_msg);
@@ -4390,6 +4414,7 @@ static void pending_done_commit_callback(void *data) {
     task->done = true;
     save_tasks();
     send_task_toggle(task);
+    vibes_short_pulse(); // the cancel window elapsed silently - confirm the commit
   }
   if (s_menu_layer) {
     menu_layer_reload_data(s_menu_layer);
@@ -4456,6 +4481,7 @@ static void pending_reschedule_timer_callback(void *data) {
 #endif
   if (kind != RESCHEDULE_NONE && s_pending_reschedule_task_id[0] != '\0') {
     send_task_reschedule(s_pending_reschedule_task_id, kind, s_pending_reschedule_project_id);
+    vibes_short_pulse(); // the cancel window elapsed silently - confirm the commit
   }
   s_pending_reschedule_task_id[0] = '\0';
   s_pending_reschedule_project_id[0] = '\0';
@@ -4663,17 +4689,22 @@ static void set_status_code(int32_t new_status_code) {
 #endif
   }
 #endif
-#ifdef PBL_PLATFORM_EMERY
-  // A sync just finished cleanly - flash the Resync row green.
+  // A sync just finished cleanly - stamp the time (shown as "Synced Nm ago" on
+  // the Resync row) and, on emery, flash that row green.
   if (s_status_code == STATUS_SYNCING && new_status_code == STATUS_OK) {
+#ifndef PBL_PLATFORM_APLITE
+    s_last_sync_epoch = time(NULL);
+    persist_write_int(PERSIST_KEY_LAST_SYNC, (int)s_last_sync_epoch);
+#endif
+#ifdef PBL_PLATFORM_EMERY
     s_sync_check_active = true;
     s_sync_check_tick = 0;
     if (s_menu_layer) {
       menu_layer_reload_data(s_menu_layer);
       refresh_scroll_state(false);
     }
-  }
 #endif
+  }
   s_status_code = new_status_code;
 }
 
@@ -8894,6 +8925,11 @@ static void init(void) {
   load_tasks();
   load_habits();
   load_tracking();
+#ifndef PBL_PLATFORM_APLITE
+  if (persist_exists(PERSIST_KEY_LAST_SYNC)) {
+    s_last_sync_epoch = (time_t)persist_read_int(PERSIST_KEY_LAST_SYNC);
+  }
+#endif
 #ifndef PBL_PLATFORM_APLITE
   load_habit_tracking();
   load_focus();
