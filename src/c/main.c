@@ -595,11 +595,21 @@ static int s_pending_reschedule_at_hour = 0;
 static AppTimer *s_pending_done_timer = NULL;
 static char s_pending_done_task_id[MAX_ID_LEN] = "";
 static int s_pending_done_tick = 0;
-// The Resync row flashes green for SYNC_CHECK_MS on a SYNCING -> OK edge.
-// Driven by the scroll timer's tick, like the bar. emery only.
+// The Resync row flashes green for SYNC_CHECK_MS on a SYNCING -> OK edge; the
+// Add Task row flashes "Added" for the same span once a dictated task is sent.
+// Both driven by the scroll timer's tick, like the bar. emery only.
 #define SYNC_CHECK_MS 700
 static bool s_sync_check_active = false;
 static int s_sync_check_tick = 0;
+static bool s_addtask_flash_active = false;
+static int s_addtask_flash_tick = 0;
+// A habit row pulses green for HABIT_FLASH_MS the moment a bump takes it to its
+// goal. Its own short repeating timer (the habits list has no idle ticker).
+#define HABIT_FLASH_MS 720
+#define HABIT_FLASH_STEP_MS 90
+static AppTimer *s_habit_flash_timer = NULL;
+static char s_habit_flash_id[MAX_HABIT_ID_LEN] = "";
+static int s_habit_flash_tick = 0;
 #endif
 #endif
 
@@ -2277,6 +2287,12 @@ static void scroll_timer_callback(void *data) {
       s_sync_check_active = false;
     }
   }
+  if (s_addtask_flash_active) {
+    s_addtask_flash_tick++;
+    if (s_addtask_flash_tick * SCROLL_INTERVAL_MS >= SYNC_CHECK_MS) {
+      s_addtask_flash_active = false;
+    }
+  }
 #endif
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
 #if PROJECTS_BROWSER
@@ -2383,7 +2399,7 @@ static void refresh_scroll_state(bool reset_offset) {
   // Keep the repaint timer alive while a transient row animation is running.
   if (s_pending_reschedule_kind != RESCHEDULE_NONE
 #ifdef PBL_PLATFORM_EMERY
-      || s_pending_done_task_id[0] != '\0' || s_sync_check_active
+      || s_pending_done_task_id[0] != '\0' || s_sync_check_active || s_addtask_flash_active
 #endif
      ) {
     needs_scroll = true;
@@ -2816,6 +2832,13 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       // menu_select_click.
       GRect ic = GRect(bounds.size.w - ROW_ICON_SIZE - 10, (bounds.size.h - ROW_ICON_SIZE) / 2,
                        ROW_ICON_SIZE, ROW_ICON_SIZE);
+#ifdef PBL_PLATFORM_EMERY
+      if (s_addtask_flash_active) {
+        draw_nav_row(ctx, bounds, is_selected, GColorGreen, "Added",
+                     s_mic_bitmap, s_mic_white_bitmap, ic);
+        return;
+      }
+#endif
       draw_nav_row(ctx, bounds, is_selected, GColorJaegerGreen, "Add Task",
                    s_mic_bitmap, s_mic_white_bitmap, ic);
       return;
@@ -3297,6 +3320,14 @@ static void dictation_status_callback(DictationSession *session, DictationSessio
       }
     } else {
       send_task_add(transcription);
+#ifdef PBL_PLATFORM_EMERY
+      s_addtask_flash_active = true;
+      s_addtask_flash_tick = 0;
+      if (s_menu_layer) {
+        menu_layer_reload_data(s_menu_layer);
+        refresh_scroll_state(false);
+      }
+#endif
     }
     return;
   }
@@ -5269,6 +5300,39 @@ static void stop_habit_tracking_tick(void) {
   }
 }
 
+#ifdef PBL_PLATFORM_EMERY
+static void habit_flash_timer_cb(void *data) {
+  s_habit_flash_timer = NULL;
+  s_habit_flash_tick++;
+  if (s_habit_flash_tick * HABIT_FLASH_STEP_MS < HABIT_FLASH_MS) {
+    s_habit_flash_timer = app_timer_register(HABIT_FLASH_STEP_MS, habit_flash_timer_cb, NULL);
+  } else {
+    s_habit_flash_id[0] = '\0';
+  }
+  if (s_habits_menu_layer) {
+    layer_mark_dirty(menu_layer_get_layer(s_habits_menu_layer));
+  }
+}
+
+// Pulse the given habit's row green - called when a bump just took it to goal.
+static void begin_habit_flash(const char *habit_id) {
+  if (s_habit_flash_timer) {
+    app_timer_cancel(s_habit_flash_timer);
+  }
+  str_copy(s_habit_flash_id, habit_id, MAX_HABIT_ID_LEN);
+  s_habit_flash_tick = 0;
+  s_habit_flash_timer = app_timer_register(HABIT_FLASH_STEP_MS, habit_flash_timer_cb, NULL);
+}
+
+static void stop_habit_flash(void) {
+  if (s_habit_flash_timer) {
+    app_timer_cancel(s_habit_flash_timer);
+    s_habit_flash_timer = NULL;
+  }
+  s_habit_flash_id[0] = '\0';
+}
+#endif
+
 // Total elapsed ms for the current countdown session, paused or running. Only
 // meaningful while s_tracking_habit_id is an is_countdown habit.
 static int countdown_elapsed_ms(void) {
@@ -5416,6 +5480,14 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // Cerulean selected background, matching the Habits nav row, so a highlighted
   // habit ties back to the row that brought you here.
   GColor bg = is_selected ? GColorVividCerulean : GColorWhite;
+#ifdef PBL_PLATFORM_EMERY
+  // Just hit its goal - pulse the row green a couple of times over HABIT_FLASH_MS.
+  if (s_habit_flash_id[0] != '\0' &&
+      strncmp(s_habit_flash_id, habit->id, MAX_HABIT_ID_LEN) == 0 &&
+      (s_habit_flash_tick / 2) % 2 == 0) {
+    bg = GColorMintGreen;
+  }
+#endif
   // A done habit's title stays full-strength (unlike a done task's, which dims):
   // the "- Done" subtitle carries the signal, and a habit gets incremented past
   // goal / decremented below it on the same day, so dimming would flicker.
@@ -5568,8 +5640,16 @@ static void adjust_habit(MenuIndex index, int32_t delta) {
   if (!habit || habit->value + delta < 0) {
     return; // already at 0, trying to go lower - silent no-op
   }
+  bool was_done = habit->done;
   habit->value += delta;
   habit->done = habit->value >= habit->goal;
+#ifdef PBL_PLATFORM_EMERY
+  if (habit->done && !was_done) {
+    begin_habit_flash(habit->id);
+  }
+#else
+  (void)was_done;
+#endif
   save_habits();
   menu_layer_reload_data(s_habits_menu_layer);
   send_habit_adjust(habit, delta);
@@ -5717,6 +5797,9 @@ static void habits_window_unload(Window *window) {
   // Cancel before destroying s_habits_menu_layer - a still-running timer
   // touching a destroyed layer is what this ordering avoids.
   stop_habit_tracking_tick();
+#endif
+#ifdef PBL_PLATFORM_EMERY
+  stop_habit_flash();
 #endif
   menu_layer_destroy(s_habits_menu_layer);
 #ifndef PBL_PLATFORM_APLITE
@@ -6802,10 +6885,18 @@ static void pick_select_click(ClickRecognizerRef r, void *c) {
     if (h) {
       int32_t delta = v - h->value;
       if (delta != 0) {
+        bool h_was_done = h->done;
         h->value = v;
         h->done = h->value >= h->goal;
         save_habits();
         send_habit_adjust(h, delta); // phone replaces countOnDay[today] with the sum
+#ifdef PBL_PLATFORM_EMERY
+        if (h->done && !h_was_done) {
+          begin_habit_flash(h->id);
+        }
+#else
+        (void)h_was_done;
+#endif
         if (s_habits_menu_layer) {
           menu_layer_reload_data(s_habits_menu_layer);
         }
