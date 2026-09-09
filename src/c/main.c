@@ -3835,8 +3835,8 @@ static void stop_tracking_at(time_t end_epoch) {
 #ifndef PBL_PLATFORM_APLITE
   // A focus session only wraps a local track - stopping the timer ends it too
   // (drops the keepalive timer, releases the backlight). Silent: the stop
-  // itself is the user's cue.
-  if (s_focus_end_epoch != 0) {
+  // itself is the user's cue. Covers Flowtime too (end==0, start!=0).
+  if (s_focus_end_epoch != 0 || s_focus_start_epoch != 0) {
     focus_end(false);
   }
   s_overtime_notified = false;
