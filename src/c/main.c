@@ -2402,6 +2402,14 @@ static void build_task_subtitle(Task *task, char *out, size_t cap) {
       str_copy(dl_text, "! overdue", sizeof(dl_text));
     } else if (task->deadline_days == 0) {
       str_copy(dl_text, "! today", sizeof(dl_text));
+    } else if (task->deadline_days == 1) {
+      str_copy(dl_text, "! tomorrow", sizeof(dl_text));
+    } else if (task->deadline_days <= 6) {
+      // Within the week - the weekday name places it faster than a day count.
+      static const char *const WD[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+      time_t nowt = time(NULL);
+      struct tm *lt = localtime(&nowt);
+      snprintf(dl_text, sizeof(dl_text), "! %s", WD[(lt->tm_wday + task->deadline_days) % 7]);
     } else {
       snprintf(dl_text, sizeof(dl_text), "! %dd", task->deadline_days);
     }
@@ -2429,7 +2437,9 @@ static void build_task_subtitle(Task *task, char *out, size_t cap) {
       char estimate_text[20];
       format_duration_ms(task->time_estimate_ms, false, estimate_text, sizeof(estimate_text));
       char combined[48];
-      snprintf(combined, sizeof(combined), "%s / %s", time_text, estimate_text);
+      // "! " when the spent time has passed the estimate.
+      snprintf(combined, sizeof(combined), "%s%s / %s",
+               effective_ms > task->time_estimate_ms ? "! " : "", time_text, estimate_text);
       str_copy(time_text, combined, sizeof(time_text));
     }
     size_t n = strlen(out);
