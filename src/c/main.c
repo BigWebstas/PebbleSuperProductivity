@@ -7148,20 +7148,72 @@ static int pick_nearest_idx(int target) {
   return best;
 }
 
+#ifdef PBL_PLATFORM_EMERY
+// Up/Down slides the old value out and the new one in - a short vertical roll.
+#define PICK_ROLL_MS 130
+#define PICK_ROLL_STEP_MS 20
+static AppTimer *s_pick_roll_timer = NULL;
+static int s_pick_roll_tick = 0;
+static int s_pick_roll_dir = 0;      // +1 value went up, -1 down, 0 idle
+static char s_pick_roll_prev[16] = "";
+
+static void pick_roll_tick(void *data) {
+  s_pick_roll_timer = NULL;
+  s_pick_roll_tick++;
+  if (s_pick_roll_tick * PICK_ROLL_STEP_MS < PICK_ROLL_MS) {
+    s_pick_roll_timer = app_timer_register(PICK_ROLL_STEP_MS, pick_roll_tick, NULL);
+  } else {
+    s_pick_roll_dir = 0;
+  }
+  if (s_pick_layer) {
+    layer_mark_dirty(s_pick_layer);
+  }
+}
+
+static void stop_pick_roll(void) {
+  if (s_pick_roll_timer) {
+    app_timer_cancel(s_pick_roll_timer);
+    s_pick_roll_timer = NULL;
+  }
+  s_pick_roll_dir = 0;
+}
+#endif
+
 static void pick_layer_update_proc(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   fill_bg(ctx, b, GColorWhite);
   graphics_context_set_text_color(ctx, GColorBlack);
   int16_t cy = b.size.h / 2;
+  int16_t vy = cy - 22; // value box top
+  char val[16];
+  pick_format(val, sizeof(val));
+#ifdef PBL_PLATFORM_EMERY
+  if (s_pick_roll_dir != 0) {
+    int p = s_pick_roll_tick * PICK_ROLL_STEP_MS * 1000 / PICK_ROLL_MS;
+    if (p > 1000) {
+      p = 1000;
+    }
+    int travel = 22;
+    int new_off = s_pick_roll_dir * travel * (1000 - p) / 1000;   // comes to rest
+    int old_off = -s_pick_roll_dir * travel * p / 1000;           // leaves
+    draw_text(ctx, s_pick_roll_prev, FONT_KEY_GOTHIC_28_BOLD,
+              GRect(0, vy + old_off, b.size.w, 34), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+    draw_text(ctx, val, FONT_KEY_GOTHIC_28_BOLD,
+              GRect(0, vy + new_off, b.size.w, 34), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+    // Mask whatever the slide poked past the value band, then redraw the chrome.
+    fill_bg(ctx, GRect(0, 0, b.size.w, vy), GColorWhite);
+    fill_bg(ctx, GRect(0, cy + 12, b.size.w, b.size.h - (cy + 12)), GColorWhite);
+  } else
+#endif
+  {
+    draw_text(ctx, val, FONT_KEY_GOTHIC_28_BOLD,
+              GRect(0, vy, b.size.w, 34), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  }
   draw_text(ctx, s_pick_kind == PICK_ESTIMATE ? "Estimate"
                  : s_pick_kind == PICK_DEADLINE ? "Deadline"
                  : s_pick_kind == PICK_TIME ? "Schedule at" : "Count",
             CHROME_FONT_KEY,
             GRect(0, cy - 44, b.size.w, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
-  char val[16];
-  pick_format(val, sizeof(val));
-  draw_text(ctx, val, FONT_KEY_GOTHIC_28_BOLD,
-            GRect(0, cy - 22, b.size.w, 34), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
   draw_text(ctx, "Up/Down pick\nSelect to set", CHROME_FONT_KEY,
             GRect(0, cy + 16, b.size.w, 40), GTextOverflowModeWordWrap, GTextAlignmentCenter);
 }
@@ -7175,7 +7227,17 @@ static void pick_step(int delta) {
     n = pick_ladder_len() - 1;
   }
   if (n != s_pick_idx) {
+#ifdef PBL_PLATFORM_EMERY
+    pick_format(s_pick_roll_prev, sizeof(s_pick_roll_prev)); // the value we're leaving
     s_pick_idx = n;
+    s_pick_roll_dir = delta > 0 ? 1 : -1;
+    s_pick_roll_tick = 0;
+    if (!s_pick_roll_timer) {
+      s_pick_roll_timer = app_timer_register(PICK_ROLL_STEP_MS, pick_roll_tick, NULL);
+    }
+#else
+    s_pick_idx = n;
+#endif
     layer_mark_dirty(s_pick_layer);
     vibes_short_pulse();
   }
@@ -7263,9 +7325,15 @@ static void pick_window_load(Window *window) {
   layer_set_update_proc(s_pick_layer, pick_layer_update_proc);
   layer_add_child(window_layer, s_pick_layer);
   window_set_click_config_provider(window, pick_click_config_provider);
+#ifdef PBL_PLATFORM_EMERY
+  stop_pick_roll(); // no stale roll from a previous open
+#endif
 }
 
 static void pick_window_unload(Window *window) {
+#ifdef PBL_PLATFORM_EMERY
+  stop_pick_roll();
+#endif
   layer_destroy(s_pick_layer);
   s_pick_layer = NULL;
   status_bar_layer_destroy(s_pick_status_bar);
