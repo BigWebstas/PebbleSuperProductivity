@@ -595,10 +595,12 @@ static int s_pending_reschedule_at_hour = 0;
 static AppTimer *s_pending_done_timer = NULL;
 static char s_pending_done_task_id[MAX_ID_LEN] = "";
 static int s_pending_done_tick = 0;
-// The Resync row flashes green for SYNC_CHECK_MS on a SYNCING -> OK edge; the
-// Add Task row flashes "Added" for the same span once a dictated task is sent.
-// Both driven by the scroll timer's tick, like the bar. emery only.
-#define SYNC_CHECK_MS 700
+// The Resync row holds green for SYNC_GREEN_MS on a SYNCING -> OK edge - long
+// enough to actually register "it synced". The Add Task row flashes "Added" for
+// the briefer ADDTASK_FLASH_MS once a dictated task is sent. Both driven by the
+// scroll timer's tick, like the bar. emery only.
+#define SYNC_GREEN_MS 3000
+#define ADDTASK_FLASH_MS 700
 static bool s_sync_check_active = false;
 static int s_sync_check_tick = 0;
 static bool s_addtask_flash_active = false;
@@ -2283,13 +2285,13 @@ static void scroll_timer_callback(void *data) {
   }
   if (s_sync_check_active) {
     s_sync_check_tick++;
-    if (s_sync_check_tick * SCROLL_INTERVAL_MS >= SYNC_CHECK_MS) {
+    if (s_sync_check_tick * SCROLL_INTERVAL_MS >= SYNC_GREEN_MS) {
       s_sync_check_active = false;
     }
   }
   if (s_addtask_flash_active) {
     s_addtask_flash_tick++;
-    if (s_addtask_flash_tick * SCROLL_INTERVAL_MS >= SYNC_CHECK_MS) {
+    if (s_addtask_flash_tick * SCROLL_INTERVAL_MS >= ADDTASK_FLASH_MS) {
       s_addtask_flash_active = false;
     }
   }
@@ -2871,7 +2873,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
     // Background stays red regardless of selection so this row reads as a
     // standing call-to-action, not a task; the text still inverts on select.
-    // On emery it flashes green for SYNC_CHECK_MS right after a clean sync.
+    // On emery it holds green for SYNC_GREEN_MS right after a clean sync.
     GColor resync_bg = GColorRed;
 #ifdef PBL_PLATFORM_EMERY
     if (s_sync_check_active) {
