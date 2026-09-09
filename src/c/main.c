@@ -593,6 +593,11 @@ static int s_pending_done_tick = 0;
 // uses it to move a scheduled backlog task into the regular list and re-push
 // that view. Empty for a today-list reschedule.
 static char s_pending_reschedule_project_id[MAX_PROJECT_ID_LEN] = "";
+// The Resync row flashes green for SYNC_CHECK_MS when a sync finishes
+// (SYNCING -> OK). Driven by the scroll timer's tick, like the pending bars.
+#define SYNC_CHECK_MS 700
+static bool s_sync_check_active = false;
+static int s_sync_check_tick = 0;
 #endif
 
 #if defined(PBL_TOUCH)
@@ -964,6 +969,9 @@ static TextLayer *s_live_elapsed_layer = NULL;
 static TextLayer *s_live_hint_layer = NULL;
 static StatusBarLayer *s_live_status_bar = NULL;
 static AppTimer *s_live_tick_timer = NULL;
+// A depleting ring drawn behind the M:SS during a focus session (only). Its own
+// canvas layer, alive only while the live window is - see live_arc_update_proc.
+static Layer *s_live_arc_layer = NULL;
 
 // A remote presence session shows in the pinned "TRACKING" section (the same
 // slot local tracking uses) whenever nothing is tracked locally - keeps
@@ -2250,6 +2258,12 @@ static void scroll_timer_callback(void *data) {
   if (s_pending_done_task_id[0] != '\0') {
     s_pending_done_tick++;
   }
+  if (s_sync_check_active) {
+    s_sync_check_tick++;
+    if (s_sync_check_tick * SCROLL_INTERVAL_MS >= SYNC_CHECK_MS) {
+      s_sync_check_active = false;
+    }
+  }
 #endif
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
 #if PROJECTS_BROWSER
@@ -2354,7 +2368,8 @@ static void refresh_scroll_state(bool reset_offset) {
   bool needs_scroll = selected && title_natural_width(selected->title) > available;
 #ifndef PBL_PLATFORM_APLITE
   // Keep the repaint timer alive while a transient row animation is running.
-  if (s_pending_reschedule_kind != RESCHEDULE_NONE || s_pending_done_task_id[0] != '\0') {
+  if (s_pending_reschedule_kind != RESCHEDULE_NONE || s_pending_done_task_id[0] != '\0' ||
+      s_sync_check_active) {
     needs_scroll = true;
   }
   if (!needs_scroll && selected && !selected->done) {
@@ -2806,7 +2821,14 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
     // Background stays red regardless of selection so this row reads as a
     // standing call-to-action, not a task; the text still inverts on select.
-    fill_bg(ctx, bounds, GColorRed);
+    // Right after a clean sync it flashes green for SYNC_CHECK_MS.
+    GColor resync_bg = GColorRed;
+#ifndef PBL_PLATFORM_APLITE
+    if (s_sync_check_active) {
+      resync_bg = PBL_IF_COLOR_ELSE(GColorIslamicGreen, GColorRed);
+    }
+#endif
+    fill_bg(ctx, bounds, resync_bg);
     graphics_context_set_text_color(ctx, is_selected ? GColorWhite : GColorBlack);
     GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
                              bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
@@ -4459,6 +4481,17 @@ static void set_status_code(int32_t new_status_code) {
 #else
     light_enable(false);
 #endif
+  }
+#endif
+#ifndef PBL_PLATFORM_APLITE
+  // A sync just finished cleanly - fire the Resync-row check-ping.
+  if (s_status_code == STATUS_SYNCING && new_status_code == STATUS_OK) {
+    s_sync_check_active = true;
+    s_sync_check_tick = 0;
+    if (s_menu_layer) {
+      menu_layer_reload_data(s_menu_layer);
+      refresh_scroll_state(false);
+    }
   }
 #endif
   s_status_code = new_status_code;
@@ -7839,6 +7872,9 @@ static void live_window_refresh(void) {
   if (!s_live_window || window_stack_get_top_window() != s_live_window) {
     return;
   }
+  if (s_live_arc_layer) {
+    layer_mark_dirty(s_live_arc_layer); // depletes with the focus countdown
+  }
   static char elapsed_buf[32];
 
   if (s_tracking_task_id[0] != '\0') {
@@ -7983,6 +8019,44 @@ static void live_window_click_config_provider(void *context) {
   window_long_click_subscribe(BUTTON_ID_DOWN, 0, focus_long_click_handler, NULL);
 }
 
+// Frames the live window with a ring that depletes clockwise from 12 o'clock as
+// the focus session's time runs out. Draws nothing outside a focus session, so
+// plain tracking / remote presence keep the clean text-only look.
+static void live_arc_update_proc(Layer *layer, GContext *ctx) {
+  if (!focus_active()) {
+    return;
+  }
+  int total_min = s_focus_on_break ? s_pomodoro_break_min
+                  : (s_use_pomodoro_cfg ? s_pomodoro_work_min : s_focus_len_min);
+  int total_s = total_min * 60;
+  if (total_s <= 0) {
+    return;
+  }
+  int left_s = (int)(s_focus_end_epoch - time(NULL));
+  if (left_s < 0) {
+    left_s = 0;
+  }
+  if (left_s > total_s) {
+    left_s = total_s;
+  }
+  GRect b = layer_get_bounds(layer);
+  int r = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 6;
+  GPoint c = grect_center_point(&b);
+  GRect ring = GRect(c.x - r, c.y - r, 2 * r, 2 * r);
+  // via degrees to keep the arithmetic in int32 (no 64-bit divmod helper).
+  int32_t sweep = DEG_TO_TRIGANGLE(left_s * 360 / total_s);
+#ifdef PBL_COLOR
+  graphics_context_set_stroke_color(ctx, GColorLightGray);
+  graphics_context_set_stroke_width(ctx, 2);
+  graphics_draw_arc(ctx, ring, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
+#endif
+  graphics_context_set_stroke_color(ctx,
+      PBL_IF_COLOR_ELSE(s_focus_on_break ? GColorVividCerulean : GColorJaegerGreen, GColorBlack));
+  graphics_context_set_stroke_width(ctx, 4);
+  graphics_draw_arc(ctx, ring, GOvalScaleModeFitCircle, 0, sweep);
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
 static void live_window_load(Window *window) {
   Layer *window_layer;
   GRect content = window_chrome(window, &s_live_status_bar, &window_layer);
@@ -7991,6 +8065,11 @@ static void live_window_load(Window *window) {
   int16_t w = content.size.w - 12;
   int16_t y = content.origin.y + 6;
   int16_t bottom = content.origin.y + content.size.h;
+
+  // The focus ring sits behind everything (added first).
+  s_live_arc_layer = layer_create(content);
+  layer_set_update_proc(s_live_arc_layer, live_arc_update_proc);
+  layer_add_child(window_layer, s_live_arc_layer);
 
   // Task name first (what the user asked to see), wrapping to two lines.
   s_live_task_layer = make_text_layer(window_layer, GRect(x, y, w, 50),
@@ -8016,6 +8095,8 @@ static void live_window_load(Window *window) {
 
 static void live_window_unload(Window *window) {
   stop_live_tick();
+  layer_destroy(s_live_arc_layer);
+  s_live_arc_layer = NULL;
   text_layer_destroy(s_live_state_layer);
   text_layer_destroy(s_live_task_layer);
   text_layer_destroy(s_live_elapsed_layer);
