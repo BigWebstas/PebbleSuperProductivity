@@ -642,6 +642,9 @@ static bool s_overtime_notified = false;
 // once OVERTIME_REPEAT_INTERVAL_S passes and the task is still over.
 static time_t s_overtime_last_notify_epoch = 0;
 static char s_overtime_banner_text[MAX_TITLE_LEN + 24] = "";
+// The banner's resting on-screen frame (top of the content area), stamped in
+// window_load - banner_slide animates the layer in/out from just above it.
+static GRect s_banner_frame;
 #define OVERTIME_BANNER_MS 6000
 #ifdef PBL_PLATFORM_EMERY
 #define OVERTIME_BANNER_HEIGHT 60
@@ -3319,9 +3322,60 @@ static void start_reflect_dictation(void) {
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
+#ifdef PBL_PLATFORM_EMERY
+// Slide-out finished (or was interrupted) - actually hide the strip and park its
+// frame back at rest so the next show_top_banner starts clean.
+static void banner_anim_stopped(Animation *anim, bool finished, void *ctx) {
+  if (s_overtime_banner_layer) {
+    Layer *bl = text_layer_get_layer(s_overtime_banner_layer);
+    layer_set_hidden(bl, true);
+    layer_set_frame(bl, s_banner_frame);
+  }
+}
+
+// Animates the top banner strip down into view (in) or back up out of view.
+// The strip briefly sweeps past the status bar - same as a system notification.
+// emery only: the 144px platforms have no code-space headroom for it and fall
+// back to an instant show / hide.
+static void banner_slide(bool in) {
+  if (!s_overtime_banner_layer) {
+    return;
+  }
+  Layer *bl = text_layer_get_layer(s_overtime_banner_layer);
+  animation_unschedule_all(); // a re-fire mid-slide must not leave a stale handler
+  GRect rest = s_banner_frame;
+  GRect off = rest;
+  off.origin.y -= rest.size.h; // just clear of the content top
+  GRect from = in ? off : rest;
+  GRect to = in ? rest : off;
+  layer_set_frame(bl, from);
+  PropertyAnimation *pa = property_animation_create_layer_frame(bl, &from, &to);
+  if (!pa) {
+    layer_set_frame(bl, to);
+    if (!in) {
+      banner_anim_stopped(NULL, true, NULL);
+    }
+    return;
+  }
+  Animation *a = property_animation_get_animation(pa);
+  animation_set_duration(a, 200);
+  animation_set_curve(a, in ? AnimationCurveEaseOut : AnimationCurveEaseIn);
+  if (!in) {
+    animation_set_handlers(a, (AnimationHandlers) { .stopped = banner_anim_stopped }, NULL);
+  }
+  animation_schedule(a);
+}
+#else
+static void banner_slide(bool in) {
+  if (s_overtime_banner_layer) {
+    layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), !in);
+  }
+}
+#endif
+
 static void overtime_banner_timeout_callback(void *data) {
   s_overtime_banner_timer = NULL;
-  hide_overtime_banner();
+  banner_slide(false);
 }
 
 // Hides the over-estimate banner and cancels its auto-dismiss timer - safe to
@@ -3332,7 +3386,12 @@ static void hide_overtime_banner(void) {
     s_overtime_banner_timer = NULL;
   }
   if (s_overtime_banner_layer) {
-    layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), true);
+    Layer *bl = text_layer_get_layer(s_overtime_banner_layer);
+#ifdef PBL_PLATFORM_EMERY
+    animation_unschedule_all(); // drop any in-flight slide before we hide / destroy
+    layer_set_frame(bl, s_banner_frame);
+#endif
+    layer_set_hidden(bl, true);
   }
 }
 
@@ -3364,7 +3423,7 @@ static void show_top_banner(const char *text) {
   }
   text_layer_set_text(s_overtime_banner_layer, text);
   layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), false);
-  layer_mark_dirty(text_layer_get_layer(s_overtime_banner_layer));
+  banner_slide(true); // slides down from the top, then rests
   vibes_double_pulse();
   if (s_audible_notify) {
     banner_ping();
@@ -8225,6 +8284,7 @@ static void window_load(Window *window) {
   // crosses its estimate.
   GRect overtime_bounds = GRect(content_bounds.origin.x, content_bounds.origin.y,
                                  content_bounds.size.w, OVERTIME_BANNER_HEIGHT);
+  s_banner_frame = overtime_bounds; // resting frame for banner_slide
   s_overtime_banner_layer = make_text_layer(window_layer, overtime_bounds,
                                             TITLE_FONT_KEY, GTextAlignmentCenter);
   text_layer_set_background_color(s_overtime_banner_layer, GColorRed);
