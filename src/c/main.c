@@ -6041,16 +6041,18 @@ static void toggle_habit_countdown_pause(void) {
 }
 
 // Stops whatever StopWatch/countdown habit is being tracked (a no-op if none) -
-// mirrors stop_tracking_and_report, including the optimistic local bump. For a
+// mirrors stop_tracking_at, including the optimistic local bump. For a
 // RepeatedCountdownReminder this only means "cancelled before completion" (zero
 // is handled by complete_habit_countdown), so it's a silent no-upload cancel.
-static void stop_habit_tracking_and_report(void) {
+// end_epoch caps the logged duration (the midnight auto-stop passes 00:00 so
+// an overnight StopWatch run isn't all dumped onto the new day).
+static void stop_habit_tracking_at(time_t end_epoch) {
   if (s_tracking_habit_id[0] == '\0') {
     return;
   }
   Habit *tracked_habit = find_habit_by_id(s_tracking_habit_id);
   if (!(tracked_habit && tracked_habit->is_countdown)) {
-    time_t elapsed_s = time(NULL) - s_tracking_habit_start_epoch;
+    time_t elapsed_s = end_epoch - s_tracking_habit_start_epoch;
     if (elapsed_s > 0) {
       int32_t elapsed_ms = (int32_t)elapsed_s * 1000;
       send_habit_track_stop(s_tracking_habit_id, elapsed_ms);
@@ -6067,6 +6069,10 @@ static void stop_habit_tracking_and_report(void) {
   s_habit_countdown_frozen_elapsed_ms = 0;
   save_habit_tracking();
   stop_habit_tracking_tick();
+}
+
+static void stop_habit_tracking_and_report(void) {
+  stop_habit_tracking_at(time(NULL));
 }
 #endif
 
@@ -9707,6 +9713,16 @@ static void maybe_stop_at_midnight(struct tm *now_tm) {
     stop_tracking_at(today_start);
     menu_layer_reload_data(s_menu_layer);
     refresh_scroll_state(true);
+    return;
+  }
+  // A StopWatch/countdown habit timer left running overnight (its own slot -
+  // can run alongside a task timer). Logs only up to 00:00, same as the task.
+  if (s_tracking_habit_id[0] != '\0' && s_tracking_habit_start_epoch != 0 &&
+      s_tracking_habit_start_epoch < today_start) {
+    stop_habit_tracking_at(today_start);
+    if (s_habits_menu_layer) {
+      menu_layer_reload_data(s_habits_menu_layer);
+    }
     return;
   }
   if (s_presence_state == 1 && s_presence_can_stop && !s_presence_stopping &&

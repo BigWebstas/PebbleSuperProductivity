@@ -356,7 +356,7 @@ idleReminderOptions + '\n' +
 '    <input id="stopAtMidnight" type="checkbox"' + (stopAtMidnight ? ' checked' : '') + '>\n' +
 '    <label for="stopAtMidnight">Stop tracking at midnight</label>\n' +
 '  </div>\n' +
-'  <p class="hint">Stop a timer running past local midnight; a watch timer logs only up to 00:00.</p>\n' +
+'  <p class="hint">Stop a task or habit timer running past local midnight; a watch timer logs only up to 00:00.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="liveTracking" type="checkbox"' + (liveTracking ? ' checked' : '') + '>\n' +
