@@ -2520,6 +2520,14 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
     fg = is_selected ? GColorLightGray : GColorDarkGray;
   }
   fill_bg(ctx, bounds, bg);
+#ifdef PBL_COLOR
+  // Deadline urgency: a stripe down the left edge - red once overdue, amber for
+  // due today. Not for a done task (the deadline no longer matters).
+  if (!task->done && task->deadline_days != DEADLINE_NONE && task->deadline_days <= 0) {
+    graphics_context_set_fill_color(ctx, task->deadline_days < 0 ? GColorRed : GColorOrange);
+    graphics_fill_rect(ctx, GRect(0, 0, 3, bounds.size.h), 0, GCornerNone);
+  }
+#endif
   graphics_context_set_text_color(ctx, fg);
 
   GFont title_font = fonts_get_system_font(TITLE_FONT_KEY);
@@ -5360,6 +5368,15 @@ static void stop_habit_tracking_tick(void) {
   }
 }
 
+// A "di-di-daah" for a genuine win - streak milestone, day's last habit, a focus
+// session run to completion. Distinct from the plain pulses that just mean
+// "registered" or "heads up".
+static void vibe_celebrate(void) {
+  static const uint32_t segs[] = { 70, 90, 70, 90, 260 };
+  VibePattern pat = { .durations = segs, .num_segments = ARRAY_LENGTH(segs) };
+  vibes_enqueue_custom_pattern(pat);
+}
+
 #ifdef PBL_PLATFORM_EMERY
 static void habit_flash_timer_cb(void *data) {
   s_habit_flash_timer = NULL;
@@ -5386,7 +5403,7 @@ static void begin_habit_flash(const char *habit_id, bool milestone) {
   s_habit_flash_gold = milestone;
   s_habit_flash_timer = app_timer_register(HABIT_FLASH_STEP_MS, habit_flash_timer_cb, NULL);
   if (milestone) {
-    vibes_double_pulse();
+    vibe_celebrate();
   }
 }
 
@@ -5413,6 +5430,7 @@ static void maybe_flash_last_habit(void) {
   }
   s_lasthabit_flash_active = true;
   s_lasthabit_flash_tick = 0;
+  vibe_celebrate();
   refresh_scroll_state(false);
 }
 #endif
@@ -8138,7 +8156,7 @@ static void focus_end(bool ran_out) {
     s_focus_on_break = true;
     s_focus_end_epoch = time(NULL) + (time_t)s_pomodoro_break_min * 60;
     save_focus();
-    vibes_long_pulse();
+    vibe_celebrate();
     snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text),
              "Break: %d min", s_pomodoro_break_min);
     show_top_banner(s_overtime_banner_text);
@@ -8150,7 +8168,7 @@ static void focus_end(bool ran_out) {
   s_focus_end_epoch = 0;
   save_focus();
   if (ran_out) {
-    vibes_long_pulse();
+    vibe_celebrate();
     show_top_banner("Focus done");
     focus_bump_completed();
   } else {
