@@ -7683,10 +7683,11 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
         }
         menu_layer_reload_data(s_menu_layer);
 #ifndef PBL_PLATFORM_APLITE
+        // Start -> full-screen tracking page. Stop -> nothing extra: the menu
+        // was already popped, which lands back on the task list (window_stack_
+        // pop_all here exited the whole app on hardware).
         if (!was) {
-          push_live_window();          // start -> full-screen tracking page
-        } else {
-          window_stack_pop_all(true);  // stop -> back to the main task list
+          push_live_window();
         }
 #endif
       }
