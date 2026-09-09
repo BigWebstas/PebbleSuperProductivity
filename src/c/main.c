@@ -235,7 +235,10 @@ enum {
 #ifdef PBL_PLATFORM_EMERY
 #define MAX_TASKS 50
 #else
-#define MAX_TASKS 30
+// 28, not 30, to keep basalt/chalk/diorite off the 64 KB virtual-size ceiling
+// (each slot is ~336 B of static .bss there). Tasks past this on the today
+// list just don't show on the watch - they're still on the phone.
+#define MAX_TASKS 28
 #endif
 
 // On emery the list arrays move out of .bss onto the heap (alloc_heap_lists(),
@@ -1039,8 +1042,9 @@ static AppTimer *s_backlight_timer = NULL;
 // One per project run in the grouped today view. Bounded well below MAX_TASKS
 // (which would be one task per project - never happens): a real today list has
 // a handful of projects. recompute_groups() stretches the last slot over any
-// overflow rather than dropping tasks, so a pathological list still renders.
-#define MAX_GROUPS 20
+// overflow rather than dropping tasks, so a list with more distinct projects
+// than this still renders (the tail share one header).
+#define MAX_GROUPS 14
 #if HEAP_BACKED_LISTS
 static TaskGroup *s_groups; // calloc'd in alloc_heap_lists()
 #else
@@ -6796,7 +6800,9 @@ static void push_notes_window(void) {
 // pushes a plain updateTask. On close, a re-fetch refreshes the notes text.
 #define MAX_CHECKLIST 32
 #define CHECKLIST_LABELS_CAP 1024
-typedef struct { int label_off; int label_len; bool checked; } ChecklistItem;
+// offsets/lengths into the <=1024-byte s_checklist_labels buffer - uint16 is
+// ample and halves the array's .bss.
+typedef struct { uint16_t label_off; uint16_t label_len; bool checked; } ChecklistItem;
 static ChecklistItem s_checklist[MAX_CHECKLIST];
 static int s_checklist_count = 0;
 // malloc'd only while the checklist window is open - basalt heap has no room to
@@ -8078,7 +8084,8 @@ static TextLayer *s_schedule_empty_layer;
 static StatusBarLayer *s_schedule_status_bar;
 // s_tasks indices with a due_min, sorted by due_min ascending. Rebuilt on
 // open and whenever a sync replaces the list (schedule_refresh_if_open).
-static int s_schedule_order[MAX_TASKS];
+// uint8_t: an index into s_tasks, and MAX_TASKS <= 50 < 256.
+static uint8_t s_schedule_order[MAX_TASKS];
 static int s_schedule_count = 0;
 
 static void schedule_rebuild(void) {
