@@ -605,6 +605,12 @@ static bool s_sync_check_active = false;
 static int s_sync_check_tick = 0;
 static bool s_addtask_flash_active = false;
 static int s_addtask_flash_tick = 0;
+// The Habits nav row pulses gold for LASTHABIT_FLASH_MS after a bump completes
+// the day's last unfinished habit - long, since the user is usually still on
+// the habits sub-page and only sees it after backing out.
+#define LASTHABIT_FLASH_MS 4000
+static bool s_lasthabit_flash_active = false;
+static int s_lasthabit_flash_tick = 0;
 // A habit row pulses green for HABIT_FLASH_MS the moment a bump takes it to its
 // goal, or gold for the longer HABIT_MILESTONE_MS when the streak just crossed
 // 7 / 30 / 100. Its own short repeating timer (the habits list has no ticker).
@@ -2304,6 +2310,12 @@ static void scroll_timer_callback(void *data) {
       s_addtask_flash_active = false;
     }
   }
+  if (s_lasthabit_flash_active) {
+    s_lasthabit_flash_tick++;
+    if (s_lasthabit_flash_tick * SCROLL_INTERVAL_MS >= LASTHABIT_FLASH_MS) {
+      s_lasthabit_flash_active = false;
+    }
+  }
 #endif
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
 #if PROJECTS_BROWSER
@@ -2410,7 +2422,8 @@ static void refresh_scroll_state(bool reset_offset) {
   // Keep the repaint timer alive while a transient row animation is running.
   if (s_pending_reschedule_kind != RESCHEDULE_NONE
 #ifdef PBL_PLATFORM_EMERY
-      || s_pending_done_task_id[0] != '\0' || s_sync_check_active || s_addtask_flash_active
+      || s_pending_done_task_id[0] != '\0' || s_sync_check_active || s_addtask_flash_active ||
+      s_lasthabit_flash_active
 #endif
      ) {
     needs_scroll = true;
@@ -2694,7 +2707,19 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       }
       bool all_done = s_habit_count > 0 && habits_left == 0;
       GColor fg = is_selected ? GColorWhite : GColorBlack;
-      fill_bg(ctx, bounds, GColorVividCerulean);
+      GColor habits_bg = GColorVividCerulean;
+#ifdef PBL_PLATFORM_EMERY
+      // Solid gold when a bump just finished the last habit of the day; a couple
+      // of cerulean blinks at the tail as it winds down.
+      if (s_lasthabit_flash_active) {
+        int rem_ms = LASTHABIT_FLASH_MS - s_lasthabit_flash_tick * SCROLL_INTERVAL_MS;
+        if (rem_ms > 1200 || (s_lasthabit_flash_tick / 3) % 2 == 0) {
+          habits_bg = GColorYellow;
+          fg = GColorBlack;
+        }
+      }
+#endif
+      fill_bg(ctx, bounds, habits_bg);
       graphics_context_set_text_color(ctx, fg);
       draw_text(ctx, "Habits", HEADING_FONT_KEY,
                 GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, HEADING_TITLE_H, CHROME_STRIP_H),
@@ -5373,6 +5398,23 @@ static void stop_habit_flash(void) {
   s_habit_flash_id[0] = '\0';
   s_habit_milestone_id[0] = '\0';
 }
+
+// After a bump completes a habit: if that was the day's last unfinished one,
+// arm the Habits nav-row gold flash on the main list (seen once the user backs
+// out). Kicks the main scroll timer so the flash actually ticks down.
+static void maybe_flash_last_habit(void) {
+  if (s_habit_count == 0) {
+    return;
+  }
+  for (int i = 0; i < s_habit_count; i++) {
+    if (!s_habits[i].done) {
+      return;
+    }
+  }
+  s_lasthabit_flash_active = true;
+  s_lasthabit_flash_tick = 0;
+  refresh_scroll_state(false);
+}
 #endif
 
 // Total elapsed ms for the current countdown session, paused or running. Only
@@ -5688,6 +5730,7 @@ static void adjust_habit(MenuIndex index, int32_t delta) {
 #ifdef PBL_PLATFORM_EMERY
   if (habit->done && !was_done) {
     begin_habit_flash(habit->id, false);
+    maybe_flash_last_habit();
   }
 #else
   (void)was_done;
@@ -6628,6 +6671,36 @@ static bool s_checklist_dirty = false;
 static Window *s_checklist_window = NULL;
 static MenuLayer *s_checklist_menu = NULL;
 static StatusBarLayer *s_checklist_status_bar = NULL;
+#ifdef PBL_PLATFORM_EMERY
+// The just-ticked row's checkmark strokes itself on over CHECKLIST_CHECK_MS.
+#define CHECKLIST_CHECK_MS 240
+#define CHECKLIST_CHECK_STEP_MS 40
+static AppTimer *s_checklist_anim_timer = NULL;
+static int s_checklist_anim_row = -1;
+static int s_checklist_anim_tick = 0;
+
+static void checklist_anim_cb(void *data) {
+  s_checklist_anim_timer = NULL;
+  s_checklist_anim_tick++;
+  if (s_checklist_anim_tick * CHECKLIST_CHECK_STEP_MS < CHECKLIST_CHECK_MS) {
+    s_checklist_anim_timer = app_timer_register(CHECKLIST_CHECK_STEP_MS, checklist_anim_cb, NULL);
+  } else {
+    s_checklist_anim_row = -1;
+  }
+  if (s_checklist_menu) {
+    layer_mark_dirty(menu_layer_get_layer(s_checklist_menu));
+  }
+}
+
+static void begin_checklist_anim(int row) {
+  if (s_checklist_anim_timer) {
+    app_timer_cancel(s_checklist_anim_timer);
+  }
+  s_checklist_anim_row = row;
+  s_checklist_anim_tick = 0;
+  s_checklist_anim_timer = app_timer_register(CHECKLIST_CHECK_STEP_MS, checklist_anim_cb, NULL);
+}
+#endif
 
 // Rebuild s_checklist from s_notes_full_text. A checklist line is optional
 // indent, "-" or "*", " [", one of " xX", "]", then the label. Labels are
@@ -6696,8 +6769,34 @@ static void checklist_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx,
   graphics_context_set_stroke_color(ctx, fg);
   graphics_draw_rect(ctx, box);
   if (it->checked) {
+#ifdef PBL_PLATFORM_EMERY
+    // A checkmark from two lines; strokes itself on for the row just ticked.
+    GPoint a = GPoint(box.origin.x + 3, box.origin.y + 8);
+    GPoint elbow = GPoint(box.origin.x + 6, box.origin.y + 12);
+    GPoint e = GPoint(box.origin.x + 13, box.origin.y + 3);
+    int p = 1000; // per-mille progress; full unless this row is animating
+    if (s_checklist_anim_row == (int)idx->row) {
+      p = s_checklist_anim_tick * CHECKLIST_CHECK_STEP_MS * 1000 / CHECKLIST_CHECK_MS;
+      if (p > 1000) {
+        p = 1000;
+      }
+    }
+    graphics_context_set_stroke_width(ctx, 2);
+    int leg1 = 400; // short leg first
+    if (p > 0 && p < leg1) {
+      graphics_draw_line(ctx, a,
+          GPoint(a.x + (elbow.x - a.x) * p / leg1, a.y + (elbow.y - a.y) * p / leg1));
+    } else if (p >= leg1) {
+      graphics_draw_line(ctx, a, elbow);
+      int q = p - leg1, d = 1000 - leg1;
+      graphics_draw_line(ctx, elbow,
+          GPoint(elbow.x + (e.x - elbow.x) * q / d, elbow.y + (e.y - elbow.y) * q / d));
+    }
+    graphics_context_set_stroke_width(ctx, 1);
+#else
     graphics_context_set_fill_color(ctx, fg);
     graphics_fill_rect(ctx, GRect(box.origin.x + 4, box.origin.y + 4, 8, 8), 0, GCornerNone);
+#endif
   }
   graphics_context_set_text_color(ctx, fg);
   GRect tb = GRect(box.origin.x + 26, b.origin.y, b.size.w - (box.origin.x + 26) - 4, b.size.h);
@@ -6713,6 +6812,13 @@ static void checklist_select(MenuLayer *ml, MenuIndex *idx, void *c) {
   ChecklistItem *it = &s_checklist[idx->row];
   it->checked = !it->checked;
   s_checklist_dirty = true;
+#ifdef PBL_PLATFORM_EMERY
+  if (it->checked) {
+    begin_checklist_anim(idx->row);
+  } else if (s_checklist_anim_row == (int)idx->row) {
+    s_checklist_anim_row = -1; // un-ticked mid-stroke
+  }
+#endif
   menu_layer_reload_data(s_checklist_menu);
   // s_notes_overlay_subject_id is the task id - try_open_checklist bars the
   // project-notes case.
@@ -6736,6 +6842,13 @@ static void checklist_window_load(Window *window) {
 }
 
 static void checklist_window_unload(Window *window) {
+#ifdef PBL_PLATFORM_EMERY
+  if (s_checklist_anim_timer) {
+    app_timer_cancel(s_checklist_anim_timer);
+    s_checklist_anim_timer = NULL;
+  }
+  s_checklist_anim_row = -1;
+#endif
   menu_layer_destroy(s_checklist_menu);
   s_checklist_menu = NULL;
   status_bar_layer_destroy(s_checklist_status_bar);
@@ -6935,6 +7048,7 @@ static void pick_select_click(ClickRecognizerRef r, void *c) {
 #ifdef PBL_PLATFORM_EMERY
         if (h->done && !h_was_done) {
           begin_habit_flash(h->id, false);
+          maybe_flash_last_habit();
         }
 #else
         (void)h_was_done;
