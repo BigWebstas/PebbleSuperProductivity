@@ -3192,6 +3192,9 @@ function handleFinishDay() {
 var presenceClient = null;
 var presenceClientToken = null;
 var presenceLastSessionId = null;
+// task.timeSpent captured ONCE at this session's first push, not re-read live
+// on every later push - see pushPresenceToWatch's own comment on why.
+var presenceSessionSpentBaselineMs = null;
 var presenceLastReceivedAt = 0;
 var presenceStaleTimer = null;
 // Phase 2: what this watch is currently broadcasting as its own tracking, or
@@ -3270,6 +3273,7 @@ function catchUpTrackedTask(view) {
 
 function sendPresenceClear() {
   presenceLastSessionId = null;
+  presenceSessionSpentBaselineMs = null;
   presenceLastView = null;
   presenceCatchUp = null;
   stopPresenceStaleTimer();
@@ -3325,9 +3329,22 @@ function pushPresenceToWatch(view, stale, isNewSession) {
   };
   // The tracked task's synced time / estimate, so the detail window can show
   // "spent / estimate" like a task row - only when we resolved the task and it
-  // has an estimate.
+  // has an estimate. PRESENCE_SPENT_MS is the task's total AS OF THIS SESSION'S
+  // START, frozen in presenceSessionSpentBaselineMs on the session's first
+  // push - main.c then adds its own live elapsed-since-start on top
+  // (live_window_refresh/live_set_elapsed) to keep ticking. Re-reading
+  // t.timeSpent live on every push (the bug this replaced) double-counted:
+  // the desktop periodically flushes this session's own progress into
+  // t.timeSpent mid-session, so a later push's "live" total already contained
+  // part of the session, and adding the FULL elapsed-since-start again on top
+  // of that grown number inflated the full-screen tracking view (e.g. showing
+  // 45m while the pinned row's session-only display and the desktop both
+  // agreed on 22m).
   if (t && t.timeEstimate) {
-    dict.PRESENCE_SPENT_MS = Math.min(t.timeSpent || 0, 2000000000);
+    if (presenceSessionSpentBaselineMs === null) {
+      presenceSessionSpentBaselineMs = t.timeSpent || 0;
+    }
+    dict.PRESENCE_SPENT_MS = Math.min(presenceSessionSpentBaselineMs, 2000000000);
     dict.PRESENCE_ESTIMATE_MS = Math.min(t.timeEstimate, 2000000000);
   }
   // Tells the watch to re-arm its over-estimate notification for a freshly
@@ -3374,6 +3391,9 @@ function onPresenceState(view) {
   // tracking session - the watch re-arms its over-estimate latch on this.
   var isNewSession = !!(newSessionId && newSessionId !== presenceLastSessionId);
   presenceLastSessionId = newSessionId;
+  if (isNewSession) {
+    presenceSessionSpentBaselineMs = null; // re-captured on this session's next push
+  }
 
   // While THIS watch is broadcasting its own tracking, a remote device also
   // claiming "tracking" is a takeover contest (only one active session
