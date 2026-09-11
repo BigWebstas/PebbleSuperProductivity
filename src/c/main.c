@@ -17,6 +17,8 @@
 #define KEY_TASK_DUE_MIN MESSAGE_KEY_TASK_DUE_MIN
 #define KEY_TASK_REMIND_MIN MESSAGE_KEY_TASK_REMIND_MIN
 #define KEY_TASK_ISSUE_KEY MESSAGE_KEY_TASK_ISSUE_KEY
+#define KEY_TASK_ISSUE_SRC MESSAGE_KEY_TASK_ISSUE_SRC
+#define KEY_TASK_IS_SUBTASK MESSAGE_KEY_TASK_IS_SUBTASK
 #define KEY_TASK_TIME_SPENT_MS MESSAGE_KEY_TASK_TIME_SPENT_MS
 #define KEY_TASK_TIME_ESTIMATE_MS MESSAGE_KEY_TASK_TIME_ESTIMATE_MS
 #define KEY_TRACKED_MS MESSAGE_KEY_TRACKED_MS
@@ -300,9 +302,20 @@ typedef struct {
   // issue changed ("PROJ-123 3p!" / "#42"). '' when not linked to an issue.
   // Drawn at the start of the subtitle line.
   char issue_key[22];
+  // Which external tracker issue_key (if any) came from - ISSUE_SRC_* below.
+  // Drives a small drawn glyph ahead of the issue_key text; set independently
+  // of issue_key so a CalDAV task whose uid was too long for a text badge
+  // still gets a marker. 0 (ISSUE_SRC_NONE) draws nothing.
+  uint8_t issue_src;
 #endif
   bool done;
   bool recurs; // has a repeat config - draws a small ↻ glyph on the row
+  // A subtask row (see task-store.js pushTaskAndSubtasks) - the title line
+  // indents and draws a small tree-connector glyph ahead of it. All-platform
+  // like recurs: cheap enough that aplite doesn't need to lose it, unlike
+  // issue_key/tags/notes above. Replaced an earlier phone-baked "»" text
+  // prefix, which worked but gambled on the watch font having that glyph.
+  bool is_subtask;
 #ifndef PBL_PLATFORM_APLITE
   // The task's own reminder fired this app-open session (minute_tick_handler).
   // Carried across a list rebuild by id (MSG_TASK_SYNC_END) so a frequent
@@ -329,6 +342,14 @@ typedef struct {
   int deadline_days;
 } Task;
 #define DEADLINE_NONE 0x40000000
+// task->issue_src categories - a git-host tracker (GitHub/GitLab/Gitea, drawn
+// as a small branch glyph), a ticket tracker (Jira/Redmine/OpenProject, a
+// ticket glyph), or a calendar (CalDAV, a calendar glyph). See task-store.js
+// taskIssueSrc for the phone-side mapping.
+#define ISSUE_SRC_NONE 0
+#define ISSUE_SRC_GIT 1
+#define ISSUE_SRC_TICKET 2
+#define ISSUE_SRC_CALENDAR 3
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
 // pre-sorts by project when grouping is on). Grouping off = '' for every task =
@@ -2638,6 +2659,90 @@ static void apply_backlight_mode(void) {
 }
 #endif // !PBL_PLATFORM_APLITE
 
+// Recurring-task glyph: an open circle-arrow, drawn at the very start of the
+// subtitle line (ahead of the issue-source glyph and issue_key text, if any -
+// see draw_task_row). All-platform, like task->recurs itself. `box` is the
+// left edge of the subtitle line; the glyph is centred in its height.
+#define RECURS_GLYPH_W 12
+static void draw_recurs_glyph(GContext *ctx, GRect box, GColor fg) {
+  int16_t gx = box.origin.x;
+  int16_t gy = box.origin.y + box.size.h / 2;
+  graphics_context_set_stroke_color(ctx, fg);
+  graphics_draw_arc(ctx, GRect(gx, gy - 5, 11, 11), GOvalScaleModeFitCircle,
+                    DEG_TO_TRIGANGLE(35), DEG_TO_TRIGANGLE(330));
+  graphics_draw_line(ctx, GPoint(gx + 9, gy - 5), GPoint(gx + 12, gy - 2));
+  graphics_draw_line(ctx, GPoint(gx + 9, gy - 5), GPoint(gx + 6, gy - 3));
+}
+
+// Subtask glyph: a tree-connector stem dropping from the row's top edge into
+// a short arm pointing at the title - reads as "nests under the row above".
+// Drawn at the start of the title line, indenting the title text to match.
+// Replaced an earlier phone-baked "»" text prefix (worked, but depended on
+// the watch font having that exact glyph - see task-store.js history).
+#define SUBTASK_INDENT_W 14
+static void draw_subtask_glyph(GContext *ctx, GRect box, GColor fg) {
+  int16_t x = box.origin.x + 3;
+  int16_t y_mid = box.origin.y + box.size.h / 2;
+  graphics_context_set_stroke_color(ctx, fg);
+  graphics_draw_line(ctx, GPoint(x, box.origin.y), GPoint(x, y_mid));
+  graphics_draw_line(ctx, GPoint(x, y_mid), GPoint(x + 6, y_mid));
+}
+
+#ifndef PBL_PLATFORM_APLITE
+// Small monochrome glyph marking which external tracker a task's issue link
+// came from, drawn at the start of the subtitle line, after the recurring
+// glyph (if any) and ahead of the issue_key text, or alone for a CalDAV/iCal
+// task whose uid was too long for a text badge.
+// Plain vector shapes, no bitmap resource - real per-provider logos were
+// tried for habits (built then reverted, see 1d99447) for pbpack + heap cost
+// basalt/chalk/diorite can't spare; this costs neither. `box` is the left
+// edge of the subtitle line; the glyph is centred in its height.
+#define ISSUE_GLYPH_W 12
+static void draw_issue_src_glyph(GContext *ctx, GRect box, uint8_t src, GColor fg) {
+  int16_t cx = box.origin.x + 4;
+  int16_t cy = box.origin.y + box.size.h / 2;
+  graphics_context_set_stroke_color(ctx, fg);
+  graphics_context_set_fill_color(ctx, fg);
+  switch (src) {
+    case ISSUE_SRC_GIT: {
+      // A branch/fork: three spokes off a centre point, dotted at the tips.
+      GPoint top = GPoint(cx + 2, cy - 4);
+      GPoint bl = GPoint(cx - 3, cy + 3);
+      GPoint br = GPoint(cx + 3, cy + 3);
+      GPoint mid = GPoint(cx, cy);
+      graphics_draw_line(ctx, mid, top);
+      graphics_draw_line(ctx, mid, bl);
+      graphics_draw_line(ctx, mid, br);
+      graphics_fill_circle(ctx, top, 1);
+      graphics_fill_circle(ctx, bl, 1);
+      graphics_fill_circle(ctx, br, 1);
+      break;
+    }
+    case ISSUE_SRC_TICKET: {
+      // A ticket stub: an outline with one perforation tick near the edge.
+      GRect r = GRect(cx - 4, cy - 3, 9, 7);
+      graphics_draw_rect(ctx, r);
+      graphics_draw_line(ctx, GPoint(r.origin.x + 3, r.origin.y + 1),
+                         GPoint(r.origin.x + 3, r.origin.y + r.size.h - 2));
+      break;
+    }
+    case ISSUE_SRC_CALENDAR: {
+      // A wall calendar: an outline, a header rule, two binder ticks on top.
+      GRect r = GRect(cx - 4, cy - 2, 9, 8);
+      graphics_draw_rect(ctx, r);
+      graphics_draw_line(ctx, GPoint(r.origin.x, r.origin.y + 2),
+                         GPoint(r.origin.x + r.size.w - 1, r.origin.y + 2));
+      graphics_draw_line(ctx, GPoint(r.origin.x + 2, r.origin.y - 2), GPoint(r.origin.x + 2, r.origin.y));
+      graphics_draw_line(ctx, GPoint(r.origin.x + r.size.w - 3, r.origin.y - 2),
+                         GPoint(r.origin.x + r.size.w - 3, r.origin.y));
+      break;
+    }
+    default:
+      break;
+  }
+}
+#endif
+
 // Draws one task row - marquee/ellipsized title plus the "@ due  > spent /
 // estimate" subtitle. Shared by per-group rows and the pinned "TRACKING" row.
 // show_project right-aligns task->project on the subtitle line; only the pinned
@@ -2645,6 +2750,9 @@ static void apply_backlight_mode(void) {
 // MenuLayer cell's own bounds (origin 0,0).
 static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selected, bool show_project) {
   int16_t available = bounds.size.w - TITLE_BOX_X * 2;
+  if (task->is_subtask) {
+    available -= SUBTASK_INDENT_W;
+  }
   int16_t natural_width = title_natural_width(task->title);
   bool needs_marquee = is_selected && natural_width > available;
 
@@ -2670,27 +2778,10 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
   int16_t title_box_h = one_line_size.h > 0 ? one_line_size.h : (bounds.size.h - TITLE_BOX_Y);
   GRect title_box = GRect(TITLE_BOX_X, ROW_TITLE_TOP_Y(bounds.size.h, title_box_h, SUBTITLE_STRIP_H),
                            bounds.size.w - TITLE_BOX_X * 2, title_box_h);
-
-  // Recurring-task glyph on the right of the title line: an open circle-arrow.
-  // The title box shrinks to leave room so its ellipsis clears the glyph.
-  // Suppressed on the pinned row of the task being tracked - the live pulse dot
-  // (drawn by menu_draw_row) sits in that same corner. The recurrence is still
-  // visible where the task sits in its normal group.
-#ifdef PBL_PLATFORM_EMERY
-  bool pinned_tracking_row = show_project && s_tracking_task_id[0] != '\0' &&
-      strncmp(task->id, s_tracking_task_id, MAX_ID_LEN) == 0;
-#else
-  bool pinned_tracking_row = false;
-#endif
-  if (task->recurs && !needs_marquee && !pinned_tracking_row) {
-    int16_t gx = bounds.size.w - TITLE_BOX_X - 12;
-    int16_t gy = title_box.origin.y + title_box.size.h / 2;
-    graphics_context_set_stroke_color(ctx, fg);
-    graphics_draw_arc(ctx, GRect(gx, gy - 5, 11, 11), GOvalScaleModeFitCircle,
-                      DEG_TO_TRIGANGLE(35), DEG_TO_TRIGANGLE(330));
-    graphics_draw_line(ctx, GPoint(gx + 9, gy - 5), GPoint(gx + 12, gy - 2));
-    graphics_draw_line(ctx, GPoint(gx + 9, gy - 5), GPoint(gx + 6, gy - 3));
-    title_box.size.w -= 16;
+  if (task->is_subtask) {
+    draw_subtask_glyph(ctx, title_box, fg);
+    title_box.origin.x += SUBTASK_INDENT_W;
+    title_box.size.w -= SUBTASK_INDENT_W;
   }
 
   if (needs_marquee) {
@@ -2826,6 +2917,20 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
   }
 #else
   (void)show_project;
+#endif
+
+  if (task->recurs) {
+    draw_recurs_glyph(ctx, left_box, fg);
+    left_box.origin.x += RECURS_GLYPH_W;
+    left_box.size.w -= RECURS_GLYPH_W;
+  }
+
+#ifndef PBL_PLATFORM_APLITE
+  if (task->issue_src != ISSUE_SRC_NONE) {
+    draw_issue_src_glyph(ctx, left_box, task->issue_src, fg);
+    left_box.origin.x += ISSUE_GLYPH_W;
+    left_box.size.w -= ISSUE_GLYPH_W;
+  }
 #endif
 
   if (subtitle[0] != '\0') {
@@ -4976,10 +5081,12 @@ static void parse_common_task_fields(DictionaryIterator *it, Task *dst,
   dst->time_estimate_ms = tuple_int(it, KEY_TASK_TIME_ESTIMATE_MS, 0);
   dst->deadline_days = tuple_int(it, KEY_TASK_DEADLINE_DAYS, DEADLINE_NONE);
   dst->recurs = tuple_int(it, KEY_TASK_RECURS, 0) != 0;
+  dst->is_subtask = tuple_int(it, KEY_TASK_IS_SUBTASK, 0) != 0;
 #ifndef PBL_PLATFORM_APLITE
   dst->remind_min = tuple_int(it, KEY_TASK_REMIND_MIN, -1);
   dst->remind_fired = false;
   str_copy(dst->issue_key, tuple_str(it, KEY_TASK_ISSUE_KEY, ""), sizeof(dst->issue_key));
+  dst->issue_src = (uint8_t)tuple_int(it, KEY_TASK_ISSUE_SRC, ISSUE_SRC_NONE);
 #endif
 }
 
@@ -6375,9 +6482,14 @@ static void adjust_habit(MenuIndex index, int32_t delta) {
 static void habits_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
 #if defined(PBL_TOUCH)
-  // A touch tap only selects the row - see menu_select_click's matching guard.
+  // A tap that moved the highlight to a new row only selects it (see
+  // habits_menu_selection_changed); a tap on the already-selected row marks
+  // it done, mirroring menu_select_click on the main list. Long-hold unmarks
+  // - see touch_longpress_fire, which calls habits_menu_select_long_click.
   if (consume_tap_select_guard()) {
-    return;
+    if (s_tap_moved_sel || s_touch_longpress_fired) {
+      return;
+    }
   }
 #endif
   Habit *habit = resolve_habit_at(*cell_index);
@@ -6443,6 +6555,11 @@ static void habits_menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_i
   backlight_touch();
 #ifdef PBL_PLATFORM_EMERY
   habits_marquee_refresh(true);
+#endif
+#if defined(PBL_TOUCH)
+  // A tap that moved the highlight to a new row is select-only; a tap on the
+  // already-selected row marks it done - see habits_menu_select_click.
+  s_tap_moved_sel = true;
 #endif
 }
 #endif

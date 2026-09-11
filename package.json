@@ -192,7 +192,9 @@
       "POMODORO_WORK_MIN",
       "POMODORO_BREAK_MIN",
       "USE_POMODORO_CFG",
-      "SEARCH_ENABLED"
+      "SEARCH_ENABLED",
+      "TASK_ISSUE_SRC",
+      "TASK_IS_SUBTASK"
     ]
   }
 }

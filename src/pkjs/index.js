@@ -675,11 +675,26 @@ function fillTaskFields(dict, t) {
   if (t.recurs) {
     dict.TASK_RECURS = 1; // has a repeat config - the watch draws a ↻ glyph
   }
+  if (t.isSubtask) {
+    // A subtask row (see task-store.js pushTaskAndSubtasks) - the watch
+    // indents the title and draws a small tree-connector glyph ahead of it,
+    // rather than this baking a text prefix into the title itself (an
+    // earlier "»" prefix approach worked but a drawn glyph doesn't depend on
+    // font glyph coverage).
+    dict.TASK_IS_SUBTASK = 1;
+  }
   if (t.issueKey) {
     // Short issue-tracker key + optional story points ("PROJ-123 3p" / "#42"),
     // drawn as a badge at the start of the task's subtitle line. Already
     // length-shaped by task-store's taskIssueKey.
     dict.TASK_ISSUE_KEY = String(t.issueKey).slice(0, 21);
+  }
+  if (t.issueSrc) {
+    // 1=git-host tracker (GitHub/GitLab/Gitea), 2=ticket tracker (Jira/
+    // Redmine/OpenProject), 3=calendar (CalDAV). Drives a small drawn glyph
+    // ahead of the issue-key text - sent independently of TASK_ISSUE_KEY so a
+    // CalDAV task still gets a marker even when its uid was too long for one.
+    dict.TASK_ISSUE_SRC = t.issueSrc;
   }
   if (t.timeSpent) {
     // AppMessage ints are 32-bit signed - cap well under the ~24.8 days

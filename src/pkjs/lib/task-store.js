@@ -143,6 +143,24 @@ function taskIssueKey(t) {
   return label;
 }
 
+// Maps a task's issueType (SP's IssueProviderKey) to the small drawn-glyph
+// category main.c knows how to render ahead of the issue-key text (1=git-host
+// branch mark, 2=ticket mark, 3=calendar) - see ISSUE_SRC_* in main.c. Drawn
+// even when taskIssueKey() above dropped the text badge (an ICAL/CalDAV uid is
+// almost always > 13 chars), so a calendar-linked task still gets a marker.
+// Confirmed against a live watch (2026-09-11): a Google-Calendar-via-iCal task
+// carries issueType 'ICAL', not 'CALDAV' - both are mapped, uncertain which
+// (if either) SP's native CalDAV provider actually sends.
+// Unrecognized/absent issueType -> undefined (no icon) rather than a guess.
+var ISSUE_SRC_BY_TYPE = {
+  GITHUB: 1, GITLAB: 1, GITEA: 1,
+  JIRA: 2, REDMINE: 2, OPEN_PROJECT: 2,
+  CALDAV: 3, ICAL: 3,
+};
+function taskIssueSrc(t) {
+  return (t && t.issueType && ISSUE_SRC_BY_TYPE[t.issueType]) || undefined;
+}
+
 // state: { task: { [id]: {id, title, isDone, parentId?, projectId?,
 //                          tagIds?, __inBacklog?, ...} },
 //          project: { [id]: {id, title, ...} },
@@ -1536,20 +1554,6 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alway
   return rows.slice(0, limit);
 }
 
-// Pebble's MenuLayer has no per-row indent control, so nesting is baked
-// into the title string itself. Plain leading spaces alone read as barely
-// different from a regular row at this font size - a leading marker plus
-// wider indentation reads unambiguously as "sub-item of the row above".
-// U+00BB (RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK, "»") - confirmed
-// rendering correctly on this app's system font in the emulator, unlike an
-// earlier attempt at U+2514 (BOX DRAWINGS LIGHT UP AND RIGHT, "└"), which
-// showed as an empty missing-glyph box on every platform (confirmed twice).
-// Not every non-ASCII codepoint fails the way U+2514 did - » (plus ›, ·,
-// also tried) rendered fine, it was specifically that one glyph missing
-// from the font, not a blanket Unicode limitation. Previously plain ASCII
-// (~) for exactly that reason, before this was re-tested more thoroughly.
-var SUBTASK_PREFIX = '    » ';
-
 function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId, groupColor, hideDone) {
   // t is already guaranteed a real title here - getActiveTasks filters
   // ghost (title-less) records out of mainTasks before this is ever
@@ -1573,11 +1577,11 @@ function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId
   // already fully available locally once TAG entities have replayed, so
   // there's no fetch round-trip worth avoiding the way there is for a
   // task's full notes text.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, remindAt: t.remindAt || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, deadlineDays: taskDeadlineDays(t), recurs: t.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(t) });
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, remindAt: t.remindAt || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, deadlineDays: taskDeadlineDays(t), recurs: t.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(t), issueSrc: taskIssueSrc(t) });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
-      rows.push({ id: sub.id, title: SUBTASK_PREFIX + sub.title, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, remindAt: sub.remindAt || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, deadlineDays: taskDeadlineDays(sub), recurs: sub.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(sub) });
+      rows.push({ id: sub.id, title: sub.title, isSubtask: 1, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, remindAt: sub.remindAt || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, deadlineDays: taskDeadlineDays(sub), recurs: sub.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(sub), issueSrc: taskIssueSrc(sub) });
     }
   });
 }
