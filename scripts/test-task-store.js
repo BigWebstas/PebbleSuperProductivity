@@ -488,7 +488,8 @@ check('convertToSubTask nests the demoted task under the target parent (not just
   assert.strictEqual(state.task.a.__inBacklog, false, 'demoting drops backlog membership');
   assert.deepStrictEqual(state.task.parent.subTaskIds, ['a']);
   assert.deepStrictEqual(active(state).map((t) => t.id), ['parent', 'a']);
-  assert.strictEqual(active(state)[1].title, '    » Demote me');
+  assert.strictEqual(active(state)[1].title, 'Demote me');
+  assert.strictEqual(active(state)[1].isSubtask, 1);
 });
 
 check('convertToSubTask honors afterTaskId ordering and re-parents from an old parent', () => {
@@ -934,8 +935,10 @@ check('getActiveTasks nests subtasks under their main task, indented', () => {
   );
   const tasks = active(state);
   assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1', 'sub2']);
-  assert.strictEqual(tasks[1].title, '    » Book flights');
-  assert.strictEqual(tasks[2].title, '    » Book hotel');
+  assert.strictEqual(tasks[1].title, 'Book flights');
+  assert.strictEqual(tasks[1].isSubtask, 1);
+  assert.strictEqual(tasks[2].title, 'Book hotel');
+  assert.strictEqual(tasks[2].isSubtask, 1);
 });
 
 check('addSubTask op nests the subtask under its parent (parent addTask never listed it)', () => {
@@ -950,7 +953,8 @@ check('addSubTask op nests the subtask under its parent (parent addTask never li
   );
   const tasks = active(state);
   assert.deepStrictEqual(tasks.map((t) => t.id), ['main', 'sub1', 'sub2']);
-  assert.strictEqual(tasks[1].title, '    » Book flights');
+  assert.strictEqual(tasks[1].title, 'Book flights');
+  assert.strictEqual(tasks[1].isSubtask, 1);
   // projectId is forced to the parent's, tagIds cleared (mirrors the reducer).
   assert.strictEqual(state.task.sub1.projectId, 'p1');
   assert.deepStrictEqual(state.task.sub1.tagIds, []);
