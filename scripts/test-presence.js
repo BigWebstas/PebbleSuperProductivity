@@ -393,6 +393,39 @@ check('broadcastStopped sends stopped then clears the producer', () => {
   c.broadcastStopped(); // no-op, no throw
 });
 
+check('broadcastStopped before the socket opens is deferred and flushed on connect', () => {
+  const c = new PresenceClient({
+    baseUrl: 'https://sync.example.com', token: 't', clientId: 'p',
+    getCrypto: () => null, log: () => {},
+    tuning: { lingerMs: 10, livenessMs: 10000, minReconnectMs: 5, heartbeatMs: 10000 },
+  });
+  c.connect(); // socket is CONNECTING, not open
+  c.broadcastTracking('task-9', 1000);
+  c.broadcastStopped();
+  // Nothing on the wire yet - socket never opened.
+  assert.strictEqual(lastSocket._sentOfType('presence_state').length, 0);
+  assert.strictEqual(c.isBroadcasting(), false, 'a pending stop does not read as broadcasting');
+  lastSocket._open();
+  const sent = lastSocket._sentOfType('presence_state');
+  assert.strictEqual(sent.length, 1, 'exactly the stopped frame goes out on connect');
+  assert.strictEqual(lastStateSent().state, 'stopped');
+});
+
+check('a deferred stop that never re-announces tracking does not leak a heartbeat', async () => {
+  const c = new PresenceClient({
+    baseUrl: 'https://sync.example.com', token: 't', clientId: 'p',
+    getCrypto: () => null, log: () => {},
+    tuning: { lingerMs: 10, livenessMs: 10000, minReconnectMs: 5, heartbeatMs: 15 },
+  });
+  c.connect();
+  c.broadcastTracking('task-9', 1000);
+  c.broadcastStopped();
+  lastSocket._open();
+  const after = lastSocket._sentOfType('presence_state').length;
+  await delay(40);
+  assert.strictEqual(lastSocket._sentOfType('presence_state').length, after, 'no heartbeat after the flushed stop');
+});
+
 check('the heartbeat re-announces the tracking state', async () => {
   const c = newClient({ tuning: { heartbeatMs: 15, lingerMs: 10, livenessMs: 10000, minReconnectMs: 5 } });
   c.broadcastTracking('task-9', 1000);

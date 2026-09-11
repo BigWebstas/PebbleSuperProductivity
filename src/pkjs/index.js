@@ -235,6 +235,44 @@ function saveLastSyncedAt(ms) {
   localStorage.setItem('sp_last_synced_at', String(ms));
 }
 
+// Phase 2 presence: the watch's own in-progress tracking, persisted so a pkjs
+// restart mid-session (common on phones - the process is killed the moment the
+// watch app loses focus) can re-announce it on the next 'ready' instead of the
+// session silently dying on the other devices. Cleared the moment the watch
+// reports a stop. Only { taskId, sinceTs } - the presence-client mints its own
+// sessionId on re-announce.
+// A tracking session older than this is treated as a stale leftover (a crash
+// that never cleared the key) rather than a real in-progress session, so the
+// watch doesn't get re-announced as "tracking" days later. A genuine session
+// this long is vanishingly rare and the watch re-announces a real one on its
+// next launch anyway.
+var PRESENCE_BROADCAST_MAX_AGE_MS = 18 * 60 * 60 * 1000;
+
+function loadPresenceBroadcasting() {
+  try {
+    var v = JSON.parse(localStorage.getItem('sp_presence_broadcasting') || 'null');
+    if (!v || !v.taskId || typeof v.sinceTs !== 'number') {
+      return null;
+    }
+    var age = Date.now() - v.sinceTs;
+    if (age < 0 || age > PRESENCE_BROADCAST_MAX_AGE_MS) {
+      localStorage.removeItem('sp_presence_broadcasting');
+      return null;
+    }
+    return v;
+  } catch (e) {
+    return null;
+  }
+}
+
+function savePresenceBroadcasting(v) {
+  if (v && v.taskId) {
+    localStorage.setItem('sp_presence_broadcasting', JSON.stringify({ taskId: v.taskId, sinceTs: v.sinceTs }));
+  } else {
+    localStorage.removeItem('sp_presence_broadcasting');
+  }
+}
+
 function getOrCreateClientId() {
   var id = localStorage.getItem('sp_client_id');
   if (!id) {
@@ -2365,6 +2403,7 @@ function handleTrackStart(taskId, elapsedMs) {
     return;
   }
   presenceBroadcasting = { taskId: String(taskId), sinceTs: Date.now() - (elapsedMs || 0) };
+  savePresenceBroadcasting(presenceBroadcasting);
   if (presenceClient) {
     presenceClient.broadcastTracking(presenceBroadcasting.taskId, presenceBroadcasting.sinceTs);
   }
@@ -2386,10 +2425,18 @@ function handleTrackStart(taskId, elapsedMs) {
 // Separate from the op upload in handleTrackTimeStop so it still fires for a
 // sub-second session that carries no time delta.
 function handleTrackStopBroadcast() {
+  // Re-establish the producer session first if this pkjs process came up after
+  // the watch started tracking (persisted presenceBroadcasting, but the client
+  // was rebuilt with no _producer) - otherwise broadcastStopped() has nothing
+  // to stop and the other devices never hear it.
+  if (presenceClient && presenceBroadcasting && !presenceClient.isBroadcasting()) {
+    presenceClient.broadcastTracking(presenceBroadcasting.taskId, presenceBroadcasting.sinceTs);
+  }
   if (presenceClient) {
     presenceClient.broadcastStopped();
   }
   presenceBroadcasting = null;
+  savePresenceBroadcasting(null);
 }
 
 function handleTrackTimeStop(taskId, trackedMs) {
@@ -3150,7 +3197,8 @@ var presenceStaleTimer = null;
 // Phase 2: what this watch is currently broadcasting as its own tracking, or
 // null. Kept here (not just in presence-client) so a MSG_TRACK_TIME_START that
 // lands before the socket is open still gets announced once it connects.
-var presenceBroadcasting = null; // { taskId, sinceTs }
+// Seeded from localStorage so it also survives a pkjs process restart.
+var presenceBroadcasting = loadPresenceBroadcasting(); // { taskId, sinceTs }
 
 // How often to re-check whether a shown "tracking" session has gone silent
 // (producer closed its app without a final "stopped").
@@ -3398,7 +3446,11 @@ function applyPresence(config) {
   }
   presenceClient.connect();
   // Resume broadcasting a session already in progress (the watch told us
-  // before the socket was up, or the client was just rebuilt).
+  // before the socket was up, the client was just rebuilt, or this whole pkjs
+  // process restarted mid-session - hence the localStorage fallback).
+  if (!presenceBroadcasting) {
+    presenceBroadcasting = loadPresenceBroadcasting();
+  }
   if (presenceBroadcasting) {
     presenceClient.broadcastTracking(presenceBroadcasting.taskId, presenceBroadcasting.sinceTs);
   }

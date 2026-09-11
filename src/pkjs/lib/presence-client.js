@@ -102,6 +102,9 @@ function PresenceClient(opts) {
 
   // Producer: this watch's own broadcast session, or null when not tracking.
   this._producer = null; // { sessionId, taskId, sinceTs, seq }
+  // Set when broadcastStopped() was called but the socket wasn't open to carry
+  // the frame - _producer is held so onopen can still send the final 'stopped'.
+  this._pendingStop = false;
 
   this._onStateCb = noop;
   this._onClearedCb = noop;
@@ -150,6 +153,7 @@ PresenceClient.prototype.disconnect = function () {
   this._clearTimer('_lingerTimer');
   this._stopHeartbeat();
   this._producer = null;
+  this._pendingStop = false;
   if (this._ws) {
     try {
       this._ws.close(1000, 'client disconnect');
@@ -198,6 +202,7 @@ function genSessionId() {
 // wall-clock ms `sinceTs`. A new task starts a new session. Safe to call
 // before the socket is open - the state is stored and sent on connect.
 PresenceClient.prototype.broadcastTracking = function (taskId, sinceTs) {
+  this._pendingStop = false;
   if (!this._producer || this._producer.taskId !== taskId) {
     this._producer = { sessionId: genSessionId(), taskId: taskId, sinceTs: sinceTs, seq: 0 };
   } else {
@@ -208,17 +213,26 @@ PresenceClient.prototype.broadcastTracking = function (taskId, sinceTs) {
 };
 
 // Announce that this watch stopped tracking. No-op if we weren't broadcasting.
+// If the socket isn't up (pkjs just woke to handle the stop, or a reconnect is
+// pending), the producer is kept and flagged so onopen sends the final
+// 'stopped' - without this the other devices only learn of the stop by the
+// slow 90s staleness decay, so they keep showing "Tracking on Pebble".
 PresenceClient.prototype.broadcastStopped = function () {
   if (!this._producer) {
     return;
   }
-  this._sendProducerState('stopped');
   this._stopHeartbeat();
-  this._producer = null;
+  if (this.isConnected()) {
+    this._sendProducerState('stopped');
+    this._producer = null;
+    this._pendingStop = false;
+  } else {
+    this._pendingStop = true;
+  }
 };
 
 PresenceClient.prototype.isBroadcasting = function () {
-  return !!this._producer;
+  return !!this._producer && !this._pendingStop;
 };
 
 PresenceClient.prototype._sendProducerState = function (state) {
@@ -288,8 +302,13 @@ PresenceClient.prototype._open = function () {
     self._reconnectAttempts = 0;
     self._armLiveness();
     // Re-announce our tracking state after a (re)connect - a fresh socket
-    // means the server's single-slot cache lost it.
-    if (self._producer) {
+    // means the server's single-slot cache lost it. A stop that couldn't be
+    // sent while the socket was down goes out now instead.
+    if (self._producer && self._pendingStop) {
+      self._sendProducerState('stopped');
+      self._producer = null;
+      self._pendingStop = false;
+    } else if (self._producer) {
       self._sendProducerState('tracking');
       self._startHeartbeat();
     } else if (self._current && !self._current.opaque && self._current.state === 'tracking') {
