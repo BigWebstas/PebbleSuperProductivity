@@ -1956,9 +1956,29 @@ static int group_visible_task_count(int g) {
 }
 #endif
 
+// Whether `cell_index` is the always-last "Finish Day" row. With tasks it
+// sits past every project group, found via GROUP_SECTION_BASE + s_group_count
+// the usual way. With an empty (but actionable - see ACTIONABLE_EMPTY_ACTIVE,
+// always false on aplite) list, menu_get_num_sections gives it section 1
+// outright instead - s_group_count is 0 there, but GROUP_SECTION_BASE also
+// depends on has_pinned_row(), which a remote presence session can hold true
+// independent of s_task_count, so this stays a direct check rather than
+// reusing that arithmetic. Used from both the aplite and non-aplite row-menu
+// callbacks, so it isn't itself aplite-excluded.
+static bool is_finish_day_cell(MenuIndex *cell_index) {
+  if (s_task_count == 0) {
+    return ACTIONABLE_EMPTY_ACTIVE() && cell_index->section == 1;
+  }
+  return (int)cell_index->section - GROUP_SECTION_BASE == s_group_count;
+}
+
 static uint16_t menu_get_num_sections(MenuLayer *menu_layer, void *context) {
   if (s_task_count == 0) {
-    return 1;
+    // Actionable empty state gets a second section for the always-reachable
+    // Finish Day row - completing every task shouldn't lock the day out from
+    // being finished. Every other empty reason (not paired, error, syncing)
+    // stays the single phantom-row section.
+    return ACTIONABLE_EMPTY_ACTIVE() ? 2 : 1;
   }
 #ifndef PBL_PLATFORM_APLITE
   return (uint16_t)(1 + (has_pinned_row() ? 1 : 0) + s_group_count + 1);
@@ -1970,10 +1990,17 @@ static uint16_t menu_get_num_sections(MenuLayer *menu_layer, void *context) {
 static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
     // Actionable empty state (STATUS_OK, nothing due): the menu stays visible
-    // with its normal section-0 rows. Every other empty reason hides the menu
-    // but still needs one reportable row so SELECT dispatches ("Select to
-    // retry"); that row is never drawn since the layer is hidden.
-    return ACTIONABLE_EMPTY_ACTIVE() ? (uint16_t)section0_row_count() : 1;
+    // with its normal section-0 rows, plus a section 1 holding just the
+    // Finish Day row. Every other empty reason hides the menu but still needs
+    // one reportable row so SELECT dispatches ("Select to retry"); that row
+    // is never drawn since the layer is hidden.
+    if (!ACTIONABLE_EMPTY_ACTIVE()) {
+      return 1;
+    }
+    if (section_index == 1) {
+      return 1; // Finish Day row
+    }
+    return (uint16_t)section0_row_count();
   }
   if (section_index == 0) {
     return (uint16_t)section0_row_count();
@@ -2010,8 +2037,10 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
 
 static int16_t menu_get_header_height(MenuLayer *menu_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
-    // Actionable empty state only - the header holds "No tasks for today."
-    return (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) ? GROUP_HEADER_HEIGHT : 0;
+    // Actionable empty state only - "Nothing left for today." is section 1's
+    // header, sitting just above Finish Day: after the pinned action rows in
+    // section 0, not over them.
+    return (section_index == 1 && ACTIONABLE_EMPTY_ACTIVE()) ? GROUP_HEADER_HEIGHT : 0;
   }
   if (section_index == 0) {
     return 0;
@@ -2080,8 +2109,9 @@ static int16_t title_natural_width_font(const char *title, GFont font);
 
 static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t section_index, void *context) {
   if (s_task_count == 0) {
-    if (section_index == 0 && ACTIONABLE_EMPTY_ACTIVE()) {
-      // "Nothing left for today." above the still-reachable section-0 rows.
+    if (section_index == 1 && ACTIONABLE_EMPTY_ACTIVE()) {
+      // "Nothing left for today." - below the pinned section-0 action rows,
+      // right above Finish Day.
       GRect bounds = layer_get_bounds(cell_layer);
       fill_bg(ctx, bounds, GColorWhite);
       graphics_context_set_text_color(ctx, GColorBlack);
@@ -3123,7 +3153,7 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     graphics_draw_bitmap_in_rect(ctx, is_selected ? s_check_white_bitmap : s_check_bitmap, icon_rect);
     return;
   }
-  if ((int)cell_index->section - GROUP_SECTION_BASE == s_group_count) {
+  if (is_finish_day_cell(cell_index)) {
 #ifndef PBL_PLATFORM_APLITE
     // Finish Day row, always last - long-select archives every done task, plain
     // Select is a no-op. Inverts on selection like a task row. aplite-excluded -
@@ -4130,7 +4160,11 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
   // The pinned "TRACKING" row (section 1) - Select opens the full-screen
   // tracking detail: the local session, or a remote device's (same screen the
   // dark-blue LIVE row opens). Select there stops the timer.
-  if (cell_index->section == 1 && (s_tracking_task_id[0] != '\0' || remote_in_pinned_section())) {
+  // s_task_count != 0 keeps this from firing in the empty-list state, where
+  // section 1 is the Finish Day row instead (a remote presence session can
+  // hold remote_in_pinned_section() true independent of s_task_count).
+  if (s_task_count != 0 && cell_index->section == 1 &&
+      (s_tracking_task_id[0] != '\0' || remote_in_pinned_section())) {
     push_live_window();
     return;
   }
@@ -4148,8 +4182,7 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
   // The Finish Day row: Select opens the Reflect energy check-in when it's
   // enabled (long-Select still archives - menu_select_long_click). The row
   // resolves to no task, so this must come before resolve_task_at's NULL.
-  if (s_reflect_enabled &&
-      (int)cell_index->section - GROUP_SECTION_BASE == s_group_count) {
+  if (s_reflect_enabled && is_finish_day_cell(cell_index)) {
     push_reflect_window();
     return;
   }
@@ -4178,11 +4211,14 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
   backlight_touch();
   // No s_notes_overlay_active check - note-append is wired on s_notes_window's
   // own click config.
-  if (s_error_overlay_active || s_task_count == 0 || cell_index->section == 0) {
+  // s_task_count == 0 only bails when the empty state isn't actionable - the
+  // actionable one still needs long-Select to reach the Finish Day row below.
+  if (s_error_overlay_active || cell_index->section == 0 ||
+      (s_task_count == 0 && !ACTIONABLE_EMPTY_ACTIVE())) {
     return;
   }
 #ifndef PBL_PLATFORM_APLITE
-  if ((int)cell_index->section - GROUP_SECTION_BASE == s_group_count) {
+  if (is_finish_day_cell(cell_index)) {
     // Finish Day row. No optimistic local change - archiving needs the phone's
     // full state.task cache; this is fire-and-forget and the phone pushes an
     // updated list back.
