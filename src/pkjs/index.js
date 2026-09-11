@@ -449,6 +449,13 @@ function sendStatus(code, message) {
     // Upcoming page row (default on). Drives main.c's s_upcoming_enabled /
     // SECTION0_ROW_UPCOMING - future-dated tasks grouped by day.
     UPCOMING_ENABLED: config.enableUpcoming !== false ? 1 : 0,
+    // "Later Today" (default off, only visible with grouping on). Drives
+    // main.c's s_later_today_enabled: with the list grouped by project, a
+    // task scheduled later than right now moves out of its project group
+    // into one pooled group at the bottom, sorted by time - like the
+    // desktop. The watch reclassifies live every minute; the phone just
+    // sends the setting, no row-ordering work needed here.
+    LATER_TODAY_ENABLED: config.laterToday ? 1 : 0,
     // Notes page row (default off). Drives main.c's s_notespage_enabled /
     // SECTION0_ROW_NOTESPAGE - today-pinned standalone notes.
     NOTESPAGE_ENABLED: config.enableNotesPage ? 1 : 0,
@@ -3632,6 +3639,7 @@ Pebble.addEventListener('showConfiguration', function () {
     config.email || '',
     {
       groupByProject: !!config.groupByProject,
+      laterToday: !!config.laterToday,
       todayOnly: !!config.todayOnly,
       hideDoneTasks: !!config.hideDoneTasks,
       autoMarkParentDone: !!config.autoMarkParentDone,
@@ -3749,6 +3757,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     email: result.email,
     jwt: newJwt,
     groupByProject: !!result.groupByProject,
+    laterToday: !!result.laterToday,
     todayOnly: !!result.todayOnly,
     hideDoneTasks: !!result.hideDoneTasks,
     autoMarkParentDone: !!result.autoMarkParentDone,

@@ -17,6 +17,7 @@ function escapeHtmlAttr(s) {
 function buildPairingPageUrl(baseUrl, email, options) {
   options = options || {};
   var groupByProject = !!options.groupByProject;
+  var laterToday = !!options.laterToday;
   var todayOnly = !!options.todayOnly;
   var hideDoneTasks = !!options.hideDoneTasks;
   var autoMarkParentDone = !!options.autoMarkParentDone;
@@ -221,6 +222,12 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    <label for="groupByProject">Group tasks by project</label>\n' +
 '  </div>\n' +
 '  <p class="hint">Green project headers above each group, instead of one flat list.</p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="laterToday" type="checkbox"' + (laterToday ? ' checked' : '') + '>\n' +
+'    <label for="laterToday">Later Today section</label>\n' +
+'  </div>\n' +
+'  <p class="hint">With grouping on, tasks scheduled later than right now move into one group at the bottom, sorted by time - like the desktop.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="todayOnly" type="checkbox"' + (todayOnly ? ' checked' : '') + '>\n' +
@@ -490,6 +497,7 @@ backlightOptions + '\n' +
 '      password: document.getElementById(\'password\').value,\n' +
 '      jwt: jwt,\n' +
 '      groupByProject: document.getElementById(\'groupByProject\').checked,\n' +
+'      laterToday: document.getElementById(\'laterToday\').checked,\n' +
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
 '      hideDoneTasks: document.getElementById(\'hideDoneTasks\').checked,\n' +
 '      autoMarkParentDone: document.getElementById(\'autoMarkParentDone\').checked,\n' +

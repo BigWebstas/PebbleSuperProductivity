@@ -194,7 +194,8 @@
       "USE_POMODORO_CFG",
       "SEARCH_ENABLED",
       "TASK_ISSUE_SRC",
-      "TASK_IS_SUBTASK"
+      "TASK_IS_SUBTASK",
+      "LATER_TODAY_ENABLED"
     ]
   }
 }

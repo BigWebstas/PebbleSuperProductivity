@@ -95,6 +95,7 @@
 #define KEY_YESTERDAY_STATS_ENABLED MESSAGE_KEY_YESTERDAY_STATS_ENABLED
 #define KEY_SCHEDULE_ENABLED MESSAGE_KEY_SCHEDULE_ENABLED
 #define KEY_UPCOMING_ENABLED MESSAGE_KEY_UPCOMING_ENABLED
+#define KEY_LATER_TODAY_ENABLED MESSAGE_KEY_LATER_TODAY_ENABLED
 #define KEY_UPCOMING_TEXT MESSAGE_KEY_UPCOMING_TEXT
 #define KEY_NOTESPAGE_ENABLED MESSAGE_KEY_NOTESPAGE_ENABLED
 #define KEY_NOTESPAGE_TEXT MESSAGE_KEY_NOTESPAGE_TEXT
@@ -356,12 +357,18 @@ typedef struct {
 // one group covering the whole list, same as the old flat list.
 typedef struct {
   char name[MAX_PROJECT_LEN];
-  int start; // index into s_tasks
+  // Index (via s_row_map when Later Today is active - see recompute_groups)
+  // into s_tasks, and how many logical positions from there belong here.
+  int start;
   int count;
 #ifndef PBL_PLATFORM_APLITE
   // Copied from the group's first task so the selectable project row can fetch
   // this project's notes. aplite keeps a plain non-selectable header.
   char project_id[MAX_PROJECT_ID_LEN];
+  // True only for the synthetic trailing "Later Today" group (see
+  // recompute_groups) - it pools tasks from every project, so it isn't a
+  // real project: no colour swatch, no per-project notes.
+  bool is_later_today;
 #endif
 } TaskGroup;
 
@@ -1120,6 +1127,27 @@ static TaskGroup s_groups[MAX_GROUPS];
 #endif
 static int s_group_count = 0;
 
+#ifndef PBL_PLATFORM_APLITE
+// "Later Today" (config.laterToday): with tasks grouped by project, one
+// scheduled later than right now is pulled out of its project's group and
+// pooled with every other later task into one group at the very end, sorted
+// by time - mirrors the desktop. Only takes effect when the list actually
+// is grouped (some task has a non-empty project - see recompute_groups).
+// Recomputed on every regroup (a real sync AND the minute tick), so a task
+// rejoins its normal group the instant its time passes, no re-sync needed.
+static bool s_later_today_enabled = false;
+// Maps a *logical* position (what TaskGroup.start/count and every group-
+// relative row index describe) to the real index into s_tasks. Identity
+// (s_row_map[i] == i) whenever Later Today is off - s_tasks itself is never
+// reordered, so this is the only new indirection the rest of the grouping
+// code needs. See rebuild_row_map / recompute_groups.
+#if HEAP_BACKED_LISTS
+static int *s_row_map; // calloc'd in alloc_heap_lists()
+#else
+static int s_row_map[MAX_TASKS];
+#endif
+#endif
+
 // Marquee-scrolls the selected task row's title when it's too wide to fit
 // (MenuLayer has no scrolling-text cell). Only the selected row scrolls.
 #define SCROLL_GAP_PX 24
@@ -1266,27 +1294,112 @@ static const char *tuple_str(DictionaryIterator *it, uint32_t key, const char *f
   return t ? t->value->cstring : fb;
 }
 
+#ifndef PBL_PLATFORM_APLITE
+static int current_minute_of_day(void) {
+  time_t now = time(NULL);
+  struct tm *lt = localtime(&now);
+  return lt->tm_hour * 60 + lt->tm_min;
+}
+
+// Fills s_row_map for this regroup pass and returns where the trailing
+// "Later Today" block starts (s_task_count when there isn't one). Identity
+// mapping, no later block, unless Later Today is on AND the list is actually
+// grouped (some task has a non-empty project - '' means grouping is off
+// entirely, see the TaskGroup comment). s_tasks itself is never reordered:
+// every "later" task (has a scheduled time strictly after right now) is
+// logically moved to the end, sorted by that time, while every other task
+// keeps its original (phone-sorted, project-contiguous) relative order -
+// a stable partition, recomputed fresh from s_tasks every call, so a task
+// promoted out of Later Today lands back in its correct spot within its
+// project's run rather than just tacked onto wherever "normal" currently ends.
+static int rebuild_row_map(void) {
+  bool grouped = s_task_count > 0 && s_tasks[0].project[0] != '\0';
+  if (!s_later_today_enabled || !grouped) {
+    for (int i = 0; i < s_task_count; i++) {
+      s_row_map[i] = i;
+    }
+    return s_task_count;
+  }
+  int now_min = current_minute_of_day();
+  int later_start = s_task_count;
+  int normal_n = 0;
+  for (int i = 0; i < s_task_count; i++) {
+    if (s_tasks[i].due_min >= 0 && s_tasks[i].due_min > now_min) {
+      later_start--;
+      s_row_map[later_start] = i; // fill the later block from the back for now
+    } else {
+      s_row_map[normal_n++] = i;
+    }
+  }
+  // The later block above landed back-to-front (last later task found ends up
+  // first) - reverse it in place, then sort by due_min ascending. Both over a
+  // handful of entries at most (MAX_TASKS), insertion sort is plenty.
+  for (int a = later_start, b = s_task_count - 1; a < b; a++, b--) {
+    int t = s_row_map[a]; s_row_map[a] = s_row_map[b]; s_row_map[b] = t;
+  }
+  for (int a = later_start + 1; a < s_task_count; a++) {
+    int v = s_row_map[a];
+    int b = a - 1;
+    while (b >= later_start && s_tasks[s_row_map[b]].due_min > s_tasks[v].due_min) {
+      s_row_map[b + 1] = s_row_map[b];
+      b--;
+    }
+    s_row_map[b + 1] = v;
+  }
+  return later_start;
+}
+#endif
+
 static void recompute_groups(void) {
   s_group_count = 0;
+#ifndef PBL_PLATFORM_APLITE
+  int later_start = rebuild_row_map();
+#else
+  int later_start = s_task_count;
+#endif
   int i = 0;
-  while (i < s_task_count && s_group_count < MAX_GROUPS) {
+  while (i < later_start && s_group_count < MAX_GROUPS) {
     int j = i + 1;
-    while (j < s_task_count && strncmp(s_tasks[j].project, s_tasks[i].project, MAX_PROJECT_LEN) == 0) {
+#ifndef PBL_PLATFORM_APLITE
+    while (j < later_start && strncmp(s_tasks[s_row_map[j]].project, s_tasks[s_row_map[i]].project, MAX_PROJECT_LEN) == 0) {
       j++;
     }
-    // Last slot absorbs every remaining task instead of dropping the tail.
-    if (s_group_count == MAX_GROUPS - 1) {
-      j = s_task_count;
+#else
+    while (j < later_start && strncmp(s_tasks[j].project, s_tasks[i].project, MAX_PROJECT_LEN) == 0) {
+      j++;
     }
-    str_copy(s_groups[s_group_count].name, s_tasks[i].project, MAX_PROJECT_LEN);
+#endif
+    // Last slot absorbs every remaining task instead of dropping the tail
+    // (including any Later Today block - a today list with 13+ distinct
+    // projects AND tasks due later is a vanishingly rare overlap).
+    if (s_group_count == MAX_GROUPS - 1) {
+      j = later_start;
+    }
 #ifndef PBL_PLATFORM_APLITE
-    str_copy(s_groups[s_group_count].project_id, s_tasks[i].project_id, MAX_PROJECT_ID_LEN);
+    str_copy(s_groups[s_group_count].name, s_tasks[s_row_map[i]].project, MAX_PROJECT_LEN);
+    str_copy(s_groups[s_group_count].project_id, s_tasks[s_row_map[i]].project_id, MAX_PROJECT_ID_LEN);
+    s_groups[s_group_count].is_later_today = false;
+#else
+    str_copy(s_groups[s_group_count].name, s_tasks[i].project, MAX_PROJECT_LEN);
 #endif
     s_groups[s_group_count].start = i;
     s_groups[s_group_count].count = j - i;
     s_group_count++;
     i = j;
   }
+#ifndef PBL_PLATFORM_APLITE
+  // The Later Today block, if any: one group, not run through the strncmp
+  // scan above (its members span whatever projects they came from), and
+  // never a real project - no colour swatch, no per-project notes.
+  if (later_start < s_task_count && s_group_count < MAX_GROUPS) {
+    str_copy(s_groups[s_group_count].name, "Later Today", MAX_PROJECT_LEN);
+    s_groups[s_group_count].project_id[0] = '\0';
+    s_groups[s_group_count].is_later_today = true;
+    s_groups[s_group_count].start = later_start;
+    s_groups[s_group_count].count = s_task_count - later_start;
+    s_group_count++;
+  }
+#endif
 }
 
 // ---------- persistence (so the list survives a watchapp relaunch) ----------
@@ -1954,6 +2067,23 @@ static int pinned_task_index(void) {
   return -1;
 }
 
+// pinned_task_index() converted from a raw s_tasks index to its logical
+// (s_row_map) position, for comparing against TaskGroup.start/count - which
+// describe logical positions once Later Today has reordered the view. -1
+// when there's no pinned task. See rebuild_row_map.
+static int pinned_task_row_map_index(void) {
+  int raw = pinned_task_index();
+  if (raw < 0) {
+    return -1;
+  }
+  for (int k = 0; k < s_task_count; k++) {
+    if (s_row_map[k] == raw) {
+      return k;
+    }
+  }
+  return -1;
+}
+
 // Whether the pinned "TRACKING" section is currently shown: the phone setting
 // is on AND there's a real locally-tracked task to put in it, OR a remote
 // presence session is riding this section (remote_in_pinned_section).
@@ -1984,7 +2114,7 @@ static int group_section_base(void) {
 static int group_visible_task_count(int g) {
   int count = s_groups[g].count;
   if (has_pinned_row()) {
-    int pi = pinned_task_index();
+    int pi = pinned_task_row_map_index();
     if (pi >= s_groups[g].start && pi < s_groups[g].start + s_groups[g].count) {
       count--;
     }
@@ -2257,8 +2387,9 @@ static Task *resolve_task_at(MenuIndex index) {
     row -= 1;
   }
   // Walk the group's tasks skipping the pinned one (drawn in the pinned
-  // section), so visible row N is the Nth non-pinned task.
-  int pinned_idx = has_pinned_row() ? pinned_task_index() : -1;
+  // section), so visible row N is the Nth non-pinned task. `i` is a logical
+  // (s_row_map) position - see rebuild_row_map.
+  int pinned_idx = has_pinned_row() ? pinned_task_row_map_index() : -1;
   int start = s_groups[group_idx].start;
   int end = start + s_groups[group_idx].count;
   int seen = 0;
@@ -2267,7 +2398,7 @@ static Task *resolve_task_at(MenuIndex index) {
       continue;
     }
     if (seen == row) {
-      return &s_tasks[i];
+      return &s_tasks[s_row_map[i]];
     }
     seen++;
   }
@@ -3318,9 +3449,14 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
 
     fill_bg(ctx, bounds, GColorGreen);
 #if TODAY_PROJECT_SWATCH
+    // Later Today pools tasks from every project - showing whichever one's
+    // first task happens to be would misrepresent the group, so it gets no
+    // swatch (project_color 0), same as "No Project".
     int16_t text_x = draw_project_marker(ctx, TITLE_BOX_X, bounds.size.h,
                                           project_row->project_id,
-                                          s_tasks[project_row->start].project_color, is_selected);
+                                          project_row->is_later_today ? 0
+                                            : s_tasks[s_row_map[project_row->start]].project_color,
+                                          is_selected);
 #else
     int16_t text_x = TITLE_BOX_X;
 #endif
@@ -5536,6 +5672,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_search_enabled = tuple_int(iterator, KEY_SEARCH_ENABLED, s_search_enabled) != 0;
       s_tags_enabled = tuple_int(iterator, KEY_TAGS_ENABLED, s_tags_enabled) != 0;
       s_yesterday_stats_enabled = tuple_int(iterator, KEY_YESTERDAY_STATS_ENABLED, s_yesterday_stats_enabled) != 0;
+      s_later_today_enabled = tuple_int(iterator, KEY_LATER_TODAY_ENABLED, s_later_today_enabled) != 0;
 #endif
       // Only re-applied when the value actually changed - this field is sent on
       // every status push (including routine background syncs), and re-triggering
@@ -5599,6 +5736,13 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_habit_streak_nudge = tuple_int(iterator, KEY_HABIT_STREAK_NUDGE, s_habit_streak_nudge) != 0;
       // "Log energy on Finish Day" - absent-means-unchanged.
       s_reflect_enabled = tuple_int(iterator, KEY_REFLECT_ENABLED, s_reflect_enabled) != 0;
+#endif
+#ifndef PBL_PLATFORM_APLITE
+      // Regroup so a Later Today toggle takes effect immediately rather than
+      // waiting for the next full task sync.
+      if (s_task_count > 0) {
+        recompute_groups();
+      }
 #endif
       // reload_data refreshes the Resync row's status subtitle;
       // update_empty_layer() handles the empty screen. Both no-op while the
@@ -10012,6 +10156,12 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
   if (s_error_overlay_active) {
     return;
   }
+  // Later Today: reclassify every minute so a task rejoins its normal group
+  // the instant its scheduled time passes, without waiting for a sync.
+  if (s_later_today_enabled && s_task_count > 0) {
+    recompute_groups();
+    menu_layer_reload_data(s_menu_layer);
+  }
   int now_min = now_tm->tm_hour * 60 + now_tm->tm_min;
 
   // Per-task reminders (task.remindAt from the desktop): fire once when the
@@ -10062,7 +10212,8 @@ static bool alloc_heap_lists(void) {
   s_incoming = calloc(MAX_TASKS, sizeof(Task));
   s_habits   = calloc(MAX_HABITS, sizeof(Habit));
   s_groups   = calloc(MAX_GROUPS, sizeof(TaskGroup));
-  return s_tasks && s_incoming && s_habits && s_groups;
+  s_row_map  = calloc(MAX_TASKS, sizeof(int));
+  return s_tasks && s_incoming && s_habits && s_groups && s_row_map;
 }
 #endif
 
