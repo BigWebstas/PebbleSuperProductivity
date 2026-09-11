@@ -1025,6 +1025,16 @@ static time_t s_presence_elapsed_base = 0; // time(NULL) - elapsed_s, stamped at
 // When both are set the detail window shows "spent / estimate" like a task row.
 static int s_presence_spent_ms = 0;
 static int s_presence_estimate_ms = 0;
+// time(NULL) when s_presence_spent_ms was last stamped fresh from the phone -
+// the anchor for locally ticking it forward between pushes. NOT the same
+// anchor as s_presence_elapsed_base (the session's start): s_presence_spent_ms
+// is the phone's task.timeSpent AS OF THIS PUSH, which can already include
+// some of the current session's progress (the desktop flushes it mid-session),
+// so extrapolating from the session's start double-counts that overlap.
+// Extrapolating from the LAST PUSH instead only ever covers the (small) gap
+// since the last known-good total, never overlapping with time already baked
+// into s_presence_spent_ms.
+static time_t s_presence_spent_received_epoch = 0;
 static Window *s_live_window = NULL;
 static TextLayer *s_live_state_layer = NULL;
 static TextLayer *s_live_task_layer = NULL;
@@ -3819,9 +3829,13 @@ static void maybe_notify_overtime(void) {
     over_title = task->title;
   } else if (s_presence_state == 1 && s_presence_estimate_ms > 0) {
     // Another device is tracking; s_presence_spent_ms is that task's synced
-    // time-spent, s_presence_elapsed_base the running session's start.
+    // time-spent AS OF s_presence_spent_received_epoch (this push's receipt
+    // time), NOT s_presence_elapsed_base (the session's start) - see
+    // s_presence_spent_received_epoch's own comment for why using the
+    // session's start here double-counted and could fire this notification
+    // early.
     effective_ms = s_presence_spent_ms;
-    elapsed_s = (int)(time(NULL) - s_presence_elapsed_base);
+    elapsed_s = (int)(time(NULL) - s_presence_spent_received_epoch);
     estimate_ms = s_presence_estimate_ms;
     over_title = s_presence_task[0] != '\0' ? s_presence_task : "Live tracking";
   } else {
@@ -5490,6 +5504,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
         s_presence_can_stop = tuple_int(iterator, KEY_PRESENCE_CAN_STOP, 0) != 0;
         s_presence_spent_ms = tuple_int(iterator, KEY_PRESENCE_SPENT_MS, 0);
         s_presence_estimate_ms = tuple_int(iterator, KEY_PRESENCE_ESTIMATE_MS, 0);
+        s_presence_spent_received_epoch = time(NULL);
         // The phone confirms a stop by clearing (state 0), never by another
         // still-live update - so any fresh state drops the "Stopping..." latch.
         s_presence_stopping = false;
@@ -9170,22 +9185,17 @@ static void live_window_refresh(void) {
   text_layer_set_text(s_live_task_layer, s_presence_task);
 
   if (s_presence_state == 1) {
-    // Deliberately NOT s_presence_spent_ms/s_presence_estimate_ms here (unlike
-    // the local-tracking branch above) - matches the pinned row's own remote
-    // display (menu_draw_row's remote_in_pinned_section() branch), which never
-    // showed an estimate either. s_presence_spent_ms is the phone's task.timeSpent
-    // as of whenever it last pushed presence, and the desktop periodically
-    // flushes THIS session's own progress into that same field while it's still
-    // running - so it's not a stable "as of session start" baseline, and adding
-    // the full elapsed-since-start on top of it double-counts whatever portion
-    // already overlapped. The freeze-on-first-push fix tried in index.js
-    // (presenceSessionSpentBaselineMs) didn't close this: this watch's own
-    // first-observed-push isn't necessarily the session's true start either (a
-    // pkjs restart or a delayed live-tracking connect sees an already-running
-    // session and freezes an already-inflated number). Showing just the running
-    // clock, like the pinned row does, has no such timing dependency.
-    live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), 0, 0,
-                     (int)(time(NULL) - s_presence_elapsed_base));
+    // "spent / estimate" when the remote task has an estimate, ticked forward
+    // from s_presence_spent_received_epoch (this push's receipt time) - NOT
+    // s_presence_elapsed_base (the session's start), which double-counts (see
+    // s_presence_spent_received_epoch's own comment). No estimate: the plain
+    // running session clock, anchored to the session's actual start - same
+    // number the pinned row's own remote display shows.
+    int session_s = s_presence_estimate_ms > 0
+        ? (int)(time(NULL) - s_presence_spent_received_epoch)
+        : (int)(time(NULL) - s_presence_elapsed_base);
+    live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), s_presence_spent_ms, s_presence_estimate_ms,
+                     session_s);
     if (!s_live_tick_timer) {
       s_live_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, live_tick_callback, NULL);
     }
