@@ -44,6 +44,17 @@ var LIVENESS_TIMEOUT_MS = 45 * 1000;
 // 90s staleness window would decay it (tracking-presence.service.ts).
 var HEARTBEAT_MS = 60 * 1000;
 
+// A fresh session's very first announce (_send below) has no ack - if the
+// socket is mid-reconnect, or "open" but silently dropping frames on a flaky
+// link, the only recovery would otherwise be the next heartbeat (60s, close
+// to the 90s staleness window above) or a reconnect's onopen re-announce.
+// Re-send a couple more times shortly after a NEW session starts to close
+// that window without shortening the steady-state heartbeat. Harmless if the
+// first send actually landed - same idempotent 'tracking' state, just a
+// bumped seq.
+var FAST_ANNOUNCE_DELAY_1_MS = 3 * 1000;
+var FAST_ANNOUNCE_DELAY_2_MS = 8 * 1000;
+
 var DEVICE_LABEL = 'Pebble';
 
 var MIN_RECONNECT_MS = 1000;
@@ -151,6 +162,7 @@ PresenceClient.prototype.disconnect = function () {
   this._clearTimer('_reconnectTimer');
   this._clearTimer('_livenessTimer');
   this._clearTimer('_lingerTimer');
+  this._clearFastAnnounce();
   this._stopHeartbeat();
   this._producer = null;
   this._pendingStop = false;
@@ -203,13 +215,38 @@ function genSessionId() {
 // before the socket is open - the state is stored and sent on connect.
 PresenceClient.prototype.broadcastTracking = function (taskId, sinceTs) {
   this._pendingStop = false;
-  if (!this._producer || this._producer.taskId !== taskId) {
+  var isNewSession = !this._producer || this._producer.taskId !== taskId;
+  if (isNewSession) {
     this._producer = { sessionId: genSessionId(), taskId: taskId, sinceTs: sinceTs, seq: 0 };
   } else {
     this._producer.sinceTs = sinceTs;
   }
   this._sendProducerState('tracking');
   this._startHeartbeat();
+  if (isNewSession) {
+    this._armFastAnnounce();
+  }
+};
+
+// See FAST_ANNOUNCE_DELAY_1_MS/_2_MS.
+PresenceClient.prototype._armFastAnnounce = function () {
+  this._clearFastAnnounce();
+  var self = this;
+  var sessionId = this._producer.sessionId;
+  function reannounce() {
+    // Only if still the same session - a stop, or a newer session replacing
+    // this one, must not resurrect a stale announce.
+    if (self._producer && self._producer.sessionId === sessionId) {
+      self._sendProducerState('tracking');
+    }
+  }
+  this._fastAnnounceTimer1 = setTimeout(reannounce, FAST_ANNOUNCE_DELAY_1_MS);
+  this._fastAnnounceTimer2 = setTimeout(reannounce, FAST_ANNOUNCE_DELAY_2_MS);
+};
+
+PresenceClient.prototype._clearFastAnnounce = function () {
+  this._clearTimer('_fastAnnounceTimer1');
+  this._clearTimer('_fastAnnounceTimer2');
 };
 
 // Announce that this watch stopped tracking. No-op if we weren't broadcasting.
@@ -222,6 +259,7 @@ PresenceClient.prototype.broadcastStopped = function () {
     return;
   }
   this._stopHeartbeat();
+  this._clearFastAnnounce();
   if (this.isConnected()) {
     this._sendProducerState('stopped');
     this._producer = null;
