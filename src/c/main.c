@@ -697,6 +697,12 @@ static char s_tracking_task_id[MAX_ID_LEN] = "";
 static time_t s_tracking_start_epoch = 0;
 static AppTimer *s_tracking_tick_timer = NULL;
 #define TRACKING_TICK_INTERVAL_MS 1000
+// Once elapsed reaches an hour, format_duration_ms/live_set_elapsed drop to
+// "Xh MMm" and stop showing live seconds - ticking every second past that
+// point just wakes the CPU (and repaints) for a value that's already on
+// screen. Battery lever for a long tracked session; see
+// tracking_tick_interval_ms.
+#define TRACKING_TICK_SLOW_MS 30000
 
 #ifndef PBL_PLATFORM_APLITE
 // "Task ran over its estimate" banner - a red strip across the top of the list,
@@ -4023,6 +4029,32 @@ static void cancel_unpin_timer(void) {
 }
 #endif
 
+// The epoch the current live session is measured from: local tracking's own
+// start, or (non-aplite) another device's presence session start. No active
+// session falls through to "now" - the loop is about to stop anyway, so the
+// interval this yields is moot.
+static time_t current_tracking_anchor_epoch(void) {
+  if (s_tracking_task_id[0] != '\0') {
+    return s_tracking_start_epoch;
+  }
+#ifndef PBL_PLATFORM_APLITE
+  if (s_presence_state != 0) {
+    return s_presence_elapsed_base;
+  }
+#endif
+  return time(NULL);
+}
+
+// See TRACKING_TICK_SLOW_MS. Keyed off THIS session's own elapsed time, not
+// the task's total spent+session (which would need a Task lookup at every
+// call site) - a task that already had 55 minutes logged still ticks fast
+// for its first hour here, which only under-optimizes, never shows a stale
+// number.
+static uint32_t tracking_tick_interval_ms(void) {
+  return (time(NULL) - current_tracking_anchor_epoch()) >= 3600
+      ? TRACKING_TICK_SLOW_MS : TRACKING_TICK_INTERVAL_MS;
+}
+
 static void tracking_tick_callback(void *data) {
   // Only the elapsed-time text changes each tick - mark_dirty (repaint), not
   // reload_data (which also re-asks for section/row counts).
@@ -4033,12 +4065,12 @@ static void tracking_tick_callback(void *data) {
 #ifdef BREAK_REMINDER
   maybe_notify_break();
 #endif
-  s_tracking_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, tracking_tick_callback, NULL);
+  s_tracking_tick_timer = app_timer_register(tracking_tick_interval_ms(), tracking_tick_callback, NULL);
 }
 
 static void start_tracking_tick(void) {
   if (!s_tracking_tick_timer) {
-    s_tracking_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, tracking_tick_callback, NULL);
+    s_tracking_tick_timer = app_timer_register(tracking_tick_interval_ms(), tracking_tick_callback, NULL);
   }
 }
 
@@ -7281,6 +7313,20 @@ static bool touch_is_left_swipe(int dx, int dy) {
   return dx <= -TOUCH_SWIPE_PX && ady * 2 <= adx;
 }
 
+// Right-swipe test (mirror of the above) - used only on the live tracking
+// window, where the system bridge's own swipe-right-Back doesn't reach
+// (confirmed on hardware). Everywhere else the bridge already handles it, and
+// a handler of our own there double-popped (see the touch-nav memory) - this
+// stays scoped to s_live_window specifically to avoid repeating that.
+static bool touch_is_right_swipe(int dx, int dy) {
+  int adx = dx < 0 ? -dx : dx;
+  int ady = dy < 0 ? -dy : dy;
+  return dx >= TOUCH_SWIPE_PX && ady * 2 <= adx;
+}
+
+// Defined with the rest of the live window, further down the file.
+static void live_window_back_click_handler(ClickRecognizerRef recognizer, void *context);
+
 static void touch_handler(const TouchEvent *event, void *context) {
   switch (event->type) {
   case TouchEvent_Touchdown:
@@ -7343,8 +7389,14 @@ static void touch_handler(const TouchEvent *event, void *context) {
       s_tap_moved_sel = true;
       begin_pending_reschedule(RESCHEDULE_TOMORROW);
     }
-    // Right-swipe Back is the system bridge's job - a handler of our own here
-    // double-popped straight out of the app (see the touch-nav memory).
+    // Right-swipe Back is the system bridge's job everywhere else - a handler
+    // of our own double-popped elsewhere (see the touch-nav memory). The live
+    // tracking window is the one place the bridge's swipe-back doesn't reach
+    // (confirmed on hardware), so it alone gets a swipe-right of our own.
+    if (touch_is_right_swipe(dx, dy) && window_stack_get_top_window() == s_live_window) {
+      s_touch_swipe_fired = true;
+      live_window_back_click_handler(NULL, NULL);
+    }
     break;
   }
 
@@ -7367,6 +7419,9 @@ static void touch_handler(const TouchEvent *event, void *context) {
         begin_pending_reschedule(RESCHEDULE_TOMORROW);
         s_touch_swipe_fired = true;
         s_tap_moved_sel = true;
+      } else if (touch_is_right_swipe(dx, dy) && window_stack_get_top_window() == s_live_window) {
+        live_window_back_click_handler(NULL, NULL);
+        s_touch_swipe_fired = true;
       }
     }
     // Re-arm the tap guard so a SELECT the bridge emits just after the release
@@ -9287,7 +9342,11 @@ static void live_window_refresh(void) {
       text_layer_set_text(s_live_hint_layer, "Select=stop  hold=focus");
     }
     if (!s_live_tick_timer) {
-      s_live_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, live_tick_callback, NULL);
+      // Focus mode's Flowtime/Countdown branches above always show live
+      // seconds (even past an hour, unlike the plain "Tracking" branch's
+      // live_set_elapsed) - so only the plain branch gets to slow down.
+      uint32_t interval = focus_active() ? TRACKING_TICK_INTERVAL_MS : tracking_tick_interval_ms();
+      s_live_tick_timer = app_timer_register(interval, live_tick_callback, NULL);
     }
     return;
   }
@@ -9314,7 +9373,7 @@ static void live_window_refresh(void) {
     live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), s_presence_spent_ms, s_presence_estimate_ms,
                      session_s);
     if (!s_live_tick_timer) {
-      s_live_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, live_tick_callback, NULL);
+      s_live_tick_timer = app_timer_register(tracking_tick_interval_ms(), live_tick_callback, NULL);
     }
   } else {
     layer_set_hidden(text_layer_get_layer(s_live_elapsed_layer), true);
