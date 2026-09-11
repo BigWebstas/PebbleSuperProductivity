@@ -1458,6 +1458,31 @@ check('[SimpleCounter] Set SimpleCounter Counter Today replaces (not adds to) to
   assert.strictEqual(state.simpleCounter.h1.countOnDay[today], 1);
 });
 
+check('[Simple Counter] Set SimpleCounter Counter For Date (the space-prefixed literal the habit grid dispatches) applies', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Pushups', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: {} }),
+      counterEntry('[Simple Counter] Set SimpleCounter Counter For Date', { id: 'h1', newVal: 1, date: today }),
+    ],
+    state
+  );
+  assert.strictEqual(state.simpleCounter.h1.countOnDay[today], 1);
+  assert.strictEqual(habits(state)[0].done, true);
+});
+
+check('[SimpleCounter] Set SimpleCounter Counter For Date (no-space variant) still applies', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addCounter({ id: 'h1', title: 'Pushups', isEnabled: true, type: 'ClickCounter', streakMinValue: 1, countOnDay: {} }),
+      counterEntry('[SimpleCounter] Set SimpleCounter Counter For Date', { id: 'h1', newVal: 2, date: today }),
+    ],
+    state
+  );
+  assert.strictEqual(state.simpleCounter.h1.countOnDay[today], 2);
+});
+
 check('[SimpleCounter] Sync counter time applies additively to countOnDay', () => {
   const state = store.emptyState();
   store.applyOperations(
