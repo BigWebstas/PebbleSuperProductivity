@@ -9417,7 +9417,7 @@ static void live_window_load(Window *window) {
 
   s_live_hint_layer = make_text_layer(window_layer, GRect(x, bottom - 20, w, 18),
                                       FONT_KEY_GOTHIC_14, GTextAlignmentCenter);
-  text_layer_set_text_color(s_live_hint_layer, GColorDarkGray);
+  text_layer_set_text_color(s_live_hint_layer, GColorBlack);
 
   window_set_click_config_provider(window, live_window_click_config_provider);
   live_window_refresh();
