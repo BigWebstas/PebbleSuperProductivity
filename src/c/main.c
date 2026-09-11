@@ -9170,7 +9170,21 @@ static void live_window_refresh(void) {
   text_layer_set_text(s_live_task_layer, s_presence_task);
 
   if (s_presence_state == 1) {
-    live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), s_presence_spent_ms, s_presence_estimate_ms,
+    // Deliberately NOT s_presence_spent_ms/s_presence_estimate_ms here (unlike
+    // the local-tracking branch above) - matches the pinned row's own remote
+    // display (menu_draw_row's remote_in_pinned_section() branch), which never
+    // showed an estimate either. s_presence_spent_ms is the phone's task.timeSpent
+    // as of whenever it last pushed presence, and the desktop periodically
+    // flushes THIS session's own progress into that same field while it's still
+    // running - so it's not a stable "as of session start" baseline, and adding
+    // the full elapsed-since-start on top of it double-counts whatever portion
+    // already overlapped. The freeze-on-first-push fix tried in index.js
+    // (presenceSessionSpentBaselineMs) didn't close this: this watch's own
+    // first-observed-push isn't necessarily the session's true start either (a
+    // pkjs restart or a delayed live-tracking connect sees an already-running
+    // session and freezes an already-inflated number). Showing just the running
+    // clock, like the pinned row does, has no such timing dependency.
+    live_set_elapsed(elapsed_buf, sizeof(elapsed_buf), 0, 0,
                      (int)(time(NULL) - s_presence_elapsed_base));
     if (!s_live_tick_timer) {
       s_live_tick_timer = app_timer_register(TRACKING_TICK_INTERVAL_MS, live_tick_callback, NULL);
