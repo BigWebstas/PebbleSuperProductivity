@@ -181,7 +181,7 @@ var SCHEMA_VERSION = 4;
 
 // Shown at the foot of the settings page. Bump alongside package.json and
 // main.c's APP_VERSION when cutting a release.
-var APP_VERSION = '0.6.50';
+var APP_VERSION = '0.6.51';
 
 // Opening the watchapp (Pebble's 'ready' event - see the bottom of this
 // file) used to always trigger a full doSync() no matter how recently one
