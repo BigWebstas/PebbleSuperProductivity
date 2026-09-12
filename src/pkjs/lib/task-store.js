@@ -2354,6 +2354,73 @@ function computeUpcoming(state, limit) {
   return out.slice(0, limit || 40);
 }
 
+// Calendar month view (watch, opt-in, emery-only): which day-of-month numbers
+// (1-31) have at least one non-done task due, for year/month0 (0-11). Real
+// dueDay/dueWithTime tasks only - no repeat-cfg projection like
+// computeUpcoming's, so a browsed past or future month's dots mean "an actual
+// task landed here", not a projected occurrence. Returns a bitmask, bit
+// (day-1) set.
+function computeCalendarMonthMask(state, year, month0) {
+  var tasks = (state && state.task) || {};
+  var prefix = year + '-' + (month0 + 1 < 10 ? '0' : '') + (month0 + 1);
+  var mask = 0;
+  Object.keys(tasks).forEach(function (id) {
+    var t = tasks[id];
+    if (!t || t.isDone || !isMainTask(t)) {
+      return;
+    }
+    var day = null;
+    if (typeof t.dueWithTime === 'number' && isFinite(t.dueWithTime)) {
+      day = dateToDateStr(new Date(t.dueWithTime));
+    } else if (t.dueDay) {
+      day = String(t.dueDay);
+    }
+    if (!day || day.slice(0, 7) !== prefix) {
+      return;
+    }
+    var dom = parseInt(day.slice(8, 10), 10);
+    if (dom >= 1 && dom <= 31) {
+      mask |= (1 << (dom - 1));
+    }
+  });
+  return mask;
+}
+
+// Tasks due on exactly `dateStr` ("YYYY-MM-DD") - the calendar month view's
+// day drill-down. Same { title, project } shape as computeUpcoming's entries,
+// sorted by time of day (undated-but-due-today-only tasks sort last).
+function computeCalendarDay(state, dateStr) {
+  var tasks = (state && state.task) || {};
+  var projects = (state && state.project) || {};
+  var out = [];
+  Object.keys(tasks).forEach(function (id) {
+    var t = tasks[id];
+    if (!t || !t.title || t.isDone || !isMainTask(t)) {
+      return;
+    }
+    var day = null;
+    var timeMin = -1;
+    if (typeof t.dueWithTime === 'number' && isFinite(t.dueWithTime)) {
+      var d = new Date(t.dueWithTime);
+      day = dateToDateStr(d);
+      timeMin = d.getHours() * 60 + d.getMinutes();
+    } else if (t.dueDay) {
+      day = String(t.dueDay);
+    }
+    if (day !== dateStr) {
+      return;
+    }
+    var projTitle = t.projectId && projects[t.projectId] && projects[t.projectId].title;
+    out.push({ timeMin: timeMin, title: String(t.title), project: projTitle ? String(projTitle) : '' });
+  });
+  out.sort(function (a, b) {
+    var am = a.timeMin < 0 ? 24 * 60 : a.timeMin;
+    var bm = b.timeMin < 0 ? 24 * 60 : b.timeMin;
+    return am - bm;
+  });
+  return out;
+}
+
 // Today-pinned standalone notes (the `note` entity, isPinnedToToday), oldest
 // first by `created`. { title, body } - title is the first line, body the
 // rest. The watch shows these on its optional Notes page.
@@ -2433,6 +2500,8 @@ module.exports = {
   statsToMarkdown: statsToMarkdown,
   computeSearch: computeSearch,
   computeUpcoming: computeUpcoming,
+  computeCalendarMonthMask: computeCalendarMonthMask,
+  computeCalendarDay: computeCalendarDay,
   computeNotes: computeNotes,
   formatRepeatCfg: formatRepeatCfg,
   setStartOfNextDayFromState: setStartOfNextDayFromState,

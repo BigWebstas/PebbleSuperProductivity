@@ -41,6 +41,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var enableNotesPage = !!options.enableNotesPage;
   var enableSearch = !!options.enableSearch;
   var enableTags = options.enableTags === true; // default off, unlike the others
+  var enableCalendar = options.enableCalendar === true; // default off; emery-only watch UI
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
   var overtimeRepeat = !!options.overtimeRepeat;
@@ -297,6 +298,12 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  <p class="hint">Each tag with its open-task count. Off by default.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableCalendar" type="checkbox"' + (enableCalendar ? ' checked' : '') + '>\n' +
+'    <label for="enableCalendar">Calendar</label>\n' +
+'  </div>\n' +
+'  <p class="hint">Browse a month grid; select a day for its tasks. Emery only, off by default.</p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableReflect" type="checkbox"' + (enableReflect ? ' checked' : '') + '>\n' +
 '    <label for="enableReflect">Day review on Finish Day</label>\n' +
 '  </div>\n' +
@@ -516,6 +523,7 @@ backlightOptions + '\n' +
 '      enableSearch: document.getElementById(\'enableSearch\').checked,\n' +
 '      enableReflect: document.getElementById(\'enableReflect\').checked,\n' +
 '      enableTags: document.getElementById(\'enableTags\').checked,\n' +
+'      enableCalendar: document.getElementById(\'enableCalendar\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +
 '      overtimeRepeat: document.getElementById(\'overtimeRepeat\').checked,\n' +

@@ -97,6 +97,10 @@
 #define KEY_UPCOMING_ENABLED MESSAGE_KEY_UPCOMING_ENABLED
 #define KEY_LATER_TODAY_ENABLED MESSAGE_KEY_LATER_TODAY_ENABLED
 #define KEY_UPCOMING_TEXT MESSAGE_KEY_UPCOMING_TEXT
+#define KEY_CALENDAR_ENABLED MESSAGE_KEY_CALENDAR_ENABLED
+#define KEY_CAL_MONTH_OFFSET MESSAGE_KEY_CAL_MONTH_OFFSET
+#define KEY_CAL_MONTH_MASK MESSAGE_KEY_CAL_MONTH_MASK
+#define KEY_CALDAY_DATE MESSAGE_KEY_CALDAY_DATE
 #define KEY_NOTESPAGE_ENABLED MESSAGE_KEY_NOTESPAGE_ENABLED
 #define KEY_NOTESPAGE_TEXT MESSAGE_KEY_NOTESPAGE_TEXT
 #define KEY_SEARCH_ENABLED MESSAGE_KEY_SEARCH_ENABLED
@@ -227,6 +231,14 @@ enum {
   // on the page, same "append to the canonical note, or create one" shape as
   // MSG_NOTE_APPEND/MSG_PROJECT_NOTE_APPEND (see firstPinnedNote in index.js).
   MSG_NOTESPAGE_APPEND = 63,        // watch -> phone: NOTE_TEXT (dictated text)
+  // Calendar month view (browse-only) - a month grid on its own window, plus a
+  // single day's tasks reusing the shared page window (PAGE_CALENDAR_DAY). The
+  // watch computes its own month/weekday grid from its clock; the phone is
+  // only asked which days in the shown month have a due task.
+  MSG_CAL_MONTH_REQUEST = 64, // watch -> phone: CAL_MONTH_OFFSET (months from the real current month)
+  MSG_CAL_MONTH_DATA = 65,    // phone -> watch: CAL_MONTH_OFFSET (echoed - see handle_calendar_month_data) + CAL_MONTH_MASK
+  MSG_CALDAY_REQUEST = 66,    // watch -> phone: CALDAY_DATE ("YYYY-MM-DD")
+  MSG_CALDAY_DATA = 67,       // phone -> watch: UPCOMING_TEXT (reused - same shared-page-window shape)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -934,8 +946,18 @@ static bool s_notespage_enabled = false;
 // MSG_SEARCH_REQUEST -> MSG_SEARCH_DATA blob (one "\x02" header + "title  ·
 // project" lines), rendered by upcoming_content_update_proc.
 static bool s_search_enabled = false;
+#ifdef PBL_PLATFORM_EMERY
+// Calendar month view (config.enableCalendar, default off) - browse-only, own
+// window with a month grid; selecting a day reuses this same shared page
+// window in PAGE_CALENDAR_DAY, same UPCOMING_TEXT blob shape as PAGE_UPCOMING.
+// Emery-only - see the window's own comment.
+static bool s_calendar_enabled = false;
+#endif
 static char s_search_query[48] = "";
-typedef enum { PAGE_UPCOMING, PAGE_NOTES, PAGE_SEARCH } PageMode;
+// The date (YYYY-MM-DD) PAGE_CALENDAR_DAY last asked for - set by the
+// calendar month view before push_page_window(PAGE_CALENDAR_DAY).
+static char s_calday_date[11] = "";
+typedef enum { PAGE_UPCOMING, PAGE_NOTES, PAGE_SEARCH, PAGE_CALENDAR_DAY } PageMode;
 static PageMode s_page_mode = PAGE_UPCOMING;
 // Heap-backed, alive only while the shared page window is open (see
 // s_stats_projects for the same pattern / rationale). NULL when closed.
@@ -1788,7 +1810,13 @@ static void push_schedule_window(void);
 static void schedule_refresh_if_open(void);
 static void push_page_window(PageMode mode);
 static void upcoming_render(void);
+#ifdef PBL_PLATFORM_EMERY
+static void push_calendar_window(void);
+#endif
 static void handle_repeat_data(DictionaryIterator *it);
+#ifdef PBL_PLATFORM_EMERY
+static void handle_calendar_month_data(DictionaryIterator *it);
+#endif
 #endif
 #if PROJECTS_BROWSER
 static void push_browse_window(const char *jump_to_project);
@@ -1895,6 +1923,7 @@ typedef enum {
   SECTION0_ROW_TAGS,     // tags page, right after Projects, opt-in / default off (non-aplite)
   SECTION0_ROW_STATS,    // stats page, between Projects and Add Task (non-aplite)
   SECTION0_ROW_SCHEDULE, // schedule page, between Stats and Add Task (non-aplite)
+  SECTION0_ROW_CALENDAR, // calendar month view, right after Schedule, opt-in / default off (non-aplite)
   SECTION0_ROW_UPCOMING, // upcoming page, between Schedule and Add Task (non-aplite)
   SECTION0_ROW_NOTESPAGE, // notes page, right after Upcoming, opt-in / default off (non-aplite)
   SECTION0_ROW_SEARCH,    // voice search, right after Notes, opt-in / default off (non-aplite, mic)
@@ -1954,6 +1983,14 @@ typedef enum {
 #define SEARCH_ROW_ACTIVE() (PBL_IF_MICROPHONE_ELSE(s_search_enabled, false))
 #endif
 
+// Whether the "Calendar" row sits in section 0 - emery-only (see the month
+// view's own comment for why), unlike every other date-browsing row above.
+#ifdef PBL_PLATFORM_EMERY
+#define CALENDAR_ROW_ACTIVE() (s_calendar_enabled)
+#else
+#define CALENDAR_ROW_ACTIVE() false
+#endif
+
 // A remote presence session shows in the pinned "TRACKING" section
 // (remote_in_pinned_section) whenever nothing is tracked locally. There used
 // to be a separate dark-blue "LIVE" row at the top of section 0 as well; it
@@ -1977,6 +2014,9 @@ static int section0_row_count(void) {
     count++;
   }
   if (SCHEDULE_ROW_ACTIVE()) {
+    count++;
+  }
+  if (CALENDAR_ROW_ACTIVE()) {
     count++;
   }
   if (UPCOMING_ROW_ACTIVE()) {
@@ -2029,6 +2069,12 @@ static Section0RowKind section0_row_kind(int row) {
   if (SCHEDULE_ROW_ACTIVE()) {
     if (row == next) {
       return SECTION0_ROW_SCHEDULE;
+    }
+    next++;
+  }
+  if (CALENDAR_ROW_ACTIVE()) {
+    if (row == next) {
+      return SECTION0_ROW_CALENDAR;
     }
     next++;
   }
@@ -3261,6 +3307,30 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     }
 #endif
 
+#ifdef PBL_PLATFORM_EMERY
+    if (kind == SECTION0_ROW_CALENDAR) {
+      // Opens the Calendar month view (browse-only). Blue Moon, its own colour.
+      // A hand-drawn page-a-day glyph: an outlined square with a header line
+      // and two ring ticks, on the right.
+      GColor icon = is_selected ? GColorWhite : GColorBlack;
+      fill_bg(ctx, bounds, GColorBlueMoon);
+      graphics_context_set_text_color(ctx, icon);
+      GRect cal_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
+                                   bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
+      draw_text(ctx, "Calendar", HEADING_FONT_KEY, cal_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      GRect cal_ic = GRect(bounds.size.w - ROW_ICON_SIZE - 6, bounds.size.h / 2 - 7, 15, 14);
+      graphics_context_set_stroke_color(ctx, icon);
+      graphics_draw_rect(ctx, cal_ic);
+      graphics_draw_line(ctx, GPoint(cal_ic.origin.x, cal_ic.origin.y + 4),
+                         GPoint(cal_ic.origin.x + cal_ic.size.w - 1, cal_ic.origin.y + 4));
+      graphics_draw_line(ctx, GPoint(cal_ic.origin.x + 4, cal_ic.origin.y - 2),
+                         GPoint(cal_ic.origin.x + 4, cal_ic.origin.y + 1));
+      graphics_draw_line(ctx, GPoint(cal_ic.origin.x + 11, cal_ic.origin.y - 2),
+                         GPoint(cal_ic.origin.x + 11, cal_ic.origin.y + 1));
+      return;
+    }
+#endif
+
 #ifndef PBL_PLATFORM_APLITE
     if (kind == SECTION0_ROW_UPCOMING) {
       // Opens the Upcoming page - future-dated tasks by day. Indigo, its own
@@ -3604,6 +3674,12 @@ static void send_pending_retry(void) {
       break;
     case MSG_NOTESPAGE_APPEND:
       dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str);
+      break;
+    case MSG_CAL_MONTH_REQUEST:
+      dict_write_int32(iter, KEY_CAL_MONTH_OFFSET, s_retry_int);
+      break;
+    case MSG_CALDAY_REQUEST:
+      dict_write_cstring(iter, KEY_CALDAY_DATE, s_retry_str);
       break;
     case MSG_HABIT_TRACK_STOP:
       dict_write_cstring(iter, KEY_HABIT_ID, s_retry_str);
@@ -4452,6 +4528,10 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
       push_stats_window();
     } else if (kind == SECTION0_ROW_SCHEDULE) {
       push_schedule_window();
+#ifdef PBL_PLATFORM_EMERY
+    } else if (kind == SECTION0_ROW_CALENDAR) {
+      push_calendar_window();
+#endif
     } else if (kind == SECTION0_ROW_UPCOMING) {
       push_page_window(PAGE_UPCOMING);
     } else if (kind == SECTION0_ROW_NOTESPAGE) {
@@ -5670,6 +5750,20 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       break;
     }
+    case MSG_CALDAY_DATA: {
+      if (s_upcoming_text && s_page_mode == PAGE_CALENDAR_DAY) {
+        str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), PAGE_TEXT_CAP);
+        s_upcoming_have_data = true;
+        upcoming_render(); // no headers to wipe here, so no header_begin_reveal
+      }
+      break;
+    }
+#ifdef PBL_PLATFORM_EMERY
+    case MSG_CAL_MONTH_DATA: {
+      handle_calendar_month_data(iterator);
+      break;
+    }
+#endif
     case MSG_TASK_REPEAT_DATA: {
       handle_repeat_data(iterator);
       break;
@@ -5702,6 +5796,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 #ifndef PBL_PLATFORM_APLITE
       s_stats_enabled = tuple_int(iterator, KEY_STATS_ENABLED, s_stats_enabled) != 0;
       s_schedule_enabled = tuple_int(iterator, KEY_SCHEDULE_ENABLED, s_schedule_enabled) != 0;
+#ifdef PBL_PLATFORM_EMERY
+      s_calendar_enabled = tuple_int(iterator, KEY_CALENDAR_ENABLED, s_calendar_enabled) != 0;
+#endif
       s_upcoming_enabled = tuple_int(iterator, KEY_UPCOMING_ENABLED, s_upcoming_enabled) != 0;
       s_notespage_enabled = tuple_int(iterator, KEY_NOTESPAGE_ENABLED, s_notespage_enabled) != 0;
       s_search_enabled = tuple_int(iterator, KEY_SEARCH_ENABLED, s_search_enabled) != 0;
@@ -9158,6 +9255,10 @@ static void request_upcoming(void) {
     begin_send(MSG_SEARCH_REQUEST, s_search_query, NULL, 0);
     return;
   }
+  if (s_page_mode == PAGE_CALENDAR_DAY) {
+    begin_send(MSG_CALDAY_REQUEST, s_calday_date, NULL, 0);
+    return;
+  }
   begin_send(s_page_mode == PAGE_NOTES ? MSG_NOTESPAGE_REQUEST : MSG_UPCOMING_REQUEST, NULL, NULL, 0);
 }
 
@@ -9228,6 +9329,249 @@ static void push_page_window(PageMode mode) {
   }
   window_stack_push(s_upcoming_window, true);
   request_upcoming();
+}
+#endif
+
+// ---------- calendar month view (browse-only) ----------
+// A month grid: Up/Down move the day cursor, long-Up/long-Down change month,
+// Select opens that day's tasks in the shared page window (PAGE_CALENDAR_DAY).
+// Pure watch-side month/weekday-grid math (day_of_week et al below) - the
+// phone is only asked which days in the shown month have a due task
+// (CAL_MONTH_MASK). config.enableCalendar, default off. Emery-only - the full
+// grid window pushed basalt/chalk/diorite's APP region 784B past its ceiling
+// (see emery-code-space-ceiling in memory), so unlike the rest of the
+// date-browsing pages this one doesn't fit non-emery.
+#ifdef PBL_PLATFORM_EMERY
+static Window *s_calendar_window = NULL;
+static Layer *s_calendar_layer = NULL;
+static StatusBarLayer *s_calendar_status_bar = NULL;
+static int s_cal_month_offset = 0;    // months from the real current month
+static int s_cal_selected_day = 1;    // 1-based cursor within the shown month
+static uint32_t s_cal_month_mask = 0; // bit (day-1) set = that day has a due task
+static bool s_cal_have_data = false;
+
+static const char *const CAL_MONTH_NAMES[12] = {
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+};
+
+// Sakamoto's algorithm - day of week (0 = Sunday) for Gregorian y-m-d, m 1-12.
+// Self-contained so the month grid doesn't need mktime's normalization.
+static int day_of_week(int y, int m, int d) {
+  static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+  if (m < 3) {
+    y -= 1;
+  }
+  return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+
+static bool cal_is_leap_year(int y) {
+  return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+}
+
+static int cal_days_in_month(int y, int m0) { // m0: 0-11
+  static const int d[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  return (m0 == 1 && cal_is_leap_year(y)) ? 29 : d[m0];
+}
+
+// The calendar's shown year/month: real current month + s_cal_month_offset,
+// normalized so a run of long-Up/long-Down still lands on a valid month.
+static void calendar_shown_month(int *year_out, int *month0_out) {
+  time_t now = time(NULL);
+  struct tm *lt = localtime(&now);
+  int year = lt->tm_year + 1900;
+  int month0 = lt->tm_mon + s_cal_month_offset;
+  year += month0 / 12;
+  month0 %= 12;
+  if (month0 < 0) {
+    month0 += 12;
+    year -= 1;
+  }
+  *year_out = year;
+  *month0_out = month0;
+}
+
+static void request_calendar_month(void) {
+  s_cal_have_data = false;
+  begin_send(MSG_CAL_MONTH_REQUEST, NULL, NULL, s_cal_month_offset);
+}
+
+#define CAL_LABEL_H 26
+#define CAL_DOW_H 18
+
+static void calendar_content_update_proc(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  int16_t w = b.size.w;
+  int16_t h = b.size.h;
+  fill_bg(ctx, b, GColorWhite);
+
+  int year, month0;
+  calendar_shown_month(&year, &month0);
+  int days = cal_days_in_month(year, month0);
+  int first_dow = day_of_week(year, month0 + 1, 1);
+
+  char label[24];
+  snprintf(label, sizeof(label), "%s %d", CAL_MONTH_NAMES[month0], year);
+  graphics_context_set_text_color(ctx, GColorBlack);
+  draw_text(ctx, label, HEADING_FONT_KEY, GRect(0, 2, w, CAL_LABEL_H - 2),
+            GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+
+  static const char *const DOW_LABELS[7] = {"S", "M", "T", "W", "T", "F", "S"};
+  int16_t col_w = w / 7;
+  graphics_context_set_text_color(ctx, GColorDarkGray);
+  for (int c = 0; c < 7; c++) {
+    draw_text(ctx, DOW_LABELS[c], CHROME_FONT_KEY,
+              GRect(c * col_w, CAL_LABEL_H, col_w, CAL_DOW_H),
+              GTextOverflowModeFill, GTextAlignmentCenter);
+  }
+
+  int16_t grid_y = CAL_LABEL_H + CAL_DOW_H;
+  int16_t grid_h = h - grid_y;
+  int16_t row_h = grid_h / 6;
+
+  bool is_current_month = (s_cal_month_offset == 0); // "today" only means something then
+  time_t now = time(NULL);
+  int today_mday = localtime(&now)->tm_mday;
+
+  for (int day = 1; day <= days; day++) {
+    int idx = first_dow + day - 1;
+    int row = idx / 7;
+    int col = idx % 7;
+    GRect cell = GRect(col * col_w, grid_y + row * row_h, col_w, row_h);
+
+    if (is_current_month && day == today_mday) {
+      graphics_context_set_fill_color(ctx, GColorLightGray);
+      graphics_fill_rect(ctx, GRect(cell.origin.x + 2, cell.origin.y + 2,
+                                    cell.size.w - 4, cell.size.h - 4), 2, GCornersAll);
+    }
+    if (day == s_cal_selected_day) {
+      graphics_context_set_stroke_color(ctx, GColorBlack);
+      graphics_draw_rect(ctx, GRect(cell.origin.x + 1, cell.origin.y + 1,
+                                    cell.size.w - 2, cell.size.h - 2));
+    }
+
+    char dbuf[3];
+    snprintf(dbuf, sizeof(dbuf), "%d", day);
+    graphics_context_set_text_color(ctx, GColorBlack);
+    draw_text(ctx, dbuf, CHROME_FONT_KEY,
+              GRect(cell.origin.x, cell.origin.y + 2, cell.size.w, cell.size.h - 6),
+              GTextOverflowModeFill, GTextAlignmentCenter);
+
+    if (s_cal_month_mask & (1UL << (day - 1))) {
+      graphics_context_set_fill_color(ctx, GColorBlueMoon);
+      graphics_fill_circle(ctx, GPoint(cell.origin.x + cell.size.w / 2,
+                                       cell.origin.y + cell.size.h - 4), 2);
+    }
+  }
+
+  if (!s_cal_have_data) {
+    graphics_context_set_text_color(ctx, GColorDarkGray);
+    draw_text(ctx, "Loading…", CHROME_FONT_KEY, GRect(0, h - 18, w, 16),
+              GTextOverflowModeFill, GTextAlignmentCenter);
+  }
+}
+
+static void calendar_render(void) {
+  if (s_calendar_layer) {
+    layer_mark_dirty(s_calendar_layer);
+  }
+}
+
+static void calendar_open_selected_day(void) {
+  int year, month0;
+  calendar_shown_month(&year, &month0);
+  snprintf(s_calday_date, sizeof(s_calday_date), "%04d-%02d-%02d", year, month0 + 1, s_cal_selected_day);
+  push_page_window(PAGE_CALENDAR_DAY);
+}
+
+static void calendar_day_prev_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_cal_selected_day > 1) {
+    s_cal_selected_day--;
+    calendar_render();
+  }
+}
+
+static void calendar_day_next_handler(ClickRecognizerRef recognizer, void *context) {
+  int year, month0;
+  calendar_shown_month(&year, &month0);
+  if (s_cal_selected_day < cal_days_in_month(year, month0)) {
+    s_cal_selected_day++;
+    calendar_render();
+  }
+}
+
+static void calendar_month_prev_handler(ClickRecognizerRef recognizer, void *context) {
+  s_cal_month_offset--;
+  s_cal_selected_day = 1;
+  calendar_render();
+  request_calendar_month();
+}
+
+static void calendar_month_next_handler(ClickRecognizerRef recognizer, void *context) {
+  s_cal_month_offset++;
+  s_cal_selected_day = 1;
+  calendar_render();
+  request_calendar_month();
+}
+
+static void calendar_select_handler(ClickRecognizerRef recognizer, void *context) {
+  calendar_open_selected_day();
+}
+
+static void calendar_click_config_provider(void *context) {
+  window_single_click_subscribe(BUTTON_ID_UP, calendar_day_prev_handler);
+  window_single_click_subscribe(BUTTON_ID_DOWN, calendar_day_next_handler);
+  window_long_click_subscribe(BUTTON_ID_UP, 0, calendar_month_prev_handler, NULL);
+  window_long_click_subscribe(BUTTON_ID_DOWN, 0, calendar_month_next_handler, NULL);
+  window_single_click_subscribe(BUTTON_ID_SELECT, calendar_select_handler);
+}
+
+static void calendar_window_load(Window *window) {
+  Layer *window_layer;
+  GRect content_bounds = window_chrome(window, &s_calendar_status_bar, &window_layer);
+  s_calendar_layer = layer_create(content_bounds);
+  layer_set_update_proc(s_calendar_layer, calendar_content_update_proc);
+  layer_add_child(window_layer, s_calendar_layer);
+  window_set_click_config_provider(window, calendar_click_config_provider);
+
+  s_cal_month_offset = 0;
+  time_t now = time(NULL);
+  s_cal_selected_day = localtime(&now)->tm_mday;
+  s_cal_have_data = false;
+  s_cal_month_mask = 0;
+  request_calendar_month();
+}
+
+static void calendar_window_unload(Window *window) {
+  layer_destroy(s_calendar_layer);
+  s_calendar_layer = NULL;
+  status_bar_layer_destroy(s_calendar_status_bar);
+  s_calendar_status_bar = NULL;
+}
+
+static void push_calendar_window(void) {
+  if (!s_calendar_window) {
+    s_calendar_window = window_create();
+    window_set_window_handlers(s_calendar_window, (WindowHandlers) {
+      .load = calendar_window_load,
+      .unload = calendar_window_unload,
+    });
+  }
+  window_stack_push(s_calendar_window, true);
+}
+
+// Answers MSG_CAL_MONTH_DATA. The offset check drops a reply for a month
+// we've since navigated away from (a fast run of long-Up/long-Down can fire
+// several requests before the first reply lands).
+static void handle_calendar_month_data(DictionaryIterator *it) {
+  int offset = tuple_int(it, KEY_CAL_MONTH_OFFSET, s_cal_month_offset);
+  if (offset != s_cal_month_offset) {
+    return;
+  }
+  Tuple *mask_tuple = dict_find(it, KEY_CAL_MONTH_MASK);
+  s_cal_month_mask = mask_tuple ? (uint32_t)mask_tuple->value->int32 : 0;
+  s_cal_have_data = true;
+  calendar_render();
 }
 #endif
 

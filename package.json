@@ -195,7 +195,11 @@
       "SEARCH_ENABLED",
       "TASK_ISSUE_SRC",
       "TASK_IS_SUBTASK",
-      "LATER_TODAY_ENABLED"
+      "LATER_TODAY_ENABLED",
+      "CALENDAR_ENABLED",
+      "CAL_MONTH_OFFSET",
+      "CAL_MONTH_MASK",
+      "CALDAY_DATE"
     ]
   }
 }

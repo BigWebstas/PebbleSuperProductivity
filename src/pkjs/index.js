@@ -114,6 +114,13 @@ var MSG_SEARCH_DATA = 62;          // phone -> watch: UPCOMING_TEXT
 // "append to the oldest, or create one" convention as the project notes
 // overlay's MSG_PROJECT_NOTE_APPEND (see firstNoteForProject's comment).
 var MSG_NOTESPAGE_APPEND = 63;     // watch -> phone: NOTE_TEXT (dictated text)
+// Calendar month view (browse-only, emery-only watch UI). The watch computes
+// its own month/weekday grid from its clock; the phone is only asked which
+// days in that month have a due task, and for a single day's task list.
+var MSG_CAL_MONTH_REQUEST = 64;    // watch -> phone: CAL_MONTH_OFFSET
+var MSG_CAL_MONTH_DATA = 65;       // phone -> watch: CAL_MONTH_OFFSET (echoed) + CAL_MONTH_MASK
+var MSG_CALDAY_REQUEST = 66;       // watch -> phone: CALDAY_DATE ("YYYY-MM-DD")
+var MSG_CALDAY_DATA = 67;          // phone -> watch: UPCOMING_TEXT (reused)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -471,6 +478,10 @@ function sendStatus(code, message) {
     // drill in for that tag's tasks. Reuses the projects-browser plumbing with
     // an IS_TAGS flag on the list / tasks requests.
     TAGS_ENABLED: config.enableTags === true ? 1 : 0,
+    // Calendar month view row - default OFF, emery-only watch UI (see
+    // main.c's CALENDAR_ROW_ACTIVE comment). Drives s_calendar_enabled /
+    // SECTION0_ROW_CALENDAR.
+    CALENDAR_ENABLED: config.enableCalendar === true ? 1 : 0,
     // "Yesterday's stats" toggle - long Up/Down on the Stats page flips it to
     // yesterday's worked time / completed count. Default off (main.c).
     YESTERDAY_STATS_ENABLED: config.yesterdayStats ? 1 : 0,
@@ -1058,6 +1069,76 @@ function handleUpcomingRequest() {
     UPCOMING_TEXT: text,
   }, function () {}, function (e) {
     console.log('[pkjs] giving up on UPCOMING_DATA after retries: ' + JSON.stringify(e));
+  });
+}
+
+// Answers MSG_CAL_MONTH_REQUEST: which day-of-month numbers in the requested
+// month (the phone's own real current month + offset, same arithmetic the
+// watch does independently off its own clock - see calendar_shown_month in
+// main.c) have a due task. CAL_MONTH_OFFSET is echoed back so a fast run of
+// long-Up/long-Down on the watch can drop a stale reply.
+function handleCalMonthRequest(offset) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (!config.enableCalendar) {
+    return;
+  }
+  var now = new Date();
+  var month0 = now.getMonth() + (offset | 0);
+  var year = now.getFullYear() + Math.floor(month0 / 12);
+  month0 = ((month0 % 12) + 12) % 12;
+  var calState = loadState();
+  var mask = store.computeCalendarMonthMask(calState, year, month0);
+  sendWithRetry({
+    MSG_TYPE: MSG_CAL_MONTH_DATA,
+    CAL_MONTH_OFFSET: offset | 0,
+    CAL_MONTH_MASK: mask,
+  }, function () {}, function (e) {
+    console.log('[pkjs] giving up on CAL_MONTH_DATA after retries: ' + JSON.stringify(e));
+  });
+}
+
+// Answers MSG_CALDAY_REQUEST: every task due on the given "YYYY-MM-DD",
+// rendered the same way as one of handleUpcomingRequest's day groups (one
+// "\x02" header line naming the date, then a line per task), in the shared
+// page window (PAGE_CALENDAR_DAY reuses UPCOMING_TEXT).
+function handleCalDayRequest(dateStr) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  if (!config.enableCalendar || !dateStr) {
+    return;
+  }
+  var dayState = loadState();
+  var items = store.computeCalendarDay(dayState, String(dateStr));
+  var clean = function (s, n) {
+    return String(s).replace(/[\t\n\x02]/g, ' ').slice(0, n);
+  };
+  var lines = ['\x02' + formatUpcomingDay(dateStr)];
+  items.forEach(function (it) {
+    var line = clean(it.title, 40);
+    if (it.timeMin >= 0) {
+      line = formatUpcomingTime(it.timeMin) + '  ' + line;
+    }
+    if (it.project) {
+      line += '  · ' + clean(it.project, 20);
+    }
+    lines.push(line);
+  });
+  var text = lines.join('\n');
+  if (text.length > 600) {
+    text = text.slice(0, 600);
+  }
+  sendWithRetry({
+    MSG_TYPE: MSG_CALDAY_DATA,
+    UPCOMING_TEXT: text,
+  }, function () {}, function (e) {
+    console.log('[pkjs] giving up on CALDAY_DATA after retries: ' + JSON.stringify(e));
   });
 }
 
@@ -3715,6 +3796,12 @@ Pebble.addEventListener('appmessage', function (e) {
     case MSG_NOTESPAGE_APPEND:
       handleNotesPageAppend(payload.NOTE_TEXT);
       break;
+    case MSG_CAL_MONTH_REQUEST:
+      handleCalMonthRequest(payload.CAL_MONTH_OFFSET | 0);
+      break;
+    case MSG_CALDAY_REQUEST:
+      handleCalDayRequest(payload.CALDAY_DATE);
+      break;
     case MSG_TASK_REPEAT_REQUEST:
       handleTaskRepeatRequest(payload.TASK_ID);
       break;
@@ -3783,6 +3870,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableNotesPage: !!config.enableNotesPage,
       enableSearch: !!config.enableSearch,
       enableTags: config.enableTags === true,
+      enableCalendar: config.enableCalendar === true,
       yesterdayStats: !!config.yesterdayStats,
       backlightMode: config.backlightMode || 0,
       touchNav: !!config.touchNav,
@@ -3890,6 +3978,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableNotesPage: !!result.enableNotesPage,
     enableSearch: !!result.enableSearch,
     enableTags: !!result.enableTags,
+    enableCalendar: !!result.enableCalendar,
     yesterdayStats: !!result.yesterdayStats,
     backlightMode: parseInt(result.backlightMode, 10) || 0,
     touchNav: !!result.touchNav,
