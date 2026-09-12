@@ -288,7 +288,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '    <input id="enableNotesPage" type="checkbox"' + (enableNotesPage ? ' checked' : '') + '>\n' +
 '    <label for="enableNotesPage">Notes</label>\n' +
 '  </div>\n' +
-'  <p class="hint">Today-pinned notes, read-only.</p>\n' +
+'  <p class="hint">Today-pinned notes. Long-Select dictates an append.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableTags" type="checkbox"' + (enableTags ? ' checked' : '') + '>\n' +

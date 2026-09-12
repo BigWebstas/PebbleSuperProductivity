@@ -223,6 +223,10 @@ enum {
   // page window (PAGE_SEARCH).
   MSG_SEARCH_REQUEST = 61,          // watch -> phone: TASK_TITLE (the dictated query)
   MSG_SEARCH_DATA = 62,             // phone -> watch: UPCOMING_TEXT
+  // Watch-dictated append to the Notes page's pinned-to-today notes - long-Select
+  // on the page, same "append to the canonical note, or create one" shape as
+  // MSG_NOTE_APPEND/MSG_PROJECT_NOTE_APPEND (see firstPinnedNote in index.js).
+  MSG_NOTESPAGE_APPEND = 63,        // watch -> phone: NOTE_TEXT (dictated text)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -577,7 +581,7 @@ static AppTimer *s_notes_load_timeout_timer = NULL;
 #define NOTES_LOAD_TIMEOUT_MS 20000
 // Routes a dictation_status_callback: Add Task, a note-append, or a Reflect
 // "improvement" entry - all share the single s_dictation_session/pending pair.
-typedef enum { DICT_ADD_TASK, DICT_NOTE_APPEND, DICT_REFLECT, DICT_SEARCH } DictationTarget;
+typedef enum { DICT_ADD_TASK, DICT_NOTE_APPEND, DICT_REFLECT, DICT_SEARCH, DICT_NOTESPAGE_APPEND } DictationTarget;
 static DictationTarget s_dictation_target = DICT_ADD_TASK;
 // Long-press Up (unschedule) and long-press Down / swipe-left (move to tomorrow)
 // each open a 5s cancel window on the selected task: the row's subtitle shows
@@ -3598,6 +3602,9 @@ static void send_pending_retry(void) {
     case MSG_SEARCH_REQUEST:
       dict_write_cstring(iter, KEY_TASK_TITLE, s_retry_str);
       break;
+    case MSG_NOTESPAGE_APPEND:
+      dict_write_cstring(iter, KEY_NOTE_TEXT, s_retry_str);
+      break;
     case MSG_HABIT_TRACK_STOP:
       dict_write_cstring(iter, KEY_HABIT_ID, s_retry_str);
       dict_write_int32(iter, KEY_TRACKED_MS, s_retry_int);
@@ -3844,6 +3851,8 @@ static void dictation_status_callback(DictationSession *session, DictationSessio
       if (s_reflect_menu) {
         menu_layer_reload_data(s_reflect_menu);
       }
+    } else if (s_dictation_target == DICT_NOTESPAGE_APPEND) {
+      begin_send(MSG_NOTESPAGE_APPEND, transcription, NULL, 0);
     } else {
       send_task_add(transcription);
 #ifdef PBL_PLATFORM_EMERY
@@ -3886,6 +3895,17 @@ static void start_note_append_dictation(void) {
     return;
   }
   s_dictation_target = DICT_NOTE_APPEND;
+  s_dictation_pending = true;
+  dictation_session_start(s_dictation_session);
+}
+
+// Long-Select on the Notes page - dictates text appended to (or creating) the
+// pinned-to-today note the page shows. Same guard/session as the above.
+static void start_notespage_append_dictation(void) {
+  if (s_dictation_pending || !s_dictation_session) {
+    return;
+  }
+  s_dictation_target = DICT_NOTESPAGE_APPEND;
   s_dictation_pending = true;
   dictation_session_start(s_dictation_session);
 }
@@ -9141,6 +9161,25 @@ static void request_upcoming(void) {
   begin_send(s_page_mode == PAGE_NOTES ? MSG_NOTESPAGE_REQUEST : MSG_UPCOMING_REQUEST, NULL, NULL, 0);
 }
 
+// Long-Select on the shared page window - only meaningful in PAGE_NOTES,
+// where it dictates an append (see start_notespage_append_dictation). Wraps
+// the scroll layer's own click config, same shape as stats_window_click_config_provider.
+static ClickConfigProvider s_page_ccp = NULL;
+
+static void page_notes_append_handler(ClickRecognizerRef recognizer, void *context) {
+  if (s_page_mode != PAGE_NOTES) {
+    return;
+  }
+  start_notespage_append_dictation();
+}
+
+static void page_window_click_config_provider(void *context) {
+  if (s_page_ccp) {
+    s_page_ccp(context);
+  }
+  window_long_click_subscribe(BUTTON_ID_SELECT, 0, page_notes_append_handler, NULL);
+}
+
 static void upcoming_window_load(Window *window) {
   Layer *window_layer;
   free(s_upcoming_text);
@@ -9153,6 +9192,9 @@ static void upcoming_window_load(Window *window) {
   s_upcoming_scroll_layer = scroll_layer_create(s_upcoming_content_bounds);
   scroll_layer_set_content_size(s_upcoming_scroll_layer, s_upcoming_content_bounds.size);
   scroll_layer_set_click_config_onto_window(s_upcoming_scroll_layer, window);
+  s_page_ccp = window_get_click_config_provider(window);
+  window_set_click_config_provider_with_context(window, page_window_click_config_provider,
+                                                window_get_click_config_context(window));
   s_upcoming_content_layer = layer_create(GRect(0, 0, s_upcoming_content_bounds.size.w,
                                                 s_upcoming_content_bounds.size.h));
   layer_set_update_proc(s_upcoming_content_layer, upcoming_content_update_proc);
@@ -9163,6 +9205,7 @@ static void upcoming_window_load(Window *window) {
 
 static void upcoming_window_unload(Window *window) {
   header_cancel_reveal();
+  s_page_ccp = NULL;
   layer_destroy(s_upcoming_content_layer);
   s_upcoming_content_layer = NULL;
   scroll_layer_destroy(s_upcoming_scroll_layer);

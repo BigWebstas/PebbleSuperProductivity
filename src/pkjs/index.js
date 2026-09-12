@@ -110,6 +110,10 @@ var MSG_POMODORO_CFG = 60;         // phone -> watch: POMODORO_WORK_MIN + POMODO
 // UPCOMING_TEXT and the shared page window.
 var MSG_SEARCH_REQUEST = 61;       // watch -> phone: TASK_TITLE (the dictated query)
 var MSG_SEARCH_DATA = 62;          // phone -> watch: UPCOMING_TEXT
+// Watch-dictated append to the Notes page's pinned-to-today notes - same
+// "append to the oldest, or create one" convention as the project notes
+// overlay's MSG_PROJECT_NOTE_APPEND (see firstNoteForProject's comment).
+var MSG_NOTESPAGE_APPEND = 63;     // watch -> phone: NOTE_TEXT (dictated text)
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -2955,6 +2959,22 @@ function firstNoteForProject(state, projectId) {
   return best;
 }
 
+// Same "oldest is the canonical one" convention as firstNoteForProject, but
+// over computeNotes' own filter (isPinnedToToday) instead of a projectId -
+// the Notes page has no per-note UI to pick a target, so dictated text always
+// lands on the first note the page itself shows.
+function firstPinnedNote(state) {
+  var notes = state.note || {};
+  var best = null;
+  Object.keys(notes).forEach(function (id) {
+    var n = notes[id];
+    if (n && n.isPinnedToToday && (!best || (n.created || 0) < (best.created || 0))) {
+      best = n;
+    }
+  });
+  return best;
+}
+
 // Mirrors sendFullNotesForTask above, for the project's own synthetic note.
 function sendFullNotesForProject(projectId) {
   var state = loadState();
@@ -3092,6 +3112,97 @@ function handleProjectNoteAppend(projectId, noteText) {
     .catch(function (err) {
       noteFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload project note append: ' + noteFailureMsg);
+      sendStatus(STATUS_ERROR, noteFailureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, noteFailureMsg);
+    });
+}
+
+// Watch-dictated append to the Notes page (see MSG_NOTESPAGE_APPEND in
+// main.c). Same "append to the canonical note, or create one" shape as
+// handleProjectNoteAppend, just targeting firstPinnedNote instead of a
+// project's synthetic note - the new note defaults isPinnedToToday so it
+// shows up in computeNotes (and thus this same page) right away.
+function handleNotesPageAppend(noteText) {
+  if (!noteText || !String(noteText).trim()) {
+    return;
+  }
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+
+  var state = loadState();
+  state.note = state.note || {};
+  var existingNote = firstPinnedNote(state);
+  var dictated = String(noteText).trim();
+  var crypto = getCrypto();
+  var clientId = getOrCreateClientId();
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  var op;
+
+  if (existingNote) {
+    var existingContent = existingNote.content || '';
+    var newContent = existingContent ? existingContent + '\n\n' + NOTE_APPEND_DIVIDER + '\n\n' + dictated : dictated;
+    state.note[existingNote.id] = Object.assign({}, existingNote, { content: newContent, modified: Date.now() });
+    saveState(state);
+
+    var updPayload = {
+      actionPayload: { note: { id: existingNote.id, changes: { content: newContent, modified: Date.now() } } },
+      entityChanges: [],
+    };
+    op = {
+      id: generateOpId(),
+      opType: 'UPD',
+      actionType: '[Note] Update Note',
+      entityType: 'NOTE',
+      entityId: existingNote.id,
+      payload: crypto ? crypto.encrypt(updPayload) : updPayload,
+      isPayloadEncrypted: !!crypto,
+      vectorClock: newVectorClock,
+      clientId: clientId,
+      timestamp: Date.now(),
+      schemaVersion: SCHEMA_VERSION,
+    };
+  } else {
+    var newNote = {
+      id: generateNoteId(),
+      isPinnedToToday: true,
+      content: dictated,
+      created: Date.now(),
+      modified: Date.now(),
+    };
+    state.note[newNote.id] = newNote;
+    saveState(state);
+
+    var addPayload = { actionPayload: { note: newNote, isPreventFocus: true }, entityChanges: [] };
+    op = {
+      id: generateOpId(),
+      opType: 'CRT',
+      actionType: '[Note] Add Note',
+      entityType: 'NOTE',
+      entityId: newNote.id,
+      payload: crypto ? crypto.encrypt(addPayload) : addPayload,
+      isPayloadEncrypted: !!crypto,
+      vectorClock: newVectorClock,
+      clientId: clientId,
+      timestamp: Date.now(),
+      schemaVersion: SCHEMA_VERSION,
+    };
+  }
+
+  // Re-sends the page's text right away, same reasoning as
+  // handleProjectNoteAppend's sendFullNotesForProject call.
+  handleNotesPageRequest();
+
+  var noteFailureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      noteFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload notes-page append: ' + noteFailureMsg);
       sendStatus(STATUS_ERROR, noteFailureMsg);
     })
     .then(function () {
@@ -3600,6 +3711,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_NOTESPAGE_REQUEST:
       handleNotesPageRequest();
+      break;
+    case MSG_NOTESPAGE_APPEND:
+      handleNotesPageAppend(payload.NOTE_TEXT);
       break;
     case MSG_TASK_REPEAT_REQUEST:
       handleTaskRepeatRequest(payload.TASK_ID);
