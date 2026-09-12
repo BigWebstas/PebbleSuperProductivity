@@ -92,8 +92,9 @@ touch is opt-in until a firmware fix lands.
 - **Add Task** needs a Pebble with a mic and an internet connection (dictation
   runs in the cloud).
 - **Only some actions round-trip** — completion, scheduling, backlog/project
-  moves, subtask promote/demote, time tracking, habits. Anything else (deadlines,
-  tags) is a no-op on replay.
+  moves, subtask promote/demote, time tracking, habits, deadlines, estimates,
+  tags, due time, checklist items. Task/project/tag/habit **creation**
+  (besides adding a task by dictation) and title edits are watch-side no-ops.
 - **Offline changes are queued, conflicts are not** — a change made while
   the phone is offline is held locally and re-sent, in order, on the next
   sync. One the server actively rejects (a conflict with a newer edit made
