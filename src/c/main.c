@@ -10277,27 +10277,27 @@ static void push_live_window(void) {
 
 #ifdef PBL_PLATFORM_EMERY
 // A scrollbar on the far right of the task list - a faint track with a red
-// thumb whose position tracks the selected row's flat index over the row
-// total. Hidden when the whole list fits (< PIP_MIN_ROWS). Its own overlay
-// layer (s_scroll_pip_layer, declared up by s_menu_layer) above s_menu_layer;
-// redrawn on selection change and on .appear. On a touch watch, dragging the
-// right edge scrubs the selection - pip_total_rows / pip_scrub_to are defined
-// up by touch_handler.
+// thumb whose position tracks the MenuLayer's real scroll viewport (via its
+// backing ScrollLayer's content offset/size), not the selected row: a touch
+// drag scrolls the list without moving the selection, so a selection-index
+// thumb sat frozen mid-drag even though menu_draw_row was marking this layer
+// dirty on every row repaint. Hidden when the whole list fits (< PIP_MIN_ROWS).
+// Its own overlay layer (s_scroll_pip_layer, declared up by s_menu_layer)
+// above s_menu_layer. On a touch watch, dragging the right edge scrubs the
+// selection - pip_total_rows / pip_scrub_to are defined up by touch_handler.
 static void scroll_pip_update_proc(Layer *layer, GContext *ctx) {
   int total = pip_total_rows();
   if (total < PIP_MIN_ROWS) {
     return;
   }
-  MenuIndex sel = menu_layer_get_selected_index(s_menu_layer);
-  int flat = 0;
-  for (uint16_t s = 0; s < sel.section; s++) {
-    flat += menu_get_num_rows(s_menu_layer, s, NULL);
-  }
-  flat += sel.row;
-  if (flat < 0) {
-    flat = 0;
-  } else if (flat > total - 1) {
-    flat = total - 1;
+  ScrollLayer *sl = menu_layer_get_scroll_layer(s_menu_layer);
+  int16_t viewport_h = layer_get_bounds(scroll_layer_get_layer(sl)).size.h;
+  int16_t max_scroll = scroll_layer_get_content_size(sl).h - viewport_h;
+  int16_t scroll_y = -scroll_layer_get_content_offset(sl).y;
+  if (scroll_y < 0) {
+    scroll_y = 0;
+  } else if (max_scroll > 0 && scroll_y > max_scroll) {
+    scroll_y = max_scroll;
   }
 
   GRect b = layer_get_bounds(layer);
@@ -10310,7 +10310,7 @@ static void scroll_pip_update_proc(Layer *layer, GContext *ctx) {
   if (thumb < 14) {
     thumb = 14;
   }
-  int ty = top + (total > 1 ? (th - thumb) * flat / (total - 1) : 0);
+  int ty = top + (max_scroll > 0 ? (th - thumb) * scroll_y / max_scroll : 0);
   graphics_context_set_fill_color(ctx, GColorRed);
   graphics_fill_rect(ctx, GRect(tx, ty, 3, thumb), 1, GCornersAll);
 }
