@@ -1777,6 +1777,9 @@ static Task *find_task_by_id(const char *id);
 #ifndef PBL_PLATFORM_APLITE
 static void push_stats_window(void);
 static void stats_render(void);
+static void header_begin_reveal(void);
+static void header_cancel_reveal(void);
+static int16_t header_bar_w(int16_t w);
 static void push_schedule_window(void);
 static void schedule_refresh_if_open(void);
 static void push_page_window(PageMode mode);
@@ -5606,6 +5609,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_stats_done_yesterday = tuple_int(iterator, KEY_STATS_DONE_YESTERDAY, 0);
       if (s_stats_projects) { // NULL = window closed; it'll re-request on open
         str_copy(s_stats_projects, tuple_str(iterator, KEY_STATS_TEXT, ""), STATS_TEXT_CAP);
+        if (!s_stats_have_data) {
+          header_begin_reveal(); // first data since open - wipe the bars in
+        }
         s_stats_have_data = true;
         stats_render();
       }
@@ -8705,12 +8711,64 @@ static void stats_compute_values(void) {
   format_duration_ms(nb * 1000, false, s_stats_nobreak, sizeof(s_stats_nobreak));
 }
 
+// On emery, the black label bars wipe in left-to-right over ~200ms the first
+// time a page open's data arrives (header_begin_reveal), rather than snapping
+// in fully drawn; their white label text pops in once the wipe reaches the
+// far edge. Other platforms skip this - header_bar_w is just `w`.
+#ifdef PBL_PLATFORM_EMERY
+#define HEADER_REVEAL_STEPS 8
+#define HEADER_REVEAL_STEP_MS 25
+static AppTimer *s_header_reveal_timer = NULL;
+static uint8_t s_header_reveal_tick = HEADER_REVEAL_STEPS; // full unless animating
+
+static void header_reveal_tick_cb(void *data) {
+  s_header_reveal_timer = NULL;
+  s_header_reveal_tick++;
+  if (s_stats_content_layer) {
+    layer_mark_dirty(s_stats_content_layer);
+  }
+  if (s_header_reveal_tick < HEADER_REVEAL_STEPS) {
+    s_header_reveal_timer = app_timer_register(HEADER_REVEAL_STEP_MS, header_reveal_tick_cb, NULL);
+  }
+}
+
+static void header_begin_reveal(void) {
+  if (s_header_reveal_timer) {
+    app_timer_cancel(s_header_reveal_timer);
+  }
+  s_header_reveal_tick = 0;
+  s_header_reveal_timer = app_timer_register(HEADER_REVEAL_STEP_MS, header_reveal_tick_cb, NULL);
+}
+
+static void header_cancel_reveal(void) {
+  if (s_header_reveal_timer) {
+    app_timer_cancel(s_header_reveal_timer);
+    s_header_reveal_timer = NULL;
+  }
+  s_header_reveal_tick = HEADER_REVEAL_STEPS;
+}
+
+static int16_t header_bar_w(int16_t w) {
+  if (s_header_reveal_tick >= HEADER_REVEAL_STEPS) {
+    return w;
+  }
+  return (int16_t)(((int32_t)w * s_header_reveal_tick) / HEADER_REVEAL_STEPS);
+}
+#else
+static void header_begin_reveal(void) {}
+static void header_cancel_reveal(void) {}
+static int16_t header_bar_w(int16_t w) { return w; }
+#endif
+
 // Draws one label bar (black, white text) with its value below (black text).
 static int16_t stats_draw_metric(GContext *ctx, int16_t y, int16_t w,
                                   const char *label, const char *value) {
-  fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
-  graphics_context_set_text_color(ctx, GColorWhite);
-  draw_text(ctx, label, STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  int16_t bar_w = header_bar_w(w);
+  fill_bg(ctx, GRect(0, y, bar_w, STATS_LABEL_H), GColorBlack);
+  if (bar_w >= w) {
+    graphics_context_set_text_color(ctx, GColorWhite);
+    draw_text(ctx, label, STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  }
   y += STATS_LABEL_H;
   graphics_context_set_text_color(ctx, GColorBlack);
   draw_text(ctx, value, STATS_VALUE_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_VALUE_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
@@ -8791,11 +8849,14 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
   int16_t y = 0;
   // When the yesterday toggle is on, a centred bar names which day is shown.
   if (s_yesterday_stats_enabled) {
-    fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
-    graphics_context_set_text_color(ctx, GColorWhite);
-    draw_text(ctx, yd ? "Yesterday" : "Today", STATS_LABEL_FONT,
-              GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
-              GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+    int16_t bar_w = header_bar_w(w);
+    fill_bg(ctx, GRect(0, y, bar_w, STATS_LABEL_H), GColorBlack);
+    if (bar_w >= w) {
+      graphics_context_set_text_color(ctx, GColorWhite);
+      draw_text(ctx, yd ? "Yesterday" : "Today", STATS_LABEL_FONT,
+                GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
+                GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+    }
     y += STATS_LABEL_H + 2;
   }
   y = stats_draw_metric(ctx, y, w, "Estimate remaining", yd ? "-" : s_stats_est);
@@ -8827,12 +8888,15 @@ static void stats_content_update_proc(Layer *layer, GContext *ctx) {
     memcpy(line, p, len);
     line[len] = '\0';
     if (line[0] == '\x02') {
-      fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
-      graphics_context_set_text_color(ctx, GColorWhite);
-      draw_text(ctx, line + 1, STATS_LABEL_FONT,
-                GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
-                GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
-      graphics_context_set_text_color(ctx, GColorBlack);
+      int16_t bar_w = header_bar_w(w);
+      fill_bg(ctx, GRect(0, y, bar_w, STATS_LABEL_H), GColorBlack);
+      if (bar_w >= w) {
+        graphics_context_set_text_color(ctx, GColorWhite);
+        draw_text(ctx, line + 1, STATS_LABEL_FONT,
+                  GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H),
+                  GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+        graphics_context_set_text_color(ctx, GColorBlack);
+      }
       y += STATS_LABEL_H + 2;
     } else {
       graphics_draw_text(ctx, line, line_font,
@@ -8917,6 +8981,7 @@ static void stats_window_load(Window *window) {
 static void stats_window_unload(Window *window) {
   s_stats_show_yesterday = false;
   s_stats_ccp = NULL;
+  header_cancel_reveal();
   layer_destroy(s_stats_content_layer);
   s_stats_content_layer = NULL;
   scroll_layer_destroy(s_stats_scroll_layer);
