@@ -5620,6 +5620,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     case MSG_UPCOMING_DATA: {
       if (s_upcoming_text && s_page_mode == PAGE_UPCOMING) {
         str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), PAGE_TEXT_CAP);
+        if (!s_upcoming_have_data) {
+          header_begin_reveal(); // first data since open - wipe the day headers in
+        }
         s_upcoming_have_data = true;
         upcoming_render(); // no-op if the window was closed before the reply landed
       }
@@ -5628,6 +5631,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     case MSG_NOTESPAGE_DATA: {
       if (s_upcoming_text && s_page_mode == PAGE_NOTES) {
         str_copy(s_upcoming_text, tuple_str(iterator, KEY_NOTESPAGE_TEXT, ""), PAGE_TEXT_CAP);
+        if (!s_upcoming_have_data) {
+          header_begin_reveal();
+        }
         s_upcoming_have_data = true;
         upcoming_render();
       }
@@ -5636,6 +5642,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     case MSG_SEARCH_DATA: {
       if (s_upcoming_text && s_page_mode == PAGE_SEARCH) {
         str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), PAGE_TEXT_CAP);
+        if (!s_upcoming_have_data) {
+          header_begin_reveal();
+        }
         s_upcoming_have_data = true;
         upcoming_render();
       }
@@ -6585,17 +6594,27 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
     int16_t badge_x = subtitle_box.origin.x + subtitle_box.size.w - badge_w;
     GRect text_box = GRect(badge_x + pad + pips_w, subtitle_box.origin.y + 2,
                            sw, subtitle_box.size.h - 2);
+    // On open, the badge itself wipes in from its (fixed, right-aligned) far
+    // edge inward - header_bar_w's usual left-to-right growth, mirrored so a
+    // right-anchored badge still grows away from its anchor. Pips/text pop in
+    // once the wipe reaches the near edge, like every other header_bar_w use.
+    bool milestone_revealed = true;
     if (milestone) {
+      int16_t rw = header_bar_w(badge_w);
+      int16_t rx = badge_x + (badge_w - rw);
+      milestone_revealed = rw >= badge_w;
       graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(at_risk ? GColorOrange : GColorBlack, GColorBlack));
-      graphics_fill_rect(ctx, GRect(badge_x, subtitle_box.origin.y, badge_w, subtitle_box.size.h),
+      graphics_fill_rect(ctx, GRect(rx, subtitle_box.origin.y, rw, subtitle_box.size.h),
                          3, GCornersAll);
-      graphics_context_set_fill_color(ctx, GColorWhite);
-      for (int p = 0; p < tier; p++) {
-        graphics_fill_rect(ctx, GRect(badge_x + 3 + p * 4,
-                                      subtitle_box.origin.y + subtitle_box.size.h / 2 - 1, 3, 3),
-                           0, GCornerNone);
+      if (milestone_revealed) {
+        graphics_context_set_fill_color(ctx, GColorWhite);
+        for (int p = 0; p < tier; p++) {
+          graphics_fill_rect(ctx, GRect(badge_x + 3 + p * 4,
+                                        subtitle_box.origin.y + subtitle_box.size.h / 2 - 1, 3, 3),
+                             0, GCornerNone);
+        }
+        graphics_context_set_text_color(ctx, GColorWhite);
       }
-      graphics_context_set_text_color(ctx, GColorWhite);
     } else if (at_risk) {
       graphics_context_set_text_color(ctx, GColorOrange);
     }
@@ -6624,7 +6643,7 @@ static void habits_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
                                     wide.size.w, 6), 0, GCornerNone);
     }
 #endif
-    if (!rolling) {
+    if (!rolling && milestone_revealed) {
       graphics_draw_text(ctx, st, sf, text_box,
           GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
     }
@@ -6811,6 +6830,7 @@ static void habits_window_load(Window *window) {
 #endif
 #ifdef PBL_PLATFORM_EMERY
   habits_marquee_refresh(true); // in case the first selected habit's title is long
+  header_begin_reveal(); // streak-milestone badges wipe in on open
 #endif
 }
 
@@ -6823,6 +6843,7 @@ static void habits_window_unload(Window *window) {
 #ifdef PBL_PLATFORM_EMERY
   stop_habit_flash();
   stop_habits_marquee();
+  header_cancel_reveal();
 #endif
   menu_layer_destroy(s_habits_menu_layer);
 #ifndef PBL_PLATFORM_APLITE
@@ -8711,10 +8732,13 @@ static void stats_compute_values(void) {
   format_duration_ms(nb * 1000, false, s_stats_nobreak, sizeof(s_stats_nobreak));
 }
 
-// On emery, the black label bars wipe in left-to-right over ~200ms the first
-// time a page open's data arrives (header_begin_reveal), rather than snapping
-// in fully drawn; their white label text pops in once the wipe reaches the
-// far edge. Other platforms skip this - header_bar_w is just `w`.
+// On emery, a black header bar - stats metric/section, the Upcoming/Notes/
+// Search page's day/section headers, or a habit row's streak-milestone badge -
+// wipes in left-to-right over ~200ms when its page opens (header_begin_reveal),
+// rather than snapping in fully drawn; the white label/pips/text pops in once
+// the wipe reaches the far edge. One shared timer, since only one such window
+// is ever open at a time. Other platforms skip this - header_bar_w is just `w`.
+static Layer *s_upcoming_content_layer; // real declaration further down, with the rest of its window's state
 #ifdef PBL_PLATFORM_EMERY
 #define HEADER_REVEAL_STEPS 8
 #define HEADER_REVEAL_STEP_MS 25
@@ -8726,6 +8750,12 @@ static void header_reveal_tick_cb(void *data) {
   s_header_reveal_tick++;
   if (s_stats_content_layer) {
     layer_mark_dirty(s_stats_content_layer);
+  }
+  if (s_upcoming_content_layer) {
+    layer_mark_dirty(s_upcoming_content_layer);
+  }
+  if (s_habits_menu_layer) {
+    layer_mark_dirty(menu_layer_get_layer(s_habits_menu_layer));
   }
   if (s_header_reveal_tick < HEADER_REVEAL_STEPS) {
     s_header_reveal_timer = app_timer_register(HEADER_REVEAL_STEP_MS, header_reveal_tick_cb, NULL);
@@ -9065,9 +9095,12 @@ static void upcoming_content_update_proc(Layer *layer, GContext *ctx) {
     memcpy(line, src, slen);
     line[slen] = '\0';
     if (kind == '\x02') {
-      fill_bg(ctx, GRect(0, y, w, STATS_LABEL_H), GColorBlack);
-      graphics_context_set_text_color(ctx, GColorWhite);
-      draw_text(ctx, line, STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      int16_t bar_w = header_bar_w(w);
+      fill_bg(ctx, GRect(0, y, bar_w, STATS_LABEL_H), GColorBlack);
+      if (bar_w >= w) {
+        graphics_context_set_text_color(ctx, GColorWhite);
+        draw_text(ctx, line, STATS_LABEL_FONT, GRect(STATS_PAD_X, y, w - STATS_PAD_X * 2, STATS_LABEL_H), GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      }
       y += STATS_LABEL_H;
     } else if (kind == '\x03') {
       graphics_context_set_text_color(ctx, GColorDarkGray);
@@ -9129,6 +9162,7 @@ static void upcoming_window_load(Window *window) {
 }
 
 static void upcoming_window_unload(Window *window) {
+  header_cancel_reveal();
   layer_destroy(s_upcoming_content_layer);
   s_upcoming_content_layer = NULL;
   scroll_layer_destroy(s_upcoming_scroll_layer);
