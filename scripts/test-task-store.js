@@ -2094,6 +2094,34 @@ check('computeUpcoming merges recurring occurrences, marked and deduped', () => 
   assert.strictEqual(up.filter((u) => u.day === in2 && u.title === 'Water plants').length, 1, 'no double-show on in2');
 });
 
+// ---- computeCalendarDay (the Calendar month view's day drill-down) ----
+
+check('computeCalendarDay: only the given date, timed tasks sorted by time, no-time sorts last', () => {
+  const state = store.emptyState();
+  store.applyOperations([
+    entry('PROJECT', '[Project] Add Project', { project: { id: 'p', title: 'Garden' } }),
+    addTask({ id: 'pm', title: 'Review', dueWithTime: Date.parse('2099-01-15T15:00:00'), projectId: 'p' }),
+    addTask({ id: 'am', title: 'Standup', dueWithTime: Date.parse('2099-01-15T09:30:00') }),
+    addTask({ id: 'noTime', title: 'Errand', dueDay: '2099-01-15' }),
+    addTask({ id: 'otherDay', title: 'Water', dueDay: '2099-01-16' }),
+    addTask({ id: 'done', title: 'Done', dueDay: '2099-01-15', isDone: true }),
+  ], state);
+  const rows = store.computeCalendarDay(state, '2099-01-15', 40, true, 0);
+  assert.deepStrictEqual(rows.map((r) => r.id), ['am', 'pm', 'noTime']);
+  assert.strictEqual(rows[0].project, 'No Project'); // 'am' has no project
+  assert.strictEqual(rows.find((r) => r.id === 'pm').project, 'Garden');
+});
+
+check('computeCalendarDay: hideDone respects the grace period like the other task lists', () => {
+  const state = store.emptyState();
+  store.applyOperations([
+    addTask({ id: 'fresh', title: 'Just done', dueDay: '2099-01-15', isDone: true, doneOn: Date.now() }),
+    addTask({ id: 'stale', title: 'Done a while ago', dueDay: '2099-01-15', isDone: true, doneOn: Date.now() - 10000 }),
+  ], state);
+  const rows = store.computeCalendarDay(state, '2099-01-15', 40, true, 5000);
+  assert.deepStrictEqual(rows.map((r) => r.id), ['fresh']);
+});
+
 check('computeNotes: today-pinned notes only, title = first line, oldest first', () => {
   const state = store.emptyState();
   store.applyOperations([

@@ -119,8 +119,10 @@ var MSG_NOTESPAGE_APPEND = 63;     // watch -> phone: NOTE_TEXT (dictated text)
 // days in that month have a due task, and for a single day's task list.
 var MSG_CAL_MONTH_REQUEST = 64;    // watch -> phone: CAL_MONTH_OFFSET
 var MSG_CAL_MONTH_DATA = 65;       // phone -> watch: CAL_MONTH_OFFSET (echoed) + CAL_MONTH_MASK
-var MSG_CALDAY_REQUEST = 66;       // watch -> phone: CALDAY_DATE ("YYYY-MM-DD")
-var MSG_CALDAY_DATA = 67;          // phone -> watch: UPCOMING_TEXT (reused)
+// watch -> phone: CALDAY_DATE ("YYYY-MM-DD"); answered via the same
+// MSG_PROJECT_TASKS_START/ITEM/END triplet a project/tag task list uses
+// (see handleCalDayRequest) - no dedicated reply message of its own.
+var MSG_CALDAY_REQUEST = 66;
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -142,6 +144,13 @@ var STATUS_ERROR = 3;
 // the ceiling the most generous platform actually uses; no need to know
 // which platform is paired.
 var MAX_TASKS = 50;
+// Matches main.c's MAX_CALDAY_TASKS - a calendar day's s_browse_tasks
+// allocation is capped much lower than MAX_TASKS (confirmed on hardware:
+// emery's real free heap at that point in a session is ~10KB, not enough
+// for a full-size buffer - see that constant's own comment). Must stay in
+// lockstep with the watch's cap, which trusts this count rather than
+// re-deriving it.
+var MAX_CALDAY_TASKS = 16;
 // Matches the generous (emery) MAX_HABITS in main.c - every other platform
 // compiles with a smaller one and safely clamps/ignores anything beyond its
 // own array bound (see MAX_HABITS's own comment there), so this can just be
@@ -1124,9 +1133,12 @@ function handleCalMonthRequest(offset) {
 }
 
 // Answers MSG_CALDAY_REQUEST: every task due on the given "YYYY-MM-DD",
-// rendered the same way as one of handleUpcomingRequest's day groups (one
-// "\x02" header line naming the date, then a line per task), in the shared
-// page window (PAGE_CALENDAR_DAY reuses UPCOMING_TEXT).
+// browsed on the watch in BROWSE_CALENDAR_DAY mode (main.c's browse_descend)
+// - the exact same PROJECT_TASKS_START/ITEM/END triplet a project or tag's
+// task list uses (sendProjectTasks/sendProjectTaskAt), just sourced from
+// computeCalendarDay instead of getProjectTasks/getTagTasks and keyed by the
+// date instead of a project/tag id. Gives "Mark done" and the rest of the
+// action menu for free, unlike the old read-only text blob this replaced.
 function handleCalDayRequest(dateStr) {
   var config = loadConfig();
   if (!config || !config.jwt) {
@@ -1136,31 +1148,14 @@ function handleCalDayRequest(dateStr) {
   if (!config.enableCalendar || !dateStr) {
     return;
   }
-  var dayState = loadState();
-  var items = store.computeCalendarDay(dayState, String(dateStr));
-  var clean = function (s, n) {
-    return String(s).replace(/[\t\n\x02]/g, ' ').slice(0, n);
-  };
-  var lines = ['\x02' + formatUpcomingDay(dateStr)];
-  items.forEach(function (it) {
-    var line = clean(it.title, 40);
-    if (it.timeMin >= 0) {
-      line = formatUpcomingTime(it.timeMin) + '  ' + line;
-    }
-    if (it.project) {
-      line += '  · ' + clean(it.project, 20);
-    }
-    lines.push(line);
-  });
-  var text = lines.join('\n');
-  if (text.length > 600) {
-    text = text.slice(0, 600);
-  }
-  sendWithRetry({
-    MSG_TYPE: MSG_CALDAY_DATA,
-    UPCOMING_TEXT: text,
-  }, function () {}, function (e) {
-    console.log('[pkjs] giving up on CALDAY_DATA after retries: ' + JSON.stringify(e));
+  var state = loadState();
+  var rows = store.computeCalendarDay(state, String(dateStr), MAX_CALDAY_TASKS, !!config.hideDoneTasks, hideDoneGraceMs())
+    .map(function (t) { return { t: t, backlog: 0 }; });
+  var idField = String(dateStr).slice(0, 31);
+  sendWithRetry({ MSG_TYPE: MSG_PROJECT_TASKS_START, PROJECT_ID: idField, TASK_TOTAL: rows.length }, function () {
+    sendProjectTaskAt(idField, rows, 0);
+  }, function (e) {
+    console.log('[pkjs] giving up on CALDAY (as PROJECT_TASKS_START) after retries: ' + JSON.stringify(e));
   });
 }
 

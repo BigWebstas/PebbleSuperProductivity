@@ -232,13 +232,15 @@ enum {
   // MSG_NOTE_APPEND/MSG_PROJECT_NOTE_APPEND (see firstPinnedNote in index.js).
   MSG_NOTESPAGE_APPEND = 63,        // watch -> phone: NOTE_TEXT (dictated text)
   // Calendar month view (browse-only) - a month grid on its own window, plus a
-  // single day's tasks reusing the shared page window (PAGE_CALENDAR_DAY). The
-  // watch computes its own month/weekday grid from its clock; the phone is
-  // only asked which days in the shown month have a due task.
+  // single day's tasks reusing the browse window (BROWSE_CALENDAR_DAY, see
+  // browse_descend). The watch computes its own month/weekday grid from its
+  // clock; the phone is only asked which days in the shown month have a due
+  // task. The day's task list rides MSG_CALDAY_REQUEST -> the same
+  // MSG_PROJECT_TASKS_START/ITEM/END triplet a project/tag task list uses
+  // (see handleCalDayRequest in index.js) - no dedicated reply message needed.
   MSG_CAL_MONTH_REQUEST = 64, // watch -> phone: CAL_MONTH_OFFSET (months from the real current month)
   MSG_CAL_MONTH_DATA = 65,    // phone -> watch: CAL_MONTH_OFFSET (echoed - see handle_calendar_month_data) + CAL_MONTH_MASK
   MSG_CALDAY_REQUEST = 66,    // watch -> phone: CALDAY_DATE ("YYYY-MM-DD")
-  MSG_CALDAY_DATA = 67,       // phone -> watch: UPCOMING_TEXT (reused - same shared-page-window shape)
 };
 
 // STATUS_CODE values sent from the phone.
@@ -937,16 +939,13 @@ static bool s_notespage_enabled = false;
 static bool s_search_enabled = false;
 #ifdef PBL_PLATFORM_EMERY
 // Calendar month view (config.enableCalendar, default off) - browse-only, own
-// window with a month grid; selecting a day reuses this same shared page
-// window in PAGE_CALENDAR_DAY, same UPCOMING_TEXT blob shape as PAGE_UPCOMING.
-// Emery-only - see the window's own comment.
+// window with a month grid; selecting a day opens the browse window in
+// BROWSE_CALENDAR_DAY mode (see calendar_open_selected_day), not this shared
+// page window. Emery-only - see the window's own comment.
 static bool s_calendar_enabled = false;
 #endif
 static char s_search_query[48] = "";
-// The date (YYYY-MM-DD) PAGE_CALENDAR_DAY last asked for - set by the
-// calendar month view before push_page_window(PAGE_CALENDAR_DAY).
-static char s_calday_date[11] = "";
-typedef enum { PAGE_UPCOMING, PAGE_NOTES, PAGE_SEARCH, PAGE_CALENDAR_DAY } PageMode;
+typedef enum { PAGE_UPCOMING, PAGE_NOTES, PAGE_SEARCH } PageMode;
 static PageMode s_page_mode = PAGE_UPCOMING;
 // Heap-backed, alive only while the shared page window is open (see
 // s_stats_projects for the same pattern / rationale). NULL when closed.
@@ -998,6 +997,16 @@ static bool s_tags_enabled = false;
 // refreshes it. Per-project task lists are always fetched.
 #define MAX_BROWSE_PROJECTS 60
 #define MAX_BROWSE_TASKS MAX_TASKS
+// A calendar day's own s_browse_tasks allocation is capped much lower than a
+// full project/tag's - confirmed on hardware (2026-09-15) that emery's real
+// free heap at this point in a session is ~10KB, not the ~90KB free app heap
+// assumed elsewhere: a full MAX_BROWSE_TASKS allocation (50 * sizeof(Task) =
+// ~16.8KB) silently failed malloc, leaving s_browse_tasks NULL and the
+// PROJECT_TASKS_START/END replies dropped forever (the "stuck on Loading"
+// bug) - see browse_descend. index.js's handleCalDayRequest caps
+// computeCalendarDay at this same number, so the watch never receives (or
+// needs to bounds-check against) more than fit here.
+#define MAX_CALDAY_TASKS 16
 #if PROJECTS_CACHE
 static const uint32_t PERSIST_KEY_BROWSE_PROJECTS = 140; // + 1 for the count
 #endif
@@ -1029,7 +1038,11 @@ static int s_browse_level = 0;              // 0 = project list, 1 = one project
 // BROWSE_TAG_EDIT / BROWSE_MOVE are level-0-only pickers driven from the task
 // action menu, both keyed off s_browse_edit_task_id: TAG_EDIT toggles a tag on
 // it (checkbox list), MOVE reassigns its project (plain project list).
-typedef enum { BROWSE_PROJECTS, BROWSE_TAGS, BROWSE_TAG_EDIT, BROWSE_MOVE } BrowseMode;
+// BROWSE_CALENDAR_DAY is the opposite - level-1-ONLY, entered straight from
+// the Calendar month view's day tap (push_browse_window's jump-to path),
+// never level 0 - s_browse_project_id carries the "YYYY-MM-DD" date instead
+// of a project/tag id. emery-only (Calendar itself is), see browse_descend.
+typedef enum { BROWSE_PROJECTS, BROWSE_TAGS, BROWSE_TAG_EDIT, BROWSE_MOVE, BROWSE_CALENDAR_DAY } BrowseMode;
 static BrowseMode s_browse_mode = BROWSE_PROJECTS;
 static char s_browse_edit_task_id[MAX_ID_LEN] = ""; // the task TAG_EDIT / MOVE acts on
 // Tag-flavoured modes want the TAG list (IS_TAGS) and have no notes/backlog/
@@ -5635,14 +5648,6 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       }
       break;
     }
-    case MSG_CALDAY_DATA: {
-      if (s_upcoming_text && s_page_mode == PAGE_CALENDAR_DAY) {
-        str_copy(s_upcoming_text, tuple_str(iterator, KEY_UPCOMING_TEXT, ""), PAGE_TEXT_CAP);
-        s_upcoming_have_data = true;
-        upcoming_render(); // no headers to wipe here, so no header_begin_reveal
-      }
-      break;
-    }
 #ifdef PBL_PLATFORM_EMERY
     case MSG_CAL_MONTH_DATA: {
       handle_calendar_month_data(iterator);
@@ -7044,22 +7049,36 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // draw_task_row reads the same fields the today list draws; a browsed task
   // isn't in s_tasks but the struct is identical, so this reuses it wholesale
   // (including the live-ticking "spent / estimate" when it's the tracked one).
-  // Tags mode passes show_project so each row names its project (a tag's tasks
-  // span projects).
+  // Tags mode (and a calendar day, which spans projects the same way a tag's
+  // tasks do) passes show_project so each row names its project.
   bool show_project = false;
 #ifndef PBL_PLATFORM_APLITE
   show_project = (s_browse_mode == BROWSE_TAGS); // TAG_EDIT is level-0 only
+#ifdef PBL_PLATFORM_EMERY
+  show_project = show_project || s_browse_mode == BROWSE_CALENDAR_DAY;
+#endif
 #endif
   draw_task_row(ctx, bounds, bt, is_selected, show_project);
 }
 
 // Switch to level 1 for `project_id` and fetch its tasks. Shared by a
 // project-row Select in the browser, by push_browse_window's jump-straight-to
-// path, and by the today view's project row (via push_browse_window).
+// path, and by the today view's project row (via push_browse_window). For
+// BROWSE_CALENDAR_DAY, `project_id` is actually a "YYYY-MM-DD" date and the
+// fetch goes out as MSG_CALDAY_REQUEST instead - the phone answers with the
+// exact same PROJECT_TASKS_START/ITEM/END triplet either way (see
+// handleCalDayRequest in index.js), so nothing past this branch needs to
+// know the difference.
 static void browse_descend(const char *project_id) {
   str_copy(s_browse_project_id, project_id, MAX_PROJECT_ID_LEN);
   if (!s_browse_tasks) {
-    s_browse_tasks = malloc(sizeof(Task) * MAX_BROWSE_TASKS);
+    int cap = MAX_BROWSE_TASKS;
+#ifdef PBL_PLATFORM_EMERY
+    if (s_browse_mode == BROWSE_CALENDAR_DAY) {
+      cap = MAX_CALDAY_TASKS;
+    }
+#endif
+    s_browse_tasks = malloc(sizeof(Task) * (size_t)cap);
   }
   s_browse_task_count = 0;
   s_browse_task_incoming = 0;
@@ -7071,6 +7090,12 @@ static void browse_descend(const char *project_id) {
     menu_layer_reload_data(s_browse_menu);
     browse_update_empty();
   }
+#ifdef PBL_PLATFORM_EMERY
+  if (s_browse_mode == BROWSE_CALENDAR_DAY) {
+    begin_send(MSG_CALDAY_REQUEST, s_browse_project_id, NULL, 0);
+    return;
+  }
+#endif
   request_project_tasks(s_browse_project_id);
 }
 
@@ -7108,6 +7133,17 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
   if (!bt) {
     return;
   }
+#ifdef PBL_PLATFORM_EMERY
+  // A calendar day matches the today list's own convention (Select opens the
+  // action menu - "Mark done" first row - rather than toggling in place);
+  // it's never in backlog, and s_browse_project_id there is a date, not a
+  // real project, so ACTX_TAG (no "Move to backlog" row) - same as its
+  // long-Select already used, see browse_menu_select_long_click.
+  if (s_browse_mode == BROWSE_CALENDAR_DAY) {
+    push_action_menu(bt->id, ACTX_TAG, false);
+    return;
+  }
+#endif
   bt->done = !bt->done;
   Task *in_today = find_task_by_id(bt->id);
   if (in_today) {
@@ -7146,10 +7182,16 @@ static void browse_menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell
   }
   bool no_project = (s_browse_project_id[0] == '\0' ||
                      strncmp(s_browse_project_id, NO_PROJECT_ID_STR, MAX_PROJECT_ID_LEN) == 0);
-  // ctx only decides whether the "Move to backlog" row shows - tags and the
-  // "No Project" bucket have no backlog. Scheduling itself routes through
-  // begin_pending_reschedule's own window/mode check, not ctx.
-  ActionCtx ctx = (browse_wants_tags() || no_project) ? ACTX_TAG : ACTX_PROJECT;
+  // ctx only decides whether the "Move to backlog" row shows - tags, the
+  // "No Project" bucket, and a calendar day (s_browse_project_id there is a
+  // date, not a real project - "Move to backlog" would send it as one) have
+  // no backlog. Scheduling itself routes through begin_pending_reschedule's
+  // own window/mode check, not ctx.
+  bool calendar_day = false;
+#ifdef PBL_PLATFORM_EMERY
+  calendar_day = s_browse_mode == BROWSE_CALENDAR_DAY;
+#endif
+  ActionCtx ctx = (browse_wants_tags() || no_project || calendar_day) ? ACTX_TAG : ACTX_PROJECT;
   push_action_menu(bt->id, ctx, pt_section_is_backlog((int)cell_index->section));
 #endif
 }
@@ -7167,8 +7209,13 @@ static void browse_update_empty(void) {
                                     : (tags ? "No tags." : "No projects.");
   } else {
     empty = s_browse_task_count == 0;
+    bool calendar_day = false;
+#ifdef PBL_PLATFORM_EMERY
+    calendar_day = s_browse_mode == BROWSE_CALENDAR_DAY;
+#endif
     msg = s_browse_tasks_loading ? "Loading..."
-                                 : (tags ? "No tasks for this tag." : "No tasks in this project.");
+         : calendar_day ? "No tasks that day."
+         : tags ? "No tasks for this tag." : "No tasks in this project.";
   }
   text_layer_set_text(s_browse_empty, msg);
   layer_set_hidden(text_layer_get_layer(s_browse_empty), !empty);
@@ -7182,6 +7229,13 @@ static void browse_update_empty(void) {
 static ClickConfigProvider s_browse_menu_ccp = NULL;
 
 static void browse_back_click_handler(ClickRecognizerRef recognizer, void *context) {
+#ifdef PBL_PLATFORM_EMERY
+  // A calendar day has no level 0 to fall back to - Back just leaves.
+  if (s_browse_mode == BROWSE_CALENDAR_DAY) {
+    window_stack_pop(true);
+    return;
+  }
+#endif
   if (s_browse_level == 1) {
     backlight_touch();
     free(s_browse_tasks);
@@ -7271,9 +7325,14 @@ static void push_browse_window(const char *jump_to_project) {
   s_browse_project_count = 0;
   s_browse_project_incoming = 0;
 #if PROJECTS_CACHE
-  if (!browse_wants_tags()) {
+  if (!browse_wants_tags()
+#ifdef PBL_PLATFORM_EMERY
+      && s_browse_mode != BROWSE_CALENDAR_DAY
+#endif
+     ) {
     // PROJECTS and the MOVE picker both show the project list - render the cache
-    // instantly, the fetch below refreshes it. Tags aren't cached.
+    // instantly, the fetch below refreshes it. Tags and a calendar day aren't
+    // cached - the latter never even reaches level 0.
     load_browse_projects();
   }
 #endif
@@ -9179,10 +9238,6 @@ static void request_upcoming(void) {
     begin_send(MSG_SEARCH_REQUEST, s_search_query, NULL, 0);
     return;
   }
-  if (s_page_mode == PAGE_CALENDAR_DAY) {
-    begin_send(MSG_CALDAY_REQUEST, s_calday_date, NULL, 0);
-    return;
-  }
   begin_send(s_page_mode == PAGE_NOTES ? MSG_NOTESPAGE_REQUEST : MSG_UPCOMING_REQUEST, NULL, NULL, 0);
 }
 
@@ -9258,7 +9313,8 @@ static void push_page_window(PageMode mode) {
 
 // ---------- calendar month view (browse-only) ----------
 // A month grid: Up/Down move the day cursor, long-Up/long-Down change month,
-// Select opens that day's tasks in the shared page window (PAGE_CALENDAR_DAY).
+// Select opens that day's tasks in the browse window (BROWSE_CALENDAR_DAY),
+// with "Mark done" and the rest of the action menu now reachable there.
 // Pure watch-side month/weekday-grid math (day_of_week et al below) - the
 // phone is only asked which days in the shown month have a due task
 // (CAL_MONTH_MASK). config.enableCalendar, default off. Emery-only - the full
@@ -9403,8 +9459,10 @@ static void calendar_render(void) {
 static void calendar_open_selected_day(void) {
   int year, month0;
   calendar_shown_month(&year, &month0);
-  snprintf(s_calday_date, sizeof(s_calday_date), "%04d-%02d-%02d", year, month0 + 1, s_cal_selected_day);
-  push_page_window(PAGE_CALENDAR_DAY);
+  char date[11];
+  snprintf(date, sizeof(date), "%04d-%02d-%02d", year, month0 + 1, s_cal_selected_day);
+  s_browse_mode = BROWSE_CALENDAR_DAY;
+  push_browse_window(date);
 }
 
 static void calendar_day_prev_handler(ClickRecognizerRef recognizer, void *context) {

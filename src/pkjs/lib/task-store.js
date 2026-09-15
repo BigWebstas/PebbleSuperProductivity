@@ -2393,38 +2393,49 @@ function computeCalendarMonthMask(state, year, month0) {
 }
 
 // Tasks due on exactly `dateStr` ("YYYY-MM-DD") - the calendar month view's
-// day drill-down. Same { title, project } shape as computeUpcoming's entries,
-// sorted by time of day (undated-but-due-today-only tasks sort last).
-function computeCalendarDay(state, dateStr) {
-  var tasks = (state && state.task) || {};
-  var projects = (state && state.project) || {};
-  var out = [];
-  Object.keys(tasks).forEach(function (id) {
-    var t = tasks[id];
-    if (!t || !t.title || t.isDone || !isMainTask(t)) {
-      return;
-    }
-    var day = null;
-    var timeMin = -1;
-    if (typeof t.dueWithTime === 'number' && isFinite(t.dueWithTime)) {
-      var d = new Date(t.dueWithTime);
-      day = dateToDateStr(d);
-      timeMin = d.getHours() * 60 + d.getMinutes();
-    } else if (t.dueDay) {
-      day = String(t.dueDay);
-    }
-    if (day !== dateStr) {
-      return;
-    }
-    var projTitle = t.projectId && projects[t.projectId] && projects[t.projectId].title;
-    out.push({ timeMin: timeMin, title: String(t.title), project: projTitle ? String(projTitle) : '' });
+// day drill-down. Same task-row shape (and hideDone/graceMs handling) as
+// getTagTasks, just filtered by due date instead of tag - the watch browses
+// it via BROWSE_CALENDAR_DAY (see main.c's browse_descend), which reuses the
+// Projects/Tags browser's own row rendering and action menu, so "Mark done"
+// works there like anywhere else. Sorted by time of day; a due-that-day
+// task with no time sorts last, same as computeUpcoming's own day-group
+// ordering. Capped at `limit` rows.
+function computeCalendarDay(state, dateStr, limit, hideDone, graceMs) {
+  var allTasks = state.task || {};
+  var mains = Object.keys(allTasks)
+    .map(function (id) { return allTasks[id]; })
+    .filter(function (t) { return t && t.title && isMainTask(t); })
+    .filter(function (t) { return !isHiddenDone(t, hideDone, graceMs); })
+    .filter(function (t) {
+      var day = null;
+      if (typeof t.dueWithTime === 'number' && isFinite(t.dueWithTime)) {
+        day = dateToDateStr(new Date(t.dueWithTime));
+      } else if (t.dueDay) {
+        day = String(t.dueDay);
+      }
+      return day === dateStr;
+    })
+    .sort(function (a, b) {
+      return dueTimeMinOrEnd(a) - dueTimeMinOrEnd(b);
+    });
+  var rows = [];
+  mains.forEach(function (t) {
+    var proj = t.projectId && state.project && state.project[t.projectId];
+    pushTaskAndSubtasks(rows, state, allTasks, t, projectTitleFor(state, t),
+                        t.projectId || undefined, proj ? projectColorRgb(proj) : undefined, hideDone, graceMs);
   });
-  out.sort(function (a, b) {
-    var am = a.timeMin < 0 ? 24 * 60 : a.timeMin;
-    var bm = b.timeMin < 0 ? 24 * 60 : b.timeMin;
-    return am - bm;
-  });
-  return out;
+  return rows.slice(0, limit);
+}
+
+// A task's minutes-since-midnight due time, or past end-of-day when it has
+// no due TIME (still due that day via dueDay alone) - sorts timed tasks
+// first, undated-but-due ones last, same convention computeUpcoming uses.
+function dueTimeMinOrEnd(t) {
+  if (typeof t.dueWithTime !== 'number' || !isFinite(t.dueWithTime)) {
+    return 24 * 60;
+  }
+  var d = new Date(t.dueWithTime);
+  return d.getHours() * 60 + d.getMinutes();
 }
 
 // Today-pinned standalone notes (the `note` entity, isPinnedToToday), oldest
