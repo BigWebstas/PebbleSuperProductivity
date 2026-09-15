@@ -1096,6 +1096,12 @@ static int s_presence_estimate_ms = 0;
 // into s_presence_spent_ms.
 static time_t s_presence_spent_received_epoch = 0;
 static Window *s_live_window = NULL;
+#ifdef PBL_PLATFORM_EMERY
+// Forward-declared here (defined with the rest of the calendar window,
+// further down the file) so touch_handler can reach it below - see the
+// right-swipe comment there.
+static Window *s_calendar_window = NULL;
+#endif
 static TextLayer *s_live_state_layer = NULL;
 static TextLayer *s_live_task_layer = NULL;
 static TextLayer *s_live_elapsed_layer = NULL;
@@ -7601,11 +7607,14 @@ static bool touch_is_left_swipe(int dx, int dy) {
   return dx <= -TOUCH_SWIPE_PX && ady * 2 <= adx;
 }
 
-// Right-swipe test (mirror of the above) - used only on the live tracking
-// window, where the system bridge's own swipe-right-Back doesn't reach
-// (confirmed on hardware). Everywhere else the bridge already handles it, and
-// a handler of our own there double-popped (see the touch-nav memory) - this
-// stays scoped to s_live_window specifically to avoid repeating that.
+// Right-swipe test (mirror of the above) - used only on windows built from a
+// bare custom Layer (no MenuLayer/ScrollLayer), where the system bridge's own
+// swipe-right-Back doesn't reach (confirmed on hardware for the live tracking
+// window; the calendar month grid is the same shape - a raw Layer, not a
+// ScrollLayer/MenuLayer - so it gets the same treatment). Everywhere else
+// (MenuLayer and ScrollLayer windows) the bridge already handles it, and a
+// handler of our own there double-popped (see the touch-nav memory) - this
+// stays scoped to those two windows to avoid repeating that.
 static bool touch_is_right_swipe(int dx, int dy) {
   int adx = dx < 0 ? -dx : dx;
   int ady = dy < 0 ? -dy : dy;
@@ -7614,6 +7623,24 @@ static bool touch_is_right_swipe(int dx, int dy) {
 
 // Defined with the rest of the live window, further down the file.
 static void live_window_back_click_handler(ClickRecognizerRef recognizer, void *context);
+
+// Pops whichever of the two bridge-unreachable windows is on top, if either
+// is; returns whether it did, so a right-swipe on any other window is a
+// no-op (the bridge already owns Back there).
+static bool touch_swipe_back(void) {
+  Window *top = window_stack_get_top_window();
+  if (top == s_live_window) {
+    live_window_back_click_handler(NULL, NULL);
+    return true;
+  }
+#ifdef PBL_PLATFORM_EMERY
+  if (top == s_calendar_window) {
+    window_stack_pop(true);
+    return true;
+  }
+#endif
+  return false;
+}
 
 static void touch_handler(const TouchEvent *event, void *context) {
   switch (event->type) {
@@ -7679,11 +7706,11 @@ static void touch_handler(const TouchEvent *event, void *context) {
     }
     // Right-swipe Back is the system bridge's job everywhere else - a handler
     // of our own double-popped elsewhere (see the touch-nav memory). The live
-    // tracking window is the one place the bridge's swipe-back doesn't reach
-    // (confirmed on hardware), so it alone gets a swipe-right of our own.
-    if (touch_is_right_swipe(dx, dy) && window_stack_get_top_window() == s_live_window) {
+    // tracking and calendar windows are the bare-Layer places the bridge's
+    // swipe-back doesn't reach (confirmed on hardware for live tracking), so
+    // they alone get a swipe-right of our own.
+    if (touch_is_right_swipe(dx, dy) && touch_swipe_back()) {
       s_touch_swipe_fired = true;
-      live_window_back_click_handler(NULL, NULL);
     }
     break;
   }
@@ -7707,8 +7734,7 @@ static void touch_handler(const TouchEvent *event, void *context) {
         begin_pending_reschedule(RESCHEDULE_TOMORROW);
         s_touch_swipe_fired = true;
         s_tap_moved_sel = true;
-      } else if (touch_is_right_swipe(dx, dy) && window_stack_get_top_window() == s_live_window) {
-        live_window_back_click_handler(NULL, NULL);
+      } else if (touch_is_right_swipe(dx, dy) && touch_swipe_back()) {
         s_touch_swipe_fired = true;
       }
     }
@@ -9342,7 +9368,6 @@ static void push_page_window(PageMode mode) {
 // (see emery-code-space-ceiling in memory), so unlike the rest of the
 // date-browsing pages this one doesn't fit non-emery.
 #ifdef PBL_PLATFORM_EMERY
-static Window *s_calendar_window = NULL;
 static Layer *s_calendar_layer = NULL;
 static StatusBarLayer *s_calendar_status_bar = NULL;
 static int s_cal_month_offset = 0;    // months from the real current month
