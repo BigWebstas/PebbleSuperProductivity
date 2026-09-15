@@ -4134,6 +4134,14 @@ static void show_top_banner(const char *text) {
   if (!s_overtime_banner_layer) {
     return;
   }
+#ifndef PBL_PLATFORM_APLITE
+  // Reparent onto whatever window is currently on top - live tracking, focus,
+  // habits, notes, ... - so a banner always reaches the user instead of
+  // staying hidden under the main list it was built as a child of.
+  // layer_add_child removes it from its old parent first.
+  layer_add_child(window_get_root_layer(window_stack_get_top_window()),
+                   text_layer_get_layer(s_overtime_banner_layer));
+#endif
   text_layer_set_text(s_overtime_banner_layer, text);
   layer_set_hidden(text_layer_get_layer(s_overtime_banner_layer), false);
   banner_slide(true); // slides down from the top, then rests
