@@ -56,6 +56,16 @@ check('done / undated / past / beyond-horizon tasks are all excluded', () => {
   assert.deepStrictEqual(pins.map((p) => p.id), ['sp-task-ok']);
 });
 
+check('a calendar-linked task (CalDAV/iCal) is skipped - already a native event', () => {
+  const s = state({
+    caldav: { id: 'caldav', title: 'Standup', dueWithTime: NOW + HOUR, issueType: 'CALDAV' },
+    ical: { id: 'ical', title: 'Dentist', dueWithTime: NOW + 2 * HOUR, issueType: 'ICAL' },
+    plain: { id: 'plain', title: 'Water tomatoes', dueWithTime: NOW + 3 * HOUR },
+  });
+  const pins = timeline.desiredPins(s, NOW, {});
+  assert.deepStrictEqual(pins.map((p) => p.id), ['sp-task-plain']);
+});
+
 check('project name rides along as the pin body', () => {
   const s = state(
     { a: { id: 'a', title: 'T', dueWithTime: NOW + HOUR, projectId: 'p1' } },

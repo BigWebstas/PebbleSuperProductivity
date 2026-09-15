@@ -16,6 +16,12 @@
 // requests, and lets a task that was completed / unscheduled / pushed out
 // past the horizon have its stale pin deleted on the next sync. Turning the
 // feature off deletes every pin this app created, one sync later.
+//
+// Calendar-linked tasks (issueType CALDAV/ICAL) are skipped entirely - they
+// already exist as a native event at that same time/title, so pinning them
+// too would show a duplicate. There's no way to check against pins from
+// other apps (the timeline API only sees this app's own), so this is the
+// one dedup the watch can actually do.
 'use strict';
 
 var STORAGE_KEY = 'sp_timeline_pins';
@@ -70,6 +76,13 @@ function desiredPins(state, nowMs, opts) {
     }
     var due = t.dueWithTime;
     if (typeof due !== 'number' || due < nowMs || due > horizonMs) {
+      return;
+    }
+    // A calendar-linked task (Google Calendar via iCal, or native CalDAV) is
+    // already a native event at this same time/title on whichever calendar
+    // the phone syncs from - pinning it too would duplicate it on the
+    // timeline. issueType naming per task-store.js's taskIssueSrc.
+    if (t.issueType === 'CALDAV' || t.issueType === 'ICAL') {
       return;
     }
 
