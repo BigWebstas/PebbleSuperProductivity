@@ -157,6 +157,26 @@ var MAX_TASKS = 50;
 // watch-side limit).
 var MAX_HABITS = 16;
 
+// task-store's HIDE_DONE_GRACE_MS keeps a just-completed task visible for a
+// beat after hideDoneTasks would otherwise drop it - but emery's watch-side
+// action menu already has its own pre-commit "Marking done..." undo window
+// (main.c's begin_pending_done), so the task is never in a state the user
+// needs a post-commit grace period to still glimpse: it either got cancelled
+// there, or the user watched it commit already. Every other platform has no
+// such window, so they keep the full grace. getActiveWatchInfo() can return
+// undefined on an older PebbleKit JS - default to the safe (non-zero) side.
+function hideDoneGraceMs() {
+  try {
+    var info = Pebble.getActiveWatchInfo && Pebble.getActiveWatchInfo();
+    if (info && info.platform === 'emery') {
+      return 0;
+    }
+  } catch (e) {
+    // getActiveWatchInfo can throw when no watch is connected - fall through.
+  }
+  return store.HIDE_DONE_GRACE_MS;
+}
+
 // Separates a voice-dictated note append (see handleNoteAppend) from
 // whatever notes text already existed, both when re-read on the watch's own
 // notes overlay (TASK_NOTES, see sendTaskAt below) and on the real app's
@@ -633,7 +653,8 @@ function watchTaskList(state, config) {
     !!config.groupByProject,
     !!config.todayOnly,
     !!config.hideDoneTasks,
-    trackedId
+    trackedId,
+    hideDoneGraceMs()
   );
 }
 
@@ -893,11 +914,12 @@ function handleProjectTasksRequest(projectId, isTags) {
 // every row PROJECT_TASK_BACKLOG=0). Shares the same START/ITEM/END messages.
 function sendProjectTasks(pid, state, config, isTags) {
   var rows;
+  var graceMs = hideDoneGraceMs();
   if (isTags) {
-    rows = store.getTagTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks)
+    rows = store.getTagTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks, graceMs)
       .map(function (t) { return { t: t, backlog: 0 }; });
   } else {
-    var split = store.getProjectTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks);
+    var split = store.getProjectTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks, graceMs);
     rows = split.regular.map(function (t) { return { t: t, backlog: 0 }; })
       .concat(split.backlog.map(function (t) { return { t: t, backlog: 1 }; }));
   }
@@ -1816,7 +1838,7 @@ function scheduleHideDoneSweep(config) {
     }
     var tasks = watchTaskList(loadState(), Object.assign({}, config2, { hideDoneTasks: true }));
     sendTaskListToWatch(tasks);
-  }, store.HIDE_DONE_GRACE_MS + 100);
+  }, hideDoneGraceMs() + 100);
 }
 
 // Builds one "[Task Shared] updateTask" op - the shape task-store.js's

@@ -1285,7 +1285,7 @@ function getProjectList(state) {
 // with no project. No date filter - a project browser shows everything, not
 // just today. Done tasks still obey hideDone's grace period. Each list is
 // capped at `limit` rows.
-function getProjectTasks(state, projectId, limit, hideDone) {
+function getProjectTasks(state, projectId, limit, hideDone, graceMs) {
   var allTasks = state.task || {};
   var wantNoProject = !projectId || projectId === NO_PROJECT_ID;
   var projName = wantNoProject
@@ -1295,7 +1295,7 @@ function getProjectTasks(state, projectId, limit, hideDone) {
   var mains = Object.keys(allTasks)
     .map(function (id) { return allTasks[id]; })
     .filter(function (t) { return t && t.title && isMainTask(t); })
-    .filter(function (t) { return !isHiddenDone(t, hideDone); })
+    .filter(function (t) { return !isHiddenDone(t, hideDone, graceMs); })
     .filter(function (t) {
       return wantNoProject ? !t.projectId : t.projectId === projectId;
     });
@@ -1308,10 +1308,10 @@ function getProjectTasks(state, projectId, limit, hideDone) {
   var regular = [];
   var backlog = [];
   regularMains.forEach(function (t) {
-    pushTaskAndSubtasks(regular, state, allTasks, t, projName, pid, 0, hideDone);
+    pushTaskAndSubtasks(regular, state, allTasks, t, projName, pid, 0, hideDone, graceMs);
   });
   backlogMains.forEach(function (t) {
-    pushTaskAndSubtasks(backlog, state, allTasks, t, projName, pid, 0, hideDone);
+    pushTaskAndSubtasks(backlog, state, allTasks, t, projName, pid, 0, hideDone, graceMs);
   });
   return { regular: regular.slice(0, limit), backlog: backlog.slice(0, limit) };
 }
@@ -1355,19 +1355,19 @@ function getTagList(state) {
 // from any project. Each row's `project` is its own task's project title so the
 // watch can show it. No backlog split - a tag spans projects. Done tasks still
 // obey hideDone's grace period. Capped at `limit` rows.
-function getTagTasks(state, tagId, limit, hideDone) {
+function getTagTasks(state, tagId, limit, hideDone, graceMs) {
   var allTasks = state.task || {};
   var mains = Object.keys(allTasks)
     .map(function (id) { return allTasks[id]; })
     .filter(function (t) { return t && t.title && isMainTask(t); })
-    .filter(function (t) { return !isHiddenDone(t, hideDone); })
+    .filter(function (t) { return !isHiddenDone(t, hideDone, graceMs); })
     .filter(function (t) { return (t.tagIds || []).indexOf(tagId) !== -1; })
     .sort(withinGroupSort);
   var rows = [];
   mains.forEach(function (t) {
     var proj = t.projectId && state.project && state.project[t.projectId];
     pushTaskAndSubtasks(rows, state, allTasks, t, projectTitleFor(state, t),
-                        t.projectId || undefined, proj ? projectColorRgb(proj) : undefined, hideDone);
+                        t.projectId || undefined, proj ? projectColorRgb(proj) : undefined, hideDone, graceMs);
   });
   return rows.slice(0, limit);
 }
@@ -1415,18 +1415,24 @@ function taskIsPlannedForToday(t, today) {
 // fresh-enough doneOn through this app's own replay to matter here - which
 // is also the right scope: nobody's watching the watch in real time for a
 // completion that happened on a different device.
-var HIDE_DONE_GRACE_MS = 10000;
+var HIDE_DONE_GRACE_MS = 5000;
 
 // Shared by getActiveTasks' own main-task filter and pushTaskAndSubtasks'
 // per-subtask filter below - a done task/subtask with no doneOn at all
 // (never set - e.g. done before this grace period existed, or done by
 // another client per the comment above) hides immediately, same as this
 // app's original behavior, rather than being treated as "just completed".
-function isHiddenDone(t, hideDone) {
+// graceMs overrides HIDE_DONE_GRACE_MS when given (index.js passes 0 for a
+// watch platform that already has its own pre-commit "Marking done..." undo
+// window - the post-commit grace here would just be redundant lingering).
+function isHiddenDone(t, hideDone, graceMs) {
   if (!hideDone || !t.isDone) {
     return false;
   }
-  return !t.doneOn || Date.now() - t.doneOn >= HIDE_DONE_GRACE_MS;
+  if (graceMs == null) {
+    graceMs = HIDE_DONE_GRACE_MS;
+  }
+  return !t.doneOn || Date.now() - t.doneOn >= graceMs;
 }
 
 // When todayOnly is true, tasks are further restricted to ones actually
@@ -1451,7 +1457,7 @@ function isHiddenDone(t, hideDone) {
 // pinned_task_index scans exactly this list). A tracked SUBTASK pulls in its
 // parent instead, so it still nests (same reason todayOnly pulls in a parent
 // for a today-due subtask).
-function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alwaysIncludeId) {
+function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alwaysIncludeId, graceMs) {
   var allTasks = state.task || {};
   var today = todayStr();
   var mainTasks = Object.keys(allTasks)
@@ -1473,7 +1479,7 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alway
     // used for todayOnly above. A done SUBTASK under a still-open parent is
     // handled separately, per-subtask, in pushTaskAndSubtasks - the parent
     // staying visible is exactly the case that reasoning doesn't apply to.
-    .filter(function (t) { return !isHiddenDone(t, hideDone); })
+    .filter(function (t) { return !isHiddenDone(t, hideDone, graceMs); })
     .filter(function (t) {
       if (!todayOnly) {
         // Mirrors project.taskIds vs project.backlogTaskIds
@@ -1510,7 +1516,7 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alway
     if (forced && forced.parentId) {
       forced = allTasks[forced.parentId];
     }
-    if (forced && forced.title && isMainTask(forced) && !isHiddenDone(forced, hideDone) &&
+    if (forced && forced.title && isMainTask(forced) && !isHiddenDone(forced, hideDone, graceMs) &&
         !mainTasks.some(function (t) { return t.id === forced.id; })) {
       mainTasks.push(forced);
     }
@@ -1541,20 +1547,20 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alway
     Object.keys(byProject).sort(titleCompare).forEach(function (name) {
       byProject[name].sort(withinGroupSort);
       byProject[name].forEach(function (t) {
-        pushTaskAndSubtasks(rows, state, allTasks, t, name, groupProjectIds[name], groupColors[name], hideDone);
+        pushTaskAndSubtasks(rows, state, allTasks, t, name, groupProjectIds[name], groupColors[name], hideDone, graceMs);
       });
     });
   } else {
     mainTasks.sort(withinGroupSort);
     mainTasks.forEach(function (t) {
-      pushTaskAndSubtasks(rows, state, allTasks, t, '', '', 0, hideDone);
+      pushTaskAndSubtasks(rows, state, allTasks, t, '', '', 0, hideDone, graceMs);
     });
   }
 
   return rows.slice(0, limit);
 }
 
-function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId, groupColor, hideDone) {
+function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId, groupColor, hideDone, graceMs) {
   // t is already guaranteed a real title here - getActiveTasks filters
   // ghost (title-less) records out of mainTasks before this is ever
   // called (hideDone's own done-main-task filtering happens there too, for
@@ -1580,7 +1586,7 @@ function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId
   rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, remindAt: t.remindAt || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, deadlineDays: taskDeadlineDays(t), recurs: t.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(t), issueSrc: taskIssueSrc(t) });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
-    if (sub && sub.title && !isHiddenDone(sub, hideDone)) {
+    if (sub && sub.title && !isHiddenDone(sub, hideDone, graceMs)) {
       rows.push({ id: sub.id, title: sub.title, isSubtask: 1, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, remindAt: sub.remindAt || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, deadlineDays: taskDeadlineDays(sub), recurs: sub.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(sub), issueSrc: taskIssueSrc(sub) });
     }
   });

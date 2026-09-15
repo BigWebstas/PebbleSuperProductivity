@@ -1064,6 +1064,16 @@ check('getActiveTasks(hideDone=true) hides a done task with no doneOn immediatel
   assert.deepStrictEqual(active(state, 30, false, false, true).map((t) => t.id), []);
 });
 
+check('getActiveTasks: a graceMs override of 0 hides a just-completed task immediately', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [addTask({ id: 't1', title: 'Buy milk', isDone: true, doneOn: Date.now() })],
+    state
+  );
+  const rows = store.getActiveTasks(state, 30, false, false, true, null, 0);
+  assert.deepStrictEqual(rows.map((t) => t.id), []);
+});
+
 check('getActiveTasks never lists a subtask as a top-level row on its own', () => {
   const state = store.emptyState();
   store.applyOperations(
