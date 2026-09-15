@@ -8429,22 +8429,29 @@ static void push_value_picker(PickKind kind, const char *task_id, int current) {
 }
 
 // ---------- reflect (before-Finish-Day retro) ----------
-// A 3-row menu reached with Select on the Finish Day row (config.enableReflect;
-// long-Select there still archives). Each row logs one field of today's metric
-// straight away (optimistic, phone does [Metric] Upsert Metric):
+// A menu reached with Select on the Finish Day row (config.enableReflect;
+// long-Select there still archives too). Each row logs one field of today's
+// metric straight away (optimistic, phone does [Metric] Upsert Metric):
 //   Energy      - Select cycles Low/OK/Good        -> MSG_METRIC_ENERGY (1-3)
 //   Day rating  - Select cycles 1..4 (impactOfWork) -> MSG_METRIC_RATING (1-4)
 //   Improvement - Select dictates one thing to improve -> MSG_METRIC_REFLECT
 // Values start unset ("-") - the watch never fetches the existing metric.
+// A trailing "Finish Day" row archives, same as long-Select on the main row -
+// a visible way to commit the day right after logging the retro fields.
 // State statics are declared up near s_reflect_enabled.
 
 #define REFLECT_HAS_MIC PBL_IF_MICROPHONE_ELSE(true, false)
+#define REFLECT_FINISH_ROW (REFLECT_HAS_MIC ? 3 : 2)
 
 static uint16_t reflect_num_rows(MenuLayer *ml, uint16_t section, void *ctx) {
-  return REFLECT_HAS_MIC ? 3 : 2;
+  return REFLECT_FINISH_ROW + 1;
 }
 
 static void reflect_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, void *c) {
+  if (idx->row == REFLECT_FINISH_ROW) {
+    menu_cell_basic_draw(ctx, cell, "Finish Day", NULL, NULL);
+    return;
+  }
   char sub[20];
   const char *title;
   if (idx->row == 0) {
@@ -8468,6 +8475,18 @@ static void reflect_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, v
 
 static void reflect_select(MenuLayer *ml, MenuIndex *idx, void *c) {
   backlight_touch();
+  if (idx->row == REFLECT_FINISH_ROW) {
+    // Same archive path as long-Select on the main list's Finish Day row.
+#ifdef PBL_PLATFORM_EMERY
+    send_finish_day();
+    s_close_after_finish_day_sent = false;
+    push_finishday_window();
+#else
+    s_close_after_finish_day_sent = true;
+    send_finish_day();
+#endif
+    return;
+  }
   if (idx->row == 0) {
     s_reflect_energy = s_reflect_energy >= 3 ? 1 : s_reflect_energy + 1;
     begin_send(MSG_METRIC_ENERGY, "", NULL, s_reflect_energy);
