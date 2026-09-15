@@ -642,14 +642,6 @@ static int s_pending_reschedule_at_hour = 0;
 static AppTimer *s_pending_done_timer = NULL;
 static char s_pending_done_task_id[MAX_ID_LEN] = "";
 static int s_pending_done_tick = 0;
-// Strike-through sweep: a line crosses a task's title L->R over STRIKE_MS the
-// moment its done-window commits. Own 40ms timer (strike_anim_cb / begin_strike,
-// defined by begin_pending_done); drawn in draw_task_row.
-#define STRIKE_MS 260
-#define STRIKE_STEP_MS 40
-static AppTimer *s_strike_timer = NULL;
-static char s_strike_task_id[MAX_ID_LEN] = "";
-static int s_strike_tick = 0;
 // The Resync row holds green for SYNC_GREEN_MS on a SYNCING -> OK edge - long
 // enough to actually register "it synced". The Add Task row flashes "Added" for
 // the briefer ADDTASK_FLASH_MS once a dictated task is sent. Both driven by the
@@ -2991,25 +2983,6 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   }
 
-#ifdef PBL_PLATFORM_EMERY
-  // A just-committed completion strikes a line clear across the row label L->R.
-  if (s_strike_task_id[0] != '\0' && strncmp(task->id, s_strike_task_id, MAX_ID_LEN) == 0) {
-    int prog = s_strike_tick * STRIKE_STEP_MS * 1000 / STRIKE_MS;
-    if (prog > 1000) {
-      prog = 1000;
-    }
-    int16_t span = available; // full label width, not just the text extent
-    // +5: the glyph midline sits below the box centre (font top padding), so a
-    // plain centre line rides above the text instead of striking through it.
-    int16_t ly = title_box.origin.y + title_box.size.h / 2 + 5;
-    graphics_context_set_stroke_color(ctx, fg);
-    graphics_context_set_stroke_width(ctx, 4);
-    graphics_draw_line(ctx, GPoint(title_box.origin.x, ly),
-                       GPoint(title_box.origin.x + span * prog / 1000, ly));
-    graphics_context_set_stroke_width(ctx, 1);
-  }
-#endif
-
   GRect subtitle_box = GRect(TITLE_BOX_X, ROW_SUBTITLE_TOP_Y(bounds.size.h, title_box_h, SUBTITLE_STRIP_H),
                               bounds.size.w - TITLE_BOX_X * 2, SUBTITLE_STRIP_H);
 
@@ -4936,36 +4909,6 @@ static void hide_notes_overlay(void) {
 }
 
 #ifdef PBL_PLATFORM_EMERY
-// A line strikes left-to-right through a task's title over STRIKE_MS the moment
-// its "Marking done..." window commits - the completion gets its own beat
-// before the row settles into the dim "Done" style. Own 40ms timer (like the
-// checklist checkmark), independent of the marquee scroll timer. State lives up
-// with s_pending_done_task_id (draw_task_row needs it).
-static void strike_anim_cb(void *data) {
-  s_strike_timer = NULL;
-  s_strike_tick++;
-  if (s_strike_tick * STRIKE_STEP_MS < STRIKE_MS) {
-    s_strike_timer = app_timer_register(STRIKE_STEP_MS, strike_anim_cb, NULL);
-  } else {
-    s_strike_task_id[0] = '\0';
-  }
-  if (s_menu_layer) {
-    layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
-  }
-}
-
-static void begin_strike(const char *task_id) {
-  if (!task_id || task_id[0] == '\0') {
-    return;
-  }
-  if (s_strike_timer) {
-    app_timer_cancel(s_strike_timer);
-  }
-  str_copy(s_strike_task_id, task_id, sizeof(s_strike_task_id));
-  s_strike_tick = 0;
-  s_strike_timer = app_timer_register(STRIKE_STEP_MS, strike_anim_cb, NULL);
-}
-
 // Opens (or restarts) the "Marking done..." cancel window for a task by id. The
 // task is not marked done until pending_done_commit_callback fires; a Select in
 // the meantime calls cancel_pending_done.
@@ -4987,8 +4930,6 @@ static void begin_pending_done(const char *task_id) {
 static void pending_done_commit_callback(void *data) {
   s_pending_done_timer = NULL;
   Task *task = find_task_by_id(s_pending_done_task_id);
-  char done_id[MAX_ID_LEN];
-  str_copy(done_id, s_pending_done_task_id, sizeof(done_id));
   s_pending_done_task_id[0] = '\0';
   s_pending_done_tick = 0;
   if (task && !task->done) {
@@ -4996,7 +4937,6 @@ static void pending_done_commit_callback(void *data) {
     save_tasks();
     send_task_toggle(task);
     vibes_short_pulse(); // the cancel window elapsed silently - confirm the commit
-    begin_strike(done_id);
   }
   if (s_menu_layer) {
     menu_layer_reload_data(s_menu_layer);
@@ -5018,7 +4958,6 @@ static void cancel_pending_done(void) {
   refresh_scroll_state(false);
 }
 #endif
-
 
 // The pending-reschedule subtitle rides draw_task_row, which both the today
 // list and the Projects browser task view use - redraw whichever menus exist.
@@ -10475,11 +10414,6 @@ static void window_unload(Window *window) {
     s_pending_done_timer = NULL;
   }
   s_pending_done_task_id[0] = '\0';
-  if (s_strike_timer) {
-    app_timer_cancel(s_strike_timer);
-    s_strike_timer = NULL;
-  }
-  s_strike_task_id[0] = '\0';
 #endif
 #endif
 #if defined(PBL_TOUCH)
