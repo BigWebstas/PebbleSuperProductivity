@@ -10670,11 +10670,13 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
   // Global "notify before due" lead - skips tasks that carry their own
   // reminder (handled above).
   int soonest = -1;
+  int soonest_idx = -1;
   for (int i = 0; i < s_task_count; i++) {
     int d = s_tasks[i].due_min;
     if (!s_tasks[i].done && s_tasks[i].remind_min < 0 && d >= now_min &&
         (soonest < 0 || d < soonest)) {
       soonest = d;
+      soonest_idx = i;
     }
   }
   if (soonest < 0 || soonest - now_min > s_due_reminder_min || soonest == s_due_notified_min) {
@@ -10683,7 +10685,8 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
   s_due_notified_min = soonest;
   char at[16];
   format_due_time(soonest, false, at, sizeof(at)); // "@ 9:41 AM"
-  snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text), "Task due\n%s", at);
+  snprintf(s_overtime_banner_text, sizeof(s_overtime_banner_text), "Task due\n%s %s", at,
+           s_tasks[soonest_idx].title);
   show_top_banner(s_overtime_banner_text);
 }
 #endif
