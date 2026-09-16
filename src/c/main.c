@@ -1000,17 +1000,25 @@ static bool s_tags_enabled = false;
 // open and stays viewable while the phone is unreachable; the on-open fetch
 // refreshes it. Per-project task lists are always fetched.
 #define MAX_BROWSE_PROJECTS 60
-#define MAX_BROWSE_TASKS MAX_TASKS
-// A calendar day's own s_browse_tasks allocation is capped much lower than a
-// full project/tag's - confirmed on hardware (2026-09-15) that emery's real
-// free heap at this point in a session is ~10KB, not the ~90KB free app heap
-// assumed elsewhere: a full MAX_BROWSE_TASKS allocation (50 * sizeof(Task) =
-// ~16.8KB) silently failed malloc, leaving s_browse_tasks NULL and the
-// PROJECT_TASKS_START/END replies dropped forever (the "stuck on Loading"
-// bug) - see browse_descend. index.js's handleCalDayRequest caps
-// computeCalendarDay at this same number, so the watch never receives (or
-// needs to bounds-check against) more than fit here.
-#define MAX_CALDAY_TASKS 16
+// s_browse_tasks (below) is malloc'd, not static, and was sized off the same
+// "~90KB free app heap" assumption that MAX_TASKS's comment above makes -
+// wrong on real hardware (confirmed 2026-09-15: emery's real free heap mid-
+// session, with s_browse_projects already resident, is ~10KB; basalt/chalk/
+// diorite's is smaller still, ~1.8KB). A full MAX_TASKS-sized allocation
+// silently failed malloc there, leaving s_browse_tasks NULL and the
+// PROJECT_TASKS_START/END replies dropped forever - the "stuck on Loading"
+// bug reported against both Projects and Tags (both share this path via
+// browse_descend). Capped per-platform to what's actually been proven to fit;
+// a project/tag with more tasks than this just shows the first N - see
+// browse_descend's malloc-failure fallback for what happens if even this is
+// too much.
+#ifdef PBL_PLATFORM_EMERY
+#define MAX_BROWSE_TASKS 16
+#elif defined(PBL_PLATFORM_APLITE)
+#define MAX_BROWSE_TASKS 0 // PROJECTS_BROWSER is compiled out on aplite anyway
+#else
+#define MAX_BROWSE_TASKS 5
+#endif
 #if PROJECTS_CACHE
 static const uint32_t PERSIST_KEY_BROWSE_PROJECTS = 140; // + 1 for the count
 #endif
@@ -7087,23 +7095,25 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
 static void browse_descend(const char *project_id) {
   str_copy(s_browse_project_id, project_id, MAX_PROJECT_ID_LEN);
   if (!s_browse_tasks) {
-    int cap = MAX_BROWSE_TASKS;
-#ifdef PBL_PLATFORM_EMERY
-    if (s_browse_mode == BROWSE_CALENDAR_DAY) {
-      cap = MAX_CALDAY_TASKS;
-    }
-#endif
-    s_browse_tasks = malloc(sizeof(Task) * (size_t)cap);
+    s_browse_tasks = malloc(sizeof(Task) * MAX_BROWSE_TASKS);
   }
   s_browse_task_count = 0;
   s_browse_task_incoming = 0;
   s_browse_backlog_start = 0;
-  s_browse_tasks_loading = true;
+  // A malloc failure here used to leave s_browse_tasks NULL and this stuck on
+  // "Loading" forever - the PROJECT_TASKS_START/END handlers silently drop
+  // everything while it's NULL, so nothing else ever clears the flag. Fail
+  // visibly instead: skip the fetch and let browse_update_empty() show its
+  // empty state.
+  s_browse_tasks_loading = s_browse_tasks != NULL;
   s_browse_level = 1;
   if (s_browse_menu) {
     menu_layer_set_selected_index(s_browse_menu, MenuIndex(0, 0), MenuRowAlignTop, false);
     menu_layer_reload_data(s_browse_menu);
     browse_update_empty();
+  }
+  if (!s_browse_tasks) {
+    return;
   }
 #ifdef PBL_PLATFORM_EMERY
   if (s_browse_mode == BROWSE_CALENDAR_DAY) {
