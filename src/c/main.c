@@ -648,6 +648,16 @@ static int s_pending_reschedule_at_hour = 0;
 static AppTimer *s_pending_done_timer = NULL;
 static char s_pending_done_task_id[MAX_ID_LEN] = "";
 static int s_pending_done_tick = 0;
+// Once the cancel window above actually commits, that row wipes shut (a
+// bg-colored curtain closes left->right over its own title/subtitle) instead
+// of just snapping to the plain "Done" row. Rides the existing scroll timer's
+// tick (like the sync/add-task flashes below) rather than its own timer.
+#define COLLAPSE_MS 300
+static char s_collapse_task_id[MAX_ID_LEN] = "";
+static int s_collapse_tick = 0;
+// Project-group headers wipe in (header_bar_w) the first time task data
+// arrives after the app opens, same as the Stats/Upcoming/Notes bars.
+static bool s_group_headers_have_data = false;
 // The Resync row holds green for SYNC_GREEN_MS on a SYNCING -> OK edge - long
 // enough to actually register "it synced". The Add Task row flashes "Added" for
 // the briefer ADDTASK_FLASH_MS once a dictated task is sent. Both driven by the
@@ -2392,8 +2402,19 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   GRect text_rect = GRect(6, 2, bounds.size.w - 12, bounds.size.h - 4);
 
   // Fill first - a MenuLayer header has no built-in background, so the text and
-  // lines below would otherwise draw onto stale framebuffer content.
+  // lines below would otherwise draw onto stale framebuffer content. Wipes in
+  // left->right on emery the first sync after open, like every other
+  // header_bar_w bar (see header_begin_reveal). header_bar_w itself is
+  // aplite-excluded (no code-space there), so aplite just fills solid.
+#ifndef PBL_PLATFORM_APLITE
+  int16_t bar_w = header_bar_w(bounds.size.w);
+  fill_bg(ctx, GRect(bounds.origin.x, bounds.origin.y, bar_w, bounds.size.h), GColorGreen);
+  if (bar_w < bounds.size.w) {
+    return;
+  }
+#else
   fill_bg(ctx, bounds, GColorGreen);
+#endif
 
   graphics_context_set_text_color(ctx, GColorBlack);
   graphics_draw_text(ctx, name, bold_font, text_rect,
@@ -2661,6 +2682,12 @@ static void scroll_timer_callback(void *data) {
       s_lasthabit_flash_active = false;
     }
   }
+  if (s_collapse_task_id[0] != '\0') {
+    s_collapse_tick++;
+    if (s_collapse_tick * SCROLL_INTERVAL_MS >= COLLAPSE_MS) {
+      s_collapse_task_id[0] = '\0';
+    }
+  }
 #endif
   layer_mark_dirty(menu_layer_get_layer(s_menu_layer));
 #if PROJECTS_BROWSER
@@ -2778,7 +2805,7 @@ static void refresh_scroll_state(bool reset_offset) {
   if (s_pending_reschedule_kind != RESCHEDULE_NONE
 #ifdef PBL_PLATFORM_EMERY
       || s_pending_done_task_id[0] != '\0' || s_sync_check_active || s_addtask_flash_active ||
-      s_lasthabit_flash_active
+      s_lasthabit_flash_active || s_collapse_task_id[0] != '\0'
 #endif
      ) {
     needs_scroll = true;
@@ -2972,12 +2999,36 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
     fg = is_selected ? GColorLightGray : GColorDarkGray;
   }
   fill_bg(ctx, bounds, bg);
+#ifdef PBL_PLATFORM_EMERY
+  // pending_done_commit_callback just marked this row done - wipe it shut
+  // (a curtain closing left->right) instead of snapping straight to "Done".
+  if (task->done && s_collapse_task_id[0] != '\0' &&
+      strncmp(s_collapse_task_id, task->id, MAX_ID_LEN) == 0) {
+    // Just the closing curtain, no text underneath - the next tick either
+    // still shows it mid-close or has cleared s_collapse_task_id and falls
+    // through below to the plain "Done" row.
+    int curtain_w = bounds.size.w * s_collapse_tick * SCROLL_INTERVAL_MS / COLLAPSE_MS;
+    graphics_context_set_fill_color(ctx, is_selected ? GColorDarkGray : GColorLightGray);
+    graphics_fill_rect(ctx, GRect(0, 0, curtain_w > bounds.size.w ? bounds.size.w : curtain_w, bounds.size.h), 0, GCornerNone);
+    return;
+  }
+#endif
 #ifdef PBL_COLOR
   // Deadline urgency: a stripe down the left edge - red once overdue, amber for
   // due today. Not for a done task (the deadline no longer matters).
   if (!task->done && task->deadline_days != DEADLINE_NONE && task->deadline_days <= 0) {
     graphics_context_set_fill_color(ctx, task->deadline_days < 0 ? GColorRed : GColorOrange);
+#ifdef PBL_PLATFORM_EMERY
+    // Breathes 2px<->4px off the shared scroll offset - a quiet, ongoing "this
+    // still needs you" rather than a static bar. Only actually animates while
+    // something else keeps the repaint timer running (a marquee, a pending
+    // window); otherwise it just sits at whatever phase that left it.
+    int ph = ((s_scroll_offset_px % 40) + 40) % 40;
+    int up = ph < 20 ? ph : 40 - ph;
+    graphics_fill_rect(ctx, GRect(0, 0, 2 + up / 10, bounds.size.h), 0, GCornerNone);
+#else
     graphics_fill_rect(ctx, GRect(0, 0, 3, bounds.size.h), 0, GCornerNone);
+#endif
   }
 #endif
   graphics_context_set_text_color(ctx, fg);
@@ -3066,7 +3117,10 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
       }
       int full_w = subtitle_box.size.w;
       int bar_w = full_w * rem_ms / pend_total_ms;
-      graphics_context_set_fill_color(ctx, pend_crisp);
+      // Warms green -> red as the cancel window runs out, so the last stretch
+      // before it commits actually looks urgent.
+      bool bar_urgent = rem_ms * 100 / pend_total_ms <= 25;
+      graphics_context_set_fill_color(ctx, bar_urgent ? GColorRed : GColorIslamicGreen);
       graphics_fill_rect(ctx,
                          GRect(subtitle_box.origin.x + (full_w - bar_w) / 2,
                                subtitle_box.origin.y + subtitle_box.size.h - 3, bar_w, 2),
@@ -4962,6 +5016,14 @@ static void begin_pending_done(const char *task_id) {
   refresh_scroll_state(false);
 }
 
+// Ticked from scroll_timer_callback (like the sync/add-task flashes), not its
+// own timer - refresh_scroll_state keeps that timer alive while this is set.
+static void begin_collapse(const char *task_id) {
+  str_copy(s_collapse_task_id, task_id, MAX_ID_LEN);
+  s_collapse_tick = 0;
+  refresh_scroll_state(false);
+}
+
 // Cancel window elapsed: mark the task done for real and sync it.
 static void pending_done_commit_callback(void *data) {
   s_pending_done_timer = NULL;
@@ -4973,6 +5035,7 @@ static void pending_done_commit_callback(void *data) {
     save_tasks();
     send_task_toggle(task);
     vibes_short_pulse(); // the cancel window elapsed silently - confirm the commit
+    begin_collapse(task->id);
   }
   if (s_menu_layer) {
     menu_layer_reload_data(s_menu_layer);
@@ -5378,6 +5441,12 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       set_status_code(STATUS_OK);
       recompute_groups();
       save_tasks();
+#ifdef PBL_PLATFORM_EMERY
+      if (!s_group_headers_have_data && s_task_count > 0) {
+        header_begin_reveal(); // first data since open - wipe the group bars in
+      }
+      s_group_headers_have_data = true;
+#endif
 #ifndef PBL_PLATFORM_APLITE
       // A local tracking session whose task is gone from the synced list - even
       // though the phone force-includes any real tracked task (watchTaskList /
@@ -10562,6 +10631,7 @@ static void window_unload(Window *window) {
     s_pending_done_timer = NULL;
   }
   s_pending_done_task_id[0] = '\0';
+  s_collapse_task_id[0] = '\0';
 #endif
 #endif
 #if defined(PBL_TOUCH)
