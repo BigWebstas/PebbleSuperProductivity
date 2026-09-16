@@ -88,6 +88,11 @@ function PresenceClient(opts) {
   this._token = opts.token;
   this._clientId = opts.clientId;
   this._getCrypto = opts.getCrypto || function () { return null; };
+  // "Name of this device on other devices" (matches the desktop app's own
+  // settings label) - user-editable, read fresh per broadcast/stop-request
+  // so a pairing-page edit takes effect without rebuilding this client.
+  // Falls back to DEVICE_LABEL when unset or blank after sanitizing.
+  this._getDeviceLabel = opts.getDeviceLabel || function () { return ''; };
   this._log = opts.log || function (m) { console.log('[presence] ' + m); };
 
   // Timers, overridable so tests don't wait real seconds.
@@ -188,7 +193,7 @@ PresenceClient.prototype.requestStop = function (sessionId) {
   if (!sessionId || !this.isConnected()) {
     return;
   }
-  var cmd = { v: 1, cmd: 'stop', sessionId: sessionId, deviceLabel: 'Pebble' };
+  var cmd = { v: 1, cmd: 'stop', sessionId: sessionId, deviceLabel: this._ownDeviceLabel() };
   var envelope = this._encodeEnvelope(cmd);
   if (!envelope) {
     this._log('requestStop: could not encode cmd envelope');
@@ -273,6 +278,13 @@ PresenceClient.prototype.isBroadcasting = function () {
   return !!this._producer && !this._pendingStop;
 };
 
+// The label THIS device broadcasts as - the user's own "Name of this device
+// on other devices" setting, sanitized the same way a remote one is, falling
+// back to the plain "Pebble" default when unset or empty after sanitizing.
+PresenceClient.prototype._ownDeviceLabel = function () {
+  return sanitizeDeviceLabel(this._getDeviceLabel()) || DEVICE_LABEL;
+};
+
 PresenceClient.prototype._sendProducerState = function (state) {
   if (!this._producer) {
     return;
@@ -285,7 +297,7 @@ PresenceClient.prototype._sendProducerState = function (state) {
     state: state,
     taskId: this._producer.taskId,
     sinceTs: this._producer.sinceTs,
-    deviceLabel: DEVICE_LABEL,
+    deviceLabel: this._ownDeviceLabel(),
   };
   var envelope = this._encodeEnvelope(payload);
   if (!envelope) {

@@ -427,6 +427,17 @@ function clearKdfCache() {
   localStorage.removeItem('sp_kdf_encrypt_salt');
 }
 
+// Live tracking presence's "Name of this device on other devices" (matches
+// the desktop app's own settings label) - a user-editable string shown on
+// other synced devices while this watch is tracking, instead of the
+// presence-client's hardcoded "Pebble" default. Read fresh each time (like
+// getCrypto below) so an edit on the pairing page takes effect without
+// needing to rebuild the PresenceClient.
+function getDeviceLabel() {
+  var config = loadConfig();
+  return (config && config.deviceLabel) || '';
+}
+
 function getCrypto() {
   var password = localStorage.getItem('sp_password');
   if (!password) {
@@ -3731,6 +3742,7 @@ function applyPresence(config) {
       token: token,
       clientId: getOrCreateClientId(),
       getCrypto: getCrypto,
+      getDeviceLabel: getDeviceLabel,
       log: function (m) { console.log('[presence] ' + m); },
     });
     presenceClient.onState(onPresenceState);
@@ -3966,6 +3978,7 @@ Pebble.addEventListener('showConfiguration', function () {
       idleReminderMin: config.idleReminderMin || 0,
       dueReminderMin: config.dueReminderMin || 0,
       liveTracking: !!config.liveTracking,
+      deviceLabel: config.deviceLabel || '',
       enableTimeline: !!config.enableTimeline,
       focusLenMin: config.focusLenMin || 25,
       focusType: config.focusType || (config.usePomodoroCfg ? 'pomodoro' : 'countdown'),
@@ -4074,6 +4087,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     idleReminderMin: parseInt(result.idleReminderMin, 10) || 0,
     dueReminderMin: parseInt(result.dueReminderMin, 10) || 0,
     liveTracking: !!result.liveTracking,
+    deviceLabel: (result.deviceLabel || '').slice(0, 32),
     enableTimeline: !!result.enableTimeline,
     focusLenMin: parseInt(result.focusLenMin, 10) || 25,
     focusType: result.focusType || 'countdown',

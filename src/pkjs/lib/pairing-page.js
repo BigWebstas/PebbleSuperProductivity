@@ -52,6 +52,10 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var idleReminderMin = options.idleReminderMin || 0;
   var dueReminderMin = options.dueReminderMin || 0;
   var liveTracking = !!options.liveTracking;
+  // "Name of this device on other devices" - matches the desktop app's own
+  // settings label. Shown on other synced devices while this watch is
+  // tracking, in place of presence-client.js's hardcoded "Pebble" default.
+  var deviceLabel = options.deviceLabel || '';
   var stopAtMidnight = !!options.stopAtMidnight;
   var enableTimeline = !!options.enableTimeline;
   var focusLenMin = options.focusLenMin || 25;
@@ -377,6 +381,8 @@ idleReminderOptions + '\n' +
 '    <label for="liveTracking">Show live tracking from other devices</label>\n' +
 '  </div>\n' +
 '  <p class="hint">See what you\'re tracking on desktop / phone in the pinned TRACKING section, and stop it from the watch. SuperSync only, app-open only. Not on aplite.</p>\n' +
+'  <label for="deviceLabel" class="sub">Name of this device on other devices</label>\n' +
+'  <input class="sub" id="deviceLabel" type="text" maxlength="32" placeholder="Pebble" value="' + escapeHtmlAttr(deviceLabel) + '"' + (liveTracking ? '' : ' disabled') + '>\n' +
 '\n' +
 '  <h2>Notifications</h2>\n' +
 '  <label for="dueReminderMin">Notify before a task is due</label>\n' +
@@ -480,6 +486,14 @@ backlightOptions + '\n' +
 '    toggle.addEventListener(\'change\', function () { slider.disabled = !toggle.checked; });\n' +
 '  })();\n' +
 '\n' +
+'  // The device name only matters while live tracking is on - grey it out\n' +
+'  // with the checkbox, same as the volume slider above.\n' +
+'  (function () {\n' +
+'    var toggle = document.getElementById(\'liveTracking\');\n' +
+'    var input = document.getElementById(\'deviceLabel\');\n' +
+'    toggle.addEventListener(\'change\', function () { input.disabled = !toggle.checked; });\n' +
+'  })();\n' +
+'\n' +
 '  document.getElementById(\'openLoginBtn\').addEventListener(\'click\', function () {\n' +
 '    var baseUrl = document.getElementById(\'baseUrl\').value.replace(/\\/+$/, \'\');\n' +
 '    // sync.super-productivity.com\'s own root page is the login/"Connect"\n' +
@@ -533,6 +547,7 @@ backlightOptions + '\n' +
 '      idleReminderMin: parseInt(document.getElementById(\'idleReminderMin\').value, 10) || 0,\n' +
 '      dueReminderMin: parseInt(document.getElementById(\'dueReminderMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
+'      deviceLabel: document.getElementById(\'deviceLabel\').value.trim().slice(0, 32),\n' +
 '      stopAtMidnight: document.getElementById(\'stopAtMidnight\').checked,\n' +
 '      enableTimeline: document.getElementById(\'enableTimeline\').checked,\n' +
 '      focusLenMin: parseInt(document.getElementById(\'focusLenMin\').value, 10) || 25,\n' +

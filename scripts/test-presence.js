@@ -371,6 +371,20 @@ check('broadcastTracking sends a tracking state labelled Pebble', () => {
   assert.ok(c.isBroadcasting());
 });
 
+check('broadcastTracking uses a configured device label instead of the "Pebble" default', () => {
+  const c = newClient({ getDeviceLabel: () => 'My Watch' });
+  c.broadcastTracking('task-9', 1700000000000);
+  assert.strictEqual(lastStateSent().deviceLabel, 'My Watch');
+});
+
+check('an empty configured device label still falls back to "Pebble"', () => {
+  // pairing-page.js trims before saving, so a real config never carries a
+  // whitespace-only value - just the empty-string "never set" case.
+  const c = newClient({ getDeviceLabel: () => '' });
+  c.broadcastTracking('task-9', 1700000000000);
+  assert.strictEqual(lastStateSent().deviceLabel, 'Pebble');
+});
+
 check('same task keeps the session and bumps seq; a new task starts a new one', () => {
   const c = newClient();
   c.broadcastTracking('task-9', 1000);
