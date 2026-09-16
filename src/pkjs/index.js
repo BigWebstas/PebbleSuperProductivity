@@ -190,6 +190,17 @@ function hideDoneGraceMs() {
   return store.HIDE_DONE_GRACE_MS;
 }
 
+// config.groupBy ('none'/'project'/'tag'/'deadline'/'plannedDate') replaced
+// the old boolean config.groupByProject - a saved config from before that
+// change has groupBy undefined, so fall back to the old field rather than
+// silently resetting an existing user's grouping to "none" on update.
+function groupByMode(config) {
+  if (config.groupBy) {
+    return config.groupBy;
+  }
+  return config.groupByProject ? 'project' : 'none';
+}
+
 // Separates a voice-dictated note append (see handleNoteAppend) from
 // whatever notes text already existed, both when re-read on the watch's own
 // notes overlay (TASK_NOTES, see sendTaskAt below) and on the real app's
@@ -674,11 +685,12 @@ function watchTaskList(state, config) {
   return store.getActiveTasks(
     state,
     MAX_TASKS,
-    !!config.groupByProject,
+    groupByMode(config),
     !!config.todayOnly,
     !!config.hideDoneTasks,
     trackedId,
-    hideDoneGraceMs()
+    hideDoneGraceMs(),
+    config.sortBy || 'name'
   );
 }
 
@@ -3934,7 +3946,8 @@ Pebble.addEventListener('showConfiguration', function () {
     config.baseUrl || supersync.DEFAULT_BASE_URL,
     config.email || '',
     {
-      groupByProject: !!config.groupByProject,
+      groupBy: groupByMode(config),
+      sortBy: config.sortBy || 'name',
       laterToday: !!config.laterToday,
       todayOnly: !!config.todayOnly,
       hideDoneTasks: !!config.hideDoneTasks,
@@ -4054,7 +4067,8 @@ Pebble.addEventListener('webviewclosed', function (e) {
     baseUrl: result.baseUrl || supersync.DEFAULT_BASE_URL,
     email: result.email,
     jwt: newJwt,
-    groupByProject: !!result.groupByProject,
+    groupBy: result.groupBy || 'none',
+    sortBy: result.sortBy || 'name',
     laterToday: !!result.laterToday,
     todayOnly: !!result.todayOnly,
     hideDoneTasks: !!result.hideDoneTasks,

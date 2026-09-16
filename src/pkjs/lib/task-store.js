@@ -117,6 +117,16 @@ function taskDeadlineDays(t) {
   return day ? diffInDays(todayStr(), day) : undefined;
 }
 
+// Same shape as taskDeadlineDays, for the task's own scheduled day instead
+// of its deadline - dueDay/dueWithTime are the "planned date" desktop's
+// group-by-planned-date mode buckets on. Mutually exclusive in the real
+// model, same as deadlineDay/deadlineWithTime above.
+function taskPlannedDays(t) {
+  var day = t.dueDay ||
+    (t.dueWithTime ? dateToDateStr(new Date(t.dueWithTime)) : null);
+  return day ? diffInDays(todayStr(), day) : undefined;
+}
+
 // Short issue-tracker key for a task linked to an issue (Jira/GitHub/...). Jira
 // etc. store the key itself in issueId ("PROJ-123"); GitHub/GitLab/Gitea store
 // a plain number, shown as "#123". Story points, when set, follow as " 3p". A
@@ -1180,6 +1190,47 @@ function tagTitlesFor(state, task) {
   return names.join(', ');
 }
 
+// The single tag a "group by tag" row sorts under - desktop shows a
+// multi-tagged task under every one of its tags, but the watch's flat,
+// ID-mapped row list can't duplicate a task across groups without breaking
+// Select/done-toggle targeting, so this is the first tag only (deliberate
+// simplification, not an oversight).
+function firstTagTitleFor(state, task) {
+  var ids = task.tagIds || [];
+  var tags = state.tag || {};
+  for (var i = 0; i < ids.length; i++) {
+    if (tags[ids[i]] && tags[ids[i]].title) {
+      return tags[ids[i]].title;
+    }
+  }
+  return 'No Tag';
+}
+
+// A "p1"/"*p1"/"p2"/... tag (case-insensitive, an optional leading star for
+// a starred/pinned variant) marks a task's priority for sortBy='tag' -
+// p1 outranks p2 outranks p3, above every other tag alphabetically, matching
+// a convention some desktop users tag their own tasks with by hand (this
+// app has no separate priority field of its own to read instead). A task
+// can carry more than one such tag; the lowest number (highest priority)
+// wins. undefined when the task has none.
+var PRIORITY_TAG_RE = /^\*?p(\d+)$/i;
+function priorityRank(state, task) {
+  var ids = task.tagIds || [];
+  var tags = state.tag || {};
+  var best;
+  for (var i = 0; i < ids.length; i++) {
+    var title = tags[ids[i]] && tags[ids[i]].title;
+    var m = title && PRIORITY_TAG_RE.exec(title);
+    if (m) {
+      var n = parseInt(m[1], 10);
+      if (best === undefined || n < best) {
+        best = n;
+      }
+    }
+  }
+  return best;
+}
+
 function titleCompare(a, b) {
   // Plain ordinal comparison, not localeCompare(): confirmed against the
   // basalt emulator that its embedded JS engine throws "Internal error.
@@ -1198,6 +1249,49 @@ function withinGroupSort(a, b) {
     return a.isDone ? 1 : -1;
   }
   return titleCompare(a.title, b.title);
+}
+
+// getActiveTasks's own sortBy option (matching desktop's task-list sort
+// dropdown): not-done before done always comes first, same as
+// withinGroupSort above - that ordering is an app-wide "what needs doing"
+// convention, independent of which key the user picked to order by. 'name'
+// (the default, sortBy undefined) is byte-for-byte withinGroupSort's own
+// behaviour, so every other caller (getProjectTasks/getTagTasks, both still
+// using withinGroupSort directly) is unaffected by this existing.
+// Numeric/date keys sort ascending (soonest/smallest first) with the
+// title as the tie-break, including ties among tasks missing the field
+// entirely (dayBucketRank/`|| 0` push those to the end without needing a
+// separate branch).
+function taskCompareBy(sortBy, state) {
+  return function (a, b) {
+    if (!!a.isDone !== !!b.isDone) {
+      return a.isDone ? 1 : -1;
+    }
+    switch (sortBy) {
+      case 'plannedDate':
+        return dayBucketRank(taskPlannedDays(a)) - dayBucketRank(taskPlannedDays(b)) ||
+          titleCompare(a.title, b.title);
+      case 'deadline':
+        return dayBucketRank(taskDeadlineDays(a)) - dayBucketRank(taskDeadlineDays(b)) ||
+          titleCompare(a.title, b.title);
+      case 'created':
+        return (a.created || 0) - (b.created || 0) || titleCompare(a.title, b.title);
+      case 'estimate':
+        return (a.timeEstimate || 0) - (b.timeEstimate || 0) || titleCompare(a.title, b.title);
+      case 'timeSpent':
+        return (a.timeSpent || 0) - (b.timeSpent || 0) || titleCompare(a.title, b.title);
+      case 'tag': {
+        // A p1/p2/... priority tag outranks everything else, in priority
+        // order, above the plain alphabetical-by-tag fallback.
+        var arank = priorityRank(state, a), brank = priorityRank(state, b);
+        return (arank === undefined ? Infinity : arank) - (brank === undefined ? Infinity : brank) ||
+          titleCompare(firstTagTitleFor(state, a), firstTagTitleFor(state, b)) ||
+          titleCompare(a.title, b.title);
+      }
+      default:
+        return titleCompare(a.title, b.title);
+    }
+  };
 }
 
 // Sentinel project id for the synthetic "No Project" entry getProjectList
@@ -1457,7 +1551,23 @@ function isHiddenDone(t, hideDone, graceMs) {
 // pinned_task_index scans exactly this list). A tracked SUBTASK pulls in its
 // parent instead, so it still nests (same reason todayOnly pulls in a parent
 // for a today-due subtask).
-function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alwaysIncludeId, graceMs) {
+// groupByProject accepts either the new string mode ('none'/'project'/
+// 'tag'/'deadline'/'plannedDate') or the old boolean (true='project',
+// false/falsy='none') - kept for every existing caller (index.js's older
+// callers and this file's own test suite) that still passes a boolean.
+function normalizeGroupBy(groupByProject) {
+  if (groupByProject === true) {
+    return 'project';
+  }
+  if (!groupByProject) {
+    return 'none';
+  }
+  return String(groupByProject);
+}
+
+function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alwaysIncludeId, graceMs, sortBy) {
+  var groupBy = normalizeGroupBy(groupByProject);
+  var taskSort = taskCompareBy(sortBy, state);
   var allTasks = state.task || {};
   var today = todayStr();
   var mainTasks = Object.keys(allTasks)
@@ -1523,7 +1633,7 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alway
   }
 
   var rows = [];
-  if (groupByProject) {
+  if (groupBy === 'project') {
     var byProject = {};
     // Grouped by project TITLE (not id) - see projectTitleFor's own "No
     // Project" fallback - so groupProjectIds takes the first task's own
@@ -1545,13 +1655,49 @@ function getActiveTasks(state, limit, groupByProject, todayOnly, hideDone, alway
       byProject[name].push(t);
     });
     Object.keys(byProject).sort(titleCompare).forEach(function (name) {
-      byProject[name].sort(withinGroupSort);
+      byProject[name].sort(taskSort);
       byProject[name].forEach(function (t) {
         pushTaskAndSubtasks(rows, state, allTasks, t, name, groupProjectIds[name], groupColors[name], hideDone, graceMs);
       });
     });
+  } else if (groupBy === 'tag') {
+    // Unlike project groups, a tag group never has a real project id/colour
+    // - pushTaskAndSubtasks gets '' / 0 for both, same as the "No Project"
+    // case above already uses, so the watch's existing "not a real project"
+    // handling (see main.c's group_is_real_project) covers this for free.
+    var byTag = {};
+    mainTasks.forEach(function (t) {
+      var name = firstTagTitleFor(state, t);
+      (byTag[name] || (byTag[name] = [])).push(t);
+    });
+    Object.keys(byTag).sort(titleCompare).forEach(function (name) {
+      byTag[name].sort(taskSort);
+      byTag[name].forEach(function (t) {
+        pushTaskAndSubtasks(rows, state, allTasks, t, name, '', 0, hideDone, graceMs);
+      });
+    });
+  } else if (groupBy === 'deadline' || groupBy === 'plannedDate') {
+    var dayFn = groupBy === 'deadline' ? taskDeadlineDays : taskPlannedDays;
+    var noneLabel = groupBy === 'deadline' ? 'No deadline' : 'No date';
+    var byBucket = {};
+    var bucketRank = {};
+    mainTasks.forEach(function (t) {
+      var diffDays = dayFn(t);
+      var name = dayBucketLabel(diffDays, noneLabel);
+      if (!byBucket[name]) {
+        byBucket[name] = [];
+        bucketRank[name] = dayBucketRank(diffDays);
+      }
+      byBucket[name].push(t);
+    });
+    Object.keys(byBucket).sort(function (a, b) { return bucketRank[a] - bucketRank[b]; }).forEach(function (name) {
+      byBucket[name].sort(taskSort);
+      byBucket[name].forEach(function (t) {
+        pushTaskAndSubtasks(rows, state, allTasks, t, name, '', 0, hideDone, graceMs);
+      });
+    });
   } else {
-    mainTasks.sort(withinGroupSort);
+    mainTasks.sort(taskSort);
     mainTasks.forEach(function (t) {
       pushTaskAndSubtasks(rows, state, allTasks, t, '', '', 0, hideDone, graceMs);
     });
@@ -2176,6 +2322,37 @@ function parseDayStr(s) {
 
 function diffInDays(fromDay, toDay) {
   return Math.round((parseDayStr(toDay).getTime() - parseDayStr(fromDay).getTime()) / 86400000);
+}
+
+// Shared by "group by deadline" and "group by planned date": a day-diff
+// (from taskDeadlineDays/taskPlannedDays, undefined = none) -> a bucket
+// label, matching the vocabulary main.c's own build_task_subtitle already
+// uses for the same ranges ("! overdue"/"! today"/"! tomorrow"/weekday/
+// "! Nd") so the two don't disagree. noneLabel is the caller's own "No
+// deadline" / "No date" text for the undefined case.
+var DAY_BUCKET_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function dayBucketLabel(diffDays, noneLabel) {
+  if (diffDays === undefined || diffDays === null) {
+    return noneLabel;
+  }
+  if (diffDays < 0) {
+    return 'Overdue';
+  }
+  if (diffDays === 0) {
+    return 'Today';
+  }
+  if (diffDays === 1) {
+    return 'Tomorrow';
+  }
+  if (diffDays <= 6) {
+    return DAY_BUCKET_WEEKDAYS[(new Date().getDay() + diffDays) % 7];
+  }
+  return 'Later';
+}
+// Sort key for a day-bucket group: ascending by the earliest diffDays that
+// falls in it, undefined (the noneLabel bucket) sorts last.
+function dayBucketRank(diffDays) {
+  return diffDays === undefined || diffDays === null ? Infinity : diffDays;
 }
 function diffInMonths(fromDay, toDay) {
   var a = parseDayStr(fromDay), b = parseDayStr(toDay);

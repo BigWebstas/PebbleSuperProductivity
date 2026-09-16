@@ -75,7 +75,7 @@ function transferTask(taskId, prevDay, newDay) {
 }
 
 function active(state, limit, groupByProject, todayOnly, hideDone) {
-  return store.getActiveTasks(state, limit == null ? 30 : limit, !!groupByProject, !!todayOnly, !!hideDone);
+  return store.getActiveTasks(state, limit == null ? 30 : limit, groupByProject, !!todayOnly, !!hideDone);
 }
 
 function counterEntry(actionType, actionPayload) {
@@ -1666,6 +1666,191 @@ check('getActiveTasks skips a tag id with no matching TAG entity', () => {
   );
   const tasks = active(state);
   assert.strictEqual(tasks.find((t) => t.id === 't1').tags, 'urgent');
+});
+
+check('getActiveTasks(groupByProject=\'tag\') groups by first tag title, sorted, with a "No Tag" bucket', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tg1', title: 'Urgent' } }),
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tg2', title: 'Home' } }),
+      addTask({ id: 'a', title: 'X', isDone: false, tagIds: ['tg1'] }),
+      // Multi-tagged: first tag wins the group, desktop's per-tag duplication
+      // isn't reproduced (see firstTagTitleFor's own comment for why).
+      addTask({ id: 'b', title: 'Y', isDone: false, tagIds: ['tg2', 'tg1'] }),
+      addTask({ id: 'c', title: 'Z', isDone: false }),
+    ],
+    state
+  );
+  const tasks = active(state, 30, 'tag');
+  // Groups sorted by title: "Home" < "No Tag" < "Urgent"
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['b', 'c', 'a']);
+  assert.deepStrictEqual(tasks.map((t) => t.project), ['Home', 'No Tag', 'Urgent']);
+});
+
+check('getActiveTasks(groupByProject=\'deadline\') buckets by deadline day-diff in chronological order', () => {
+  const state = store.emptyState();
+  const today = store.todayStr();
+  store.applyOperations(
+    [
+      addTask({ id: 'later', title: 'Later', isDone: false, deadlineDay: '2099-01-01' }),
+      addTask({ id: 'none', title: 'No deadline', isDone: false }),
+      addTask({ id: 'overdue', title: 'Overdue', isDone: false, deadlineDay: '2000-01-01' }),
+      addTask({ id: 'today', title: 'Due today', isDone: false, deadlineDay: today }),
+    ],
+    state
+  );
+  const tasks = active(state, 30, 'deadline');
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['overdue', 'today', 'later', 'none']);
+  assert.deepStrictEqual(tasks.map((t) => t.project), ['Overdue', 'Today', 'Later', 'No deadline']);
+});
+
+check('getActiveTasks(groupByProject=\'plannedDate\') buckets by dueDay/dueWithTime, independent of deadline', () => {
+  const state = store.emptyState();
+  const today = store.todayStr();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Planned today', isDone: false, dueDay: today, deadlineDay: '2099-01-01' }),
+      addTask({ id: 'b', title: 'No plan', isDone: false }),
+    ],
+    state
+  );
+  const tasks = active(state, 30, 'plannedDate');
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['a', 'b']);
+  assert.deepStrictEqual(tasks.map((t) => t.project), ['Today', 'No date']);
+});
+
+check('getActiveTasks(groupByProject=<legacy boolean>) still works: true=project, false=none', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      addTask({ id: 'a', title: 'X', isDone: false, projectId: 'p1' }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(active(state, 30, true).map((t) => t.project), ['Work']);
+  assert.deepStrictEqual(active(state, 30, false).map((t) => t.project), ['']);
+  assert.deepStrictEqual(active(state, 30, undefined).map((t) => t.project), ['']);
+});
+
+function activeSorted(state, sortBy) {
+  return store.getActiveTasks(state, 30, false, false, false, null, 0, sortBy);
+}
+
+check('getActiveTasks(sortBy=\'name\', the default) sorts alphabetically, not-done before done', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Zebra', isDone: false }),
+      addTask({ id: 'b', title: 'Apple', isDone: true }),
+      addTask({ id: 'c', title: 'Mango', isDone: false }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(activeSorted(state).map((t) => t.id), ['c', 'a', 'b']);
+  assert.deepStrictEqual(activeSorted(state, 'name').map((t) => t.id), ['c', 'a', 'b']);
+});
+
+check('getActiveTasks(sortBy=\'deadline\') sorts soonest-deadline first, undated last', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'none', title: 'No deadline', isDone: false }),
+      addTask({ id: 'later', title: 'Later', isDone: false, deadlineDay: '2099-01-01' }),
+      addTask({ id: 'overdue', title: 'Overdue', isDone: false, deadlineDay: '2000-01-01' }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(activeSorted(state, 'deadline').map((t) => t.id), ['overdue', 'later', 'none']);
+});
+
+check('getActiveTasks(sortBy=\'plannedDate\') sorts by dueDay, independent of deadline', () => {
+  const state = store.emptyState();
+  const today = store.todayStr();
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'Z', isDone: false, dueDay: today }),
+      addTask({ id: 'b', title: 'A', isDone: false }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(activeSorted(state, 'plannedDate').map((t) => t.id), ['a', 'b']);
+});
+
+check('getActiveTasks(sortBy=\'created\') sorts oldest first', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'newer', title: 'Newer', isDone: false, created: 200 }),
+      addTask({ id: 'older', title: 'Older', isDone: false, created: 100 }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(activeSorted(state, 'created').map((t) => t.id), ['older', 'newer']);
+});
+
+check('getActiveTasks(sortBy=\'estimate\'/\'timeSpent\') sorts smallest first', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'big', title: 'Big', isDone: false, timeEstimate: 3600000, timeSpent: 500 }),
+      addTask({ id: 'small', title: 'Small', isDone: false, timeEstimate: 60000, timeSpent: 100 }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(activeSorted(state, 'estimate').map((t) => t.id), ['small', 'big']);
+  assert.deepStrictEqual(activeSorted(state, 'timeSpent').map((t) => t.id), ['small', 'big']);
+});
+
+check('getActiveTasks(sortBy=\'tag\') sorts by first tag title', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tg1', title: 'Zeta' } }),
+      tagEntry('[Tag] Add Tag', { tag: { id: 'tg2', title: 'Alpha' } }),
+      addTask({ id: 'z', title: 'Z-task', isDone: false, tagIds: ['tg1'] }),
+      addTask({ id: 'a', title: 'A-task', isDone: false, tagIds: ['tg2'] }),
+      addTask({ id: 'none', title: 'No tag', isDone: false }),
+    ],
+    state
+  );
+  // "Alpha" < "No Tag" < "Zeta"
+  assert.deepStrictEqual(activeSorted(state, 'tag').map((t) => t.id), ['a', 'none', 'z']);
+});
+
+check('getActiveTasks(sortBy=\'tag\') puts p1/p2/... priority tags first, in priority order', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      tagEntry('[Tag] Add Tag', { tag: { id: 'p1', title: 'p1' } }),
+      tagEntry('[Tag] Add Tag', { tag: { id: 'p2', title: '*P2' } }), // starred + mixed case
+      tagEntry('[Tag] Add Tag', { tag: { id: 'aa', title: 'Alpha' } }),
+      addTask({ id: 'alpha', title: 'Alpha task', isDone: false, tagIds: ['aa'] }),
+      addTask({ id: 'low', title: 'Low priority', isDone: false, tagIds: ['p2'] }),
+      addTask({ id: 'high', title: 'High priority', isDone: false, tagIds: ['p1'] }),
+      addTask({ id: 'both', title: 'Has both, p1 wins', isDone: false, tagIds: ['p2', 'p1'] }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(
+    activeSorted(state, 'tag').map((t) => t.id),
+    ['both', 'high', 'low', 'alpha']
+  );
+});
+
+check('sortBy orders WITHIN each group when grouping is also on', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      entry('PROJECT', '[Project] Add Project', { project: { id: 'p1', title: 'Work' } }),
+      addTask({ id: 'a', title: 'B', isDone: false, projectId: 'p1', created: 200 }),
+      addTask({ id: 'b', title: 'A', isDone: false, projectId: 'p1', created: 100 }),
+    ],
+    state
+  );
+  const tasks = store.getActiveTasks(state, 30, 'project', false, false, null, 0, 'created');
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['b', 'a']);
 });
 
 // ---- getTagList / getTagTasks (the optional Tags page) ----

@@ -16,7 +16,8 @@ function escapeHtmlAttr(s) {
 
 function buildPairingPageUrl(baseUrl, email, options) {
   options = options || {};
-  var groupByProject = !!options.groupByProject;
+  var groupBy = options.groupBy || (options.groupByProject ? 'project' : 'none');
+  var sortBy = options.sortBy || 'name';
   var laterToday = !!options.laterToday;
   var todayOnly = !!options.todayOnly;
   var hideDoneTasks = !!options.hideDoneTasks;
@@ -139,6 +140,28 @@ function buildPairingPageUrl(baseUrl, email, options) {
     var selected = opt[0] === focusType ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
+  var groupByOptions = [
+    ['none', "Don't group"],
+    ['project', 'Project'],
+    ['tag', 'Tag'],
+    ['deadline', 'Deadline'],
+    ['plannedDate', 'Planned date'],
+  ].map(function (opt) {
+    var selected = opt[0] === groupBy ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
+  var sortByOptions = [
+    ['name', 'Name'],
+    ['plannedDate', 'Planned date'],
+    ['deadline', 'Deadline'],
+    ['created', 'Creation'],
+    ['estimate', 'Estimated time'],
+    ['timeSpent', 'Time spent'],
+    ['tag', 'Tag'],
+  ].map(function (opt) {
+    var selected = opt[0] === sortBy ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
   var backlightOptions = [
     [0, 'System default'],
     [5, '5 seconds after a button press'],
@@ -222,11 +245,16 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  <p id="status"></p>\n' +
 '\n' +
 '  <h2>Watch list</h2>\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="groupByProject" type="checkbox"' + (groupByProject ? ' checked' : '') + '>\n' +
-'    <label for="groupByProject">Group tasks by project</label>\n' +
-'  </div>\n' +
-'  <p class="hint">Green project headers above each group, instead of one flat list.</p>\n' +
+'  <label for="groupBy">Group tasks by</label>\n' +
+'  <select id="groupBy">\n' +
+groupByOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">Green headers above each group, instead of one flat list.</p>\n' +
+'  <label for="sortBy">Sort tasks by</label>\n' +
+'  <select id="sortBy">\n' +
+sortByOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">Order within each group (or the whole list, ungrouped). Not-done tasks always come before done ones.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="laterToday" type="checkbox"' + (laterToday ? ' checked' : '') + '>\n' +
@@ -517,7 +545,8 @@ backlightOptions + '\n' +
 '      email: document.getElementById(\'email\').value.trim(),\n' +
 '      password: document.getElementById(\'password\').value,\n' +
 '      jwt: jwt,\n' +
-'      groupByProject: document.getElementById(\'groupByProject\').checked,\n' +
+'      groupBy: document.getElementById(\'groupBy\').value,\n' +
+'      sortBy: document.getElementById(\'sortBy\').value,\n' +
 '      laterToday: document.getElementById(\'laterToday\').checked,\n' +
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
 '      hideDoneTasks: document.getElementById(\'hideDoneTasks\').checked,\n' +
