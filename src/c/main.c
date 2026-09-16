@@ -2402,19 +2402,12 @@ static void menu_draw_header(GContext *ctx, const Layer *cell_layer, uint16_t se
   GRect text_rect = GRect(6, 2, bounds.size.w - 12, bounds.size.h - 4);
 
   // Fill first - a MenuLayer header has no built-in background, so the text and
-  // lines below would otherwise draw onto stale framebuffer content. Wipes in
-  // left->right on emery the first sync after open, like every other
-  // header_bar_w bar (see header_begin_reveal). header_bar_w itself is
-  // aplite-excluded (no code-space there), so aplite just fills solid.
-#ifndef PBL_PLATFORM_APLITE
-  int16_t bar_w = header_bar_w(bounds.size.w);
-  fill_bg(ctx, GRect(bounds.origin.x, bounds.origin.y, bar_w, bounds.size.h), GColorGreen);
-  if (bar_w < bounds.size.w) {
-    return;
-  }
-#else
+  // lines below would otherwise draw onto stale framebuffer content. This
+  // whole branch only actually renders on aplite - menu_get_header_height
+  // returns 0 for this section everywhere else, where the group name lives
+  // in a selectable "project row" drawn by menu_draw_row instead (see the
+  // wipe-in on that row below for the animated version of this).
   fill_bg(ctx, bounds, GColorGreen);
-#endif
 
   graphics_context_set_text_color(ctx, GColorBlack);
   graphics_draw_text(ctx, name, bold_font, text_rect,
@@ -3578,16 +3571,27 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     GFont bold_font = fonts_get_system_font(HEADING_FONT_KEY);
     int16_t text_top = HEADING_TITLE_Y(bounds.size.h);
     GColor fg = is_selected ? GColorWhite : GColorBlack;
+    // Empty project_id is the shared "not a real project" signal - the
+    // synthetic Later Today group has always forced this (recompute_groups),
+    // and a phone-side group-by-tag/deadline/planned-date group now does the
+    // same, so one check here covers all of them.
+    bool group_is_real_project = project_row->project_id[0] != '\0';
 
-    fill_bg(ctx, bounds, GColorGreen);
+    // Wipes in left->right on emery the first sync after open, like every
+    // other header_bar_w bar (see header_begin_reveal) - a no-op stub off
+    // emery, so this is a plain fill everywhere else.
+    int16_t bar_w = header_bar_w(bounds.size.w);
+    fill_bg(ctx, GRect(bounds.origin.x, bounds.origin.y, bar_w, bounds.size.h), GColorGreen);
+    if (bar_w < bounds.size.w) {
+      return;
+    }
 #if TODAY_PROJECT_SWATCH
-    // Later Today pools tasks from every project - showing whichever one's
-    // first task happens to be would misrepresent the group, so it gets no
-    // swatch (project_color 0), same as "No Project".
+    // A non-project group (Later Today, or a tag/deadline/planned-date
+    // group) has nothing real to swatch, same as "No Project" - color 0.
     int16_t text_x = draw_project_marker(ctx, TITLE_BOX_X, bounds.size.h,
                                           project_row->project_id,
-                                          project_row->is_later_today ? 0
-                                            : s_tasks[s_row_map[project_row->start]].project_color,
+                                          group_is_real_project
+                                            ? s_tasks[s_row_map[project_row->start]].project_color : 0,
                                           is_selected);
 #else
     int16_t text_x = TITLE_BOX_X;
@@ -4573,8 +4577,13 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
   TaskGroup *project_row = resolve_project_row_at(*cell_index);
   if (project_row) {
 #if PROJECTS_BROWSER
-    s_browse_mode = BROWSE_PROJECTS;
-    push_browse_window(project_row->project_id);
+    // A non-project group (Later Today, or a tag/deadline/planned-date
+    // group) has no project to browse into - swallow the click rather than
+    // dropping into the unrelated Projects list.
+    if (project_row->project_id[0] != '\0') {
+      s_browse_mode = BROWSE_PROJECTS;
+      push_browse_window(project_row->project_id);
+    }
 #endif
     return;
   }
@@ -4635,9 +4644,13 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
     return;
   }
   // The project row - long-Select opens its notes (Select opens its tasks).
+  // A non-project group (Later Today, or a tag/deadline/planned-date group)
+  // has no project to open notes for - swallow the long-Select instead.
   TaskGroup *project_row = resolve_project_row_at(*cell_index);
   if (project_row) {
-    show_project_notes_overlay(project_row);
+    if (project_row->project_id[0] != '\0') {
+      show_project_notes_overlay(project_row);
+    }
     return;
   }
 #endif
