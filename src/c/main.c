@@ -241,6 +241,10 @@ enum {
   MSG_CAL_MONTH_REQUEST = 64, // watch -> phone: CAL_MONTH_OFFSET (months from the real current month)
   MSG_CAL_MONTH_DATA = 65,    // phone -> watch: CAL_MONTH_OFFSET (echoed - see handle_calendar_month_data) + CAL_MONTH_MASK
   MSG_CALDAY_REQUEST = 66,    // watch -> phone: CALDAY_DATE ("YYYY-MM-DD")
+  // The action menu's "Delete" row - a second press past the armed "Confirm
+  // delete?" label (s_delete_armed) before this ever sends; no undo once it
+  // does. See action_select's ACT_DELETE case.
+  MSG_TASK_DELETE = 67,       // watch -> phone: TASK_ID
 };
 
 // STATUS_CODE values sent from the phone.
@@ -3670,6 +3674,9 @@ static void send_pending_retry(void) {
     case MSG_CALDAY_REQUEST:
       dict_write_cstring(iter, KEY_CALDAY_DATE, s_retry_str);
       break;
+    case MSG_TASK_DELETE:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      break;
     case MSG_HABIT_TRACK_STOP:
       dict_write_cstring(iter, KEY_HABIT_ID, s_retry_str);
       dict_write_int32(iter, KEY_TRACKED_MS, s_retry_int);
@@ -3806,6 +3813,14 @@ static void send_task_toggle(Task *task) {
   begin_send(MSG_TASK_TOGGLE, task->id, NULL, task->done ? 1 : 0);
 #endif
 }
+
+#ifndef PBL_PLATFORM_APLITE
+// The action menu's "Delete" row - only reachable there, which is itself
+// non-aplite (no RAM budget for the menu window), so no aplite branch needed.
+static void send_task_delete(const char *task_id) {
+  begin_send(MSG_TASK_DELETE, task_id, NULL, 0);
+}
+#endif
 
 static void send_track_time_stop(const char *task_id, int32_t tracked_ms) {
 #ifdef PBL_PLATFORM_APLITE
@@ -8483,21 +8498,25 @@ static void push_reflect_window(void) {
 enum {
   ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
   ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG,
+  ACT_DELETE, // always last - destructive, see the arm/confirm state below
   ACT_REPEAT, // appended by act_rows() only for a recurring task
 };
 // The visible rows, in order, per context. ACT_DONE is first (the commonest
 // action, so Select-Select completes a task). Tags / Move open the browse window
 // as a picker, so they're only offered from the today list (from the browser
 // that window is already on the stack). Backlog is a project-task concept.
+// ACT_DELETE is last in every context - no round-trip on the watch (see
+// CLAUDE.md's "no delete-from-watch" note, no longer true as of this row),
+// so it needs its own arm/confirm step, unlike everything else here.
 static const int s_act_rows_today[] = {
   ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
-  ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE };
+  ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE, ACT_DELETE };
 static const int s_act_rows_project[] = {
   ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
-  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG };
+  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG, ACT_DELETE };
 static const int s_act_rows_tag[] = {
   ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
-  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE };
+  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE, ACT_DELETE };
 
 // ActionCtx declared with the forward decls.
 static Window *s_action_window = NULL;
@@ -8509,6 +8528,15 @@ static bool s_action_in_backlog = false;
 // "Repeat" row: pattern text (MSG_TASK_REPEAT_DATA) + pause state, per open.
 static char s_action_repeat_text[24] = "";
 static bool s_action_repeat_paused = false;
+// ACT_DELETE's own two-press guard: the first press arms it (label flips to
+// "Confirm delete?", menu stays open, like ACT_REPEAT's in-place toggle) and
+// starts DELETE_ARM_MS; a second press within that window actually sends
+// MSG_TASK_DELETE, anything else (Back, the timer, opening a different task)
+// disarms it back to plain "Delete". Reset whenever the menu opens fresh
+// (push_action_menu) and on close (action_window_unload).
+#define DELETE_ARM_MS 4000
+static bool s_delete_armed = false;
+static AppTimer *s_delete_arm_timer = NULL;
 static int s_act_rows_buf[14];
 
 static Task *resolve_action_task(void);
@@ -8594,12 +8622,22 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
     case ACT_ESTIMATE:   label = "Set estimate"; break;
     case ACT_DEADLINE:   label = "Set deadline"; break;
     case ACT_BACKLOG:    label = s_action_in_backlog ? "Move to list" : "Move to backlog"; break;
+    case ACT_DELETE:     label = s_delete_armed ? "Confirm delete?" : "Delete"; break;
     case ACT_REPEAT:
       label = s_action_repeat_paused ? "Resume repeat" : "Pause repeat";
       sub = s_action_repeat_text[0] ? s_action_repeat_text : "Loading...";
       break;
   }
   menu_cell_basic_draw(ctx, cell, label, sub, NULL);
+}
+
+// DELETE_ARM_MS elapsed with no second press - disarm back to plain "Delete".
+static void delete_disarm_callback(void *data) {
+  s_delete_arm_timer = NULL;
+  s_delete_armed = false;
+  if (s_action_menu) {
+    menu_layer_reload_data(s_action_menu);
+  }
 }
 
 static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
@@ -8618,6 +8656,22 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
     menu_layer_reload_data(s_action_menu);
     return;
   }
+  if (row == ACT_DELETE && !s_delete_armed) {
+    // First press - arm it and stay open, same shape as ACT_REPEAT above.
+    s_delete_armed = true;
+    if (s_delete_arm_timer) {
+      app_timer_cancel(s_delete_arm_timer);
+    }
+    s_delete_arm_timer = app_timer_register(DELETE_ARM_MS, delete_disarm_callback, NULL);
+    vibes_short_pulse();
+    menu_layer_reload_data(s_action_menu);
+    return;
+  }
+  if (s_delete_arm_timer) {
+    app_timer_cancel(s_delete_arm_timer);
+    s_delete_arm_timer = NULL;
+  }
+  s_delete_armed = false;
   window_stack_pop(true); // close the menu; targets push onto the list below it
   switch (row) {
     case ACT_DONE:
@@ -8708,6 +8762,22 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
     case ACT_DEADLINE:
       push_value_picker(PICK_DEADLINE, s_action_task_id, t ? t->deadline_days : DEADLINE_NONE);
       break;
+    case ACT_DELETE:
+      // Confirmed already (the arm/re-press dance above) - fire the send and
+      // re-fetch whichever list is now showing underneath so the deleted row
+      // doesn't linger until the next natural sync.
+      if (t) {
+        send_task_delete(s_action_task_id);
+#if PROJECTS_BROWSER
+        if (s_action_ctx != ACTX_TODAY && s_browse_menu) {
+          browse_descend(s_browse_project_id);
+        } else
+#endif
+        {
+          request_sync();
+        }
+      }
+      break;
   }
 }
 
@@ -8729,6 +8799,11 @@ static void action_window_unload(Window *window) {
   s_action_menu = NULL;
   status_bar_layer_destroy(s_action_status_bar);
   s_action_status_bar = NULL;
+  if (s_delete_arm_timer) {
+    app_timer_cancel(s_delete_arm_timer);
+    s_delete_arm_timer = NULL;
+  }
+  s_delete_armed = false;
 }
 
 static void push_action_menu(const char *task_id, ActionCtx ctx, bool in_backlog) {
@@ -8741,6 +8816,11 @@ static void push_action_menu(const char *task_id, ActionCtx ctx, bool in_backlog
   // "Repeat" row only exists for a recurring task; its pattern text is fetched.
   s_action_repeat_text[0] = '\0';
   s_action_repeat_paused = false;
+  if (s_delete_arm_timer) {
+    app_timer_cancel(s_delete_arm_timer);
+    s_delete_arm_timer = NULL;
+  }
+  s_delete_armed = false;
   {
     Task *rt = resolve_action_task();
     if (rt && rt->recurs) {

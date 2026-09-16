@@ -123,6 +123,10 @@ var MSG_CAL_MONTH_DATA = 65;       // phone -> watch: CAL_MONTH_OFFSET (echoed) 
 // MSG_PROJECT_TASKS_START/ITEM/END triplet a project/tag task list uses
 // (see handleCalDayRequest) - no dedicated reply message of its own.
 var MSG_CALDAY_REQUEST = 66;
+// watch -> phone: TASK_ID. The action menu's "Delete" row, confirmed with a
+// second press on-watch (main.c's s_delete_armed) before this is ever sent -
+// there's no undo once the op uploads, unlike every other action here.
+var MSG_TASK_DELETE = 67;
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -1874,6 +1878,65 @@ function buildTaskUpdateOp(taskId, changes, clientId) {
     timestamp: Date.now(),
     schemaVersion: SCHEMA_VERSION,
   };
+}
+
+// Same envelope as buildTaskUpdateOp, just the delete action/payload shape -
+// matches task-store.js's own '[Task Shared] deleteTask' replay case
+// (actionPayload.task.id). opType 'UPD', not a dedicated delete code -
+// moveToArchive (also a "remove from the active view" action) uses the same
+// convention; the op log's opType tracks CRT-vs-not, not CRUD semantics.
+function buildTaskDeleteOp(taskId, clientId) {
+  var crypto = getCrypto();
+  var payload = { actionPayload: { task: { id: taskId } }, entityChanges: [] };
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  return {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[Task Shared] deleteTask',
+    entityType: 'TASK',
+    entityId: taskId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+}
+
+// Answers MSG_TASK_DELETE - the action menu's "Delete" row, already
+// confirmed on-watch (a second press past the armed "Confirm delete?"
+// label) before this ever fires. Removes it from local state optimistically
+// same as handleTaskToggle does, then uploads the op.
+function handleTaskDelete(taskId) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  if (!taskId || !state.task[taskId]) {
+    return;
+  }
+  delete state.task[taskId];
+  saveState(state);
+
+  var clientId = getOrCreateClientId();
+  var op = buildTaskDeleteOp(taskId, clientId);
+  var toggleFailureMsg = null;
+  uploadSingleOp(op, config, clientId)
+    .catch(function (err) {
+      // Same recovery as handleTaskToggle: a transport failure is queued and
+      // re-sent by the next sync's flushPendingOps(); a hard rejection isn't
+      // queued and the next full pull reconciles it.
+      toggleFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload task delete: ' + toggleFailureMsg);
+      sendStatus(STATUS_ERROR, toggleFailureMsg);
+    })
+    .then(function () {
+      runAutoSyncAfterOp(config, toggleFailureMsg);
+    });
 }
 
 // "[Project] Move Task from backlog to regular" (project.actions.ts, but a TASK-
@@ -3818,6 +3881,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_CALDAY_REQUEST:
       handleCalDayRequest(payload.CALDAY_DATE);
+      break;
+    case MSG_TASK_DELETE:
+      handleTaskDelete(payload.TASK_ID);
       break;
     case MSG_TASK_REPEAT_REQUEST:
       handleTaskRepeatRequest(payload.TASK_ID);
