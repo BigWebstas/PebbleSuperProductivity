@@ -8319,7 +8319,7 @@ static void pick_layer_update_proc(Layer *layer, GContext *ctx) {
   }
   draw_text(ctx, s_pick_kind == PICK_ESTIMATE ? "Estimate"
                  : s_pick_kind == PICK_DEADLINE ? "Deadline"
-                 : s_pick_kind == PICK_TIME ? "Schedule at" : "Count",
+                 : s_pick_kind == PICK_TIME ? "Schedule Time" : "Count",
             CHROME_FONT_KEY,
             GRect(0, cy - 44, b.size.w, 20), GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
   draw_text(ctx, "Up/Down pick\nSelect to set", CHROME_FONT_KEY,
@@ -8706,7 +8706,7 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
     case ACT_TRACK:      label = action_task_is_tracked() ? "Stop tracking" : "Start tracking"; break;
     case ACT_TODAY:      label = "Schedule today"; break;
     case ACT_TOMORROW:   label = "Schedule tomorrow"; break;
-    case ACT_AT:         label = "Schedule at..."; break;
+    case ACT_AT:         label = "Schedule Time"; break;
     case ACT_UNSCHEDULE: label = "Unschedule"; break;
     case ACT_NOTES:      label = "Notes"; break;
     case ACT_TAGS:       label = "Edit tags"; break;
