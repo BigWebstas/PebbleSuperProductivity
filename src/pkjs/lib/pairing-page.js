@@ -27,7 +27,9 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var hasToken = !!options.hasToken;
   var defaultProjectId = options.defaultProjectId || '';
   var defaultTaskEstimateMin = options.defaultTaskEstimateMin || 0;
+  var defaultTagId = options.defaultTagId || '';
   var projects = options.projects || [];
+  var tags = options.tags || [];
   var enableHabits = options.enableHabits !== false;
   var habitStreakNudge = !!options.habitStreakNudge;
   var enableReflect = !!options.enableReflect;
@@ -76,6 +78,10 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var projectOptions = projects.map(function (p) {
     var selected = p.id === defaultProjectId ? ' selected' : '';
     return '<option value="' + escapeHtmlAttr(p.id) + '"' + selected + '>' + escapeHtmlAttr(p.title) + '</option>';
+  }).join('\n');
+  var tagOptions = tags.map(function (t) {
+    var selected = t.id === defaultTagId ? ' selected' : '';
+    return '<option value="' + escapeHtmlAttr(t.id) + '"' + selected + '>' + escapeHtmlAttr(t.title) + '</option>';
   }).join('\n');
   var taskEstimateOptions = [
     [0, 'None'],
@@ -357,6 +363,11 @@ projectOptions + '\n' +
 '  <select class="sub" id="defaultTaskEstimateMin">\n' +
 taskEstimateOptions + '\n' +
 '  </select>\n' +
+'  <label for="defaultTagId" class="sub">New task tag</label>\n' +
+'  <select class="sub" id="defaultTagId">\n' +
+'    <option value="">None</option>\n' +
+tagOptions + '\n' +
+'  </select>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableSearch" type="checkbox"' + (enableSearch ? ' checked' : '') + '>\n' +
@@ -554,6 +565,7 @@ backlightOptions + '\n' +
 '      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked,\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
 '      defaultTaskEstimateMin: parseInt(document.getElementById(\'defaultTaskEstimateMin\').value, 10) || 0,\n' +
+'      defaultTagId: document.getElementById(\'defaultTagId\').value,\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
 '      habitStreakNudge: document.getElementById(\'habitStreakNudge\').checked,\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +

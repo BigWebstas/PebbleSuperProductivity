@@ -2888,7 +2888,8 @@ function handleAddTask(title) {
     timeEstimate: (config.defaultTaskEstimateMin || 0) * 60000,
     isDone: false,
     title: String(title).trim(),
-    tagIds: [],
+    // Optional default tag from the pairing page - see showConfiguration.
+    tagIds: config.defaultTagId ? [config.defaultTagId] : [],
     created: Date.now(),
     attachments: [],
     projectId: projectId,
@@ -3932,6 +3933,9 @@ Pebble.addEventListener('showConfiguration', function () {
   var projects = Object.keys(state.project || {}).map(function (id) {
     return { id: id, title: state.project[id].title };
   });
+  var tags = Object.keys(state.tag || {}).map(function (id) {
+    return { id: id, title: state.tag[id].title };
+  });
   // Markdown + mermaid stats report for the settings page's copy-out box.
   var statsMarkdown = '';
   if (config.enableStats !== false) {
@@ -3968,7 +3972,11 @@ Pebble.addEventListener('showConfiguration', function () {
       // Minutes of time estimate to stamp on a watch-dictated task; 0 means
       // leave it unset - see handleAddTask.
       defaultTaskEstimateMin: config.defaultTaskEstimateMin || 0,
+      // Optional tag stamped on a watch-dictated task; empty string means
+      // none - see handleAddTask.
+      defaultTagId: config.defaultTagId || '',
       projects: projects,
+      tags: tags,
       enableHabits: config.enableHabits !== false,
       enableAddTask: config.enableAddTask !== false,
       enableProjects: config.enableProjects !== false,
@@ -4079,6 +4087,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     // vanishes on the next settings-only save (e.g. toggling todayOnly).
     defaultProjectId: result.defaultProjectId || '',
     defaultTaskEstimateMin: parseInt(result.defaultTaskEstimateMin, 10) || 0,
+    defaultTagId: result.defaultTagId || '',
     enableHabits: !!result.enableHabits,
     enableAddTask: !!result.enableAddTask,
     enableProjects: !!result.enableProjects,
