@@ -10789,6 +10789,15 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
   }
   int now_min = now_tm->tm_hour * 60 + now_tm->tm_min;
 
+  // Both this and the global "notify before due" lead below share the same
+  // "Notify before a task is due" setting - a task's own reminder time used
+  // to always fire regardless of that toggle (it "superseded" the global
+  // lead, per the comment that used to be here), which meant turning the
+  // setting off didn't actually stop every due-related banner. Folded under
+  // the same gate on request so Off really means off.
+  if (s_due_reminder_min <= 0) {
+    return;
+  }
   // Per-task reminders (task.remindAt from the desktop): fire once when the
   // clock reaches the set time. One banner per tick; the rest catch up on
   // later ticks.
@@ -10801,10 +10810,6 @@ static void minute_tick_handler(struct tm *now_tm, TimeUnits units_changed) {
       show_top_banner(s_overtime_banner_text);
       break;
     }
-  }
-
-  if (s_due_reminder_min <= 0) {
-    return;
   }
   // Global "notify before due" lead - skips tasks that carry their own
   // reminder (handled above).
