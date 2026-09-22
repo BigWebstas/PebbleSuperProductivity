@@ -77,6 +77,19 @@ Experimental, off by default — enable **Touch navigation** in settings.
 On first-generation Time 2 hardware the touch driver misreads edge taps, so
 touch is opt-in until a firmware fix lands.
 
+### Quick Launch
+
+Pebble's own **Quick Launch** (set per watchface in the Pebble mobile app) can
+open this app straight into Add Task dictation instead of the task list.
+
+- Any watch — quick-launching the app goes straight to Add Task.
+- **Pebble Time 2** — Down quick-launches to Add Task; Up quick-launches to
+  the list as usual (Time 2 alone reports which button was used, so both can
+  point at this one app).
+
+Needs **Add Task** enabled in settings (mic, non-`aplite`); otherwise a quick
+launch just opens the list.
+
 ## Pairing
 
 1. Install the watchapp, open the Pebble app, find "Super Productivity" in your
