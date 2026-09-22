@@ -7912,7 +7912,7 @@ static void push_notes_window(void) {
 #define CHECKLIST_LABELS_CAP 1024
 // offsets/lengths into the <=1024-byte s_checklist_labels buffer - uint16 is
 // ample and halves the array's .bss.
-typedef struct { uint16_t label_off; uint16_t label_len; bool checked; } ChecklistItem;
+typedef struct { uint16_t label_off; bool checked; } ChecklistItem;
 static ChecklistItem s_checklist[MAX_CHECKLIST];
 static int s_checklist_count = 0;
 // malloc'd only while the checklist window is open - basalt heap has no room to
@@ -7990,7 +7990,6 @@ static void parse_checklist(void) {
       }
       ChecklistItem *it = &s_checklist[s_checklist_count++];
       it->label_off = s_checklist_labels_len;
-      it->label_len = len;
       it->checked = (q[3] == 'x' || q[3] == 'X');
       memcpy(s_checklist_labels + s_checklist_labels_len, lbl, (size_t)len);
       s_checklist_labels_len += len;
