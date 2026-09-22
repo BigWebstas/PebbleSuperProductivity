@@ -7206,9 +7206,9 @@ static void browse_descend(const char *project_id) {
   request_project_tasks(s_browse_project_id);
 }
 
-// Level 0: Select opens the project's tasks. Level 1: Select toggles the task
-// done - same send the today list uses, mirrored onto the today list too. A
-// Select within a pending-reschedule window just cancels it (no toggle).
+// Level 0: Select opens the project's tasks. Level 1: Select opens the task's
+// action menu, same as the today list (menu_select_click). A Select within a
+// pending-reschedule window just cancels it instead (no menu).
 static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
   backlight_touch();
   if (s_pending_reschedule_kind != RESCHEDULE_NONE) {
@@ -7240,26 +7240,18 @@ static void browse_menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_inde
   if (!bt) {
     return;
   }
+  // Matches the today list's own convention (Select opens the action menu -
+  // "Mark done" its first row - rather than toggling in place); same ctx/
+  // in_backlog computation as browse_menu_select_long_click, which this now
+  // duplicates exactly.
+  bool no_project = (s_browse_project_id[0] == '\0' ||
+                     strncmp(s_browse_project_id, NO_PROJECT_ID_STR, MAX_PROJECT_ID_LEN) == 0);
+  bool calendar_day = false;
 #ifdef PBL_PLATFORM_EMERY
-  // A calendar day matches the today list's own convention (Select opens the
-  // action menu - "Mark done" first row - rather than toggling in place);
-  // it's never in backlog, and s_browse_project_id there is a date, not a
-  // real project, so ACTX_TAG (no "Move to backlog" row) - same as its
-  // long-Select already used, see browse_menu_select_long_click.
-  if (s_browse_mode == BROWSE_CALENDAR_DAY) {
-    push_action_menu(bt->id, ACTX_TAG, false);
-    return;
-  }
+  calendar_day = s_browse_mode == BROWSE_CALENDAR_DAY;
 #endif
-  bt->done = !bt->done;
-  Task *in_today = find_task_by_id(bt->id);
-  if (in_today) {
-    in_today->done = bt->done;
-    save_tasks();
-    menu_layer_reload_data(s_menu_layer);
-  }
-  menu_layer_reload_data(s_browse_menu);
-  send_task_toggle(bt);
+  ActionCtx ctx = (browse_wants_tags() || no_project || calendar_day) ? ACTX_TAG : ACTX_PROJECT;
+  push_action_menu(bt->id, ctx, pt_section_is_backlog((int)cell_index->section));
 }
 
 // Level 0: long-Select opens the selected project's notes (a project has no
