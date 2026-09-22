@@ -10958,6 +10958,16 @@ static void init(void) {
   // feature that survives the app actually being killed.
   if (focus_active()) {
     push_live_window();
+  } else if (launch_reason() == APP_LAUNCH_QUICK_LAUNCH) {
+#ifdef PBL_PLATFORM_EMERY
+    // Time 2 alone reports which button quick-launched it - Down goes
+    // straight to dictation, Up (or anything else) opens the list as usual.
+    if (launch_button() == BUTTON_ID_DOWN) {
+      start_add_task_dictation();
+    }
+#else
+    start_add_task_dictation();
+#endif
   }
 #endif
 
