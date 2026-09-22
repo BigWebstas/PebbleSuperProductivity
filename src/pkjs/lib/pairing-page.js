@@ -26,7 +26,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var hasToken = !!options.hasToken;
   var defaultProjectId = options.defaultProjectId || '';
   var defaultTaskEstimateMin = options.defaultTaskEstimateMin || 0;
-  var defaultTagId = options.defaultTagId || '';
+  var defaultTagIds = options.defaultTagIds || [];
   var projects = options.projects || [];
   var tags = options.tags || [];
   var enableHabits = options.enableHabits !== false;
@@ -78,9 +78,13 @@ function buildPairingPageUrl(baseUrl, email, options) {
     var selected = p.id === defaultProjectId ? ' selected' : '';
     return '<option value="' + escapeHtmlAttr(p.id) + '"' + selected + '>' + escapeHtmlAttr(p.title) + '</option>';
   }).join('\n');
-  var tagOptions = tags.map(function (t) {
-    var selected = t.id === defaultTagId ? ' selected' : '';
-    return '<option value="' + escapeHtmlAttr(t.id) + '"' + selected + '>' + escapeHtmlAttr(t.title) + '</option>';
+  var tagCheckboxes = tags.map(function (t) {
+    var checked = defaultTagIds.indexOf(t.id) !== -1 ? ' checked' : '';
+    var id = 'defaultTag_' + escapeHtmlAttr(t.id);
+    return '    <div class="checkbox-row">\n' +
+      '      <input class="tag-checkbox" type="checkbox" id="' + id + '" value="' + escapeHtmlAttr(t.id) + '"' + checked + '>\n' +
+      '      <label for="' + id + '">' + escapeHtmlAttr(t.title) + '</label>\n' +
+      '    </div>';
   }).join('\n');
   var taskEstimateOptions = [
     [0, 'None'],
@@ -201,6 +205,9 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '  .checkbox-row input { width: auto; margin: 0; }\n' +
 '  .checkbox-row label { display: inline; margin: 0; font-weight: normal; }\n' +
 '  .checkbox-row.sub { margin-left: 26px; margin-top: 8px; }\n' +
+'  .tag-checklist { max-height: 160px; overflow-y: auto; margin-top: 8px; padding: 4px 10px;\n' +
+'    border: 1px solid var(--field-border); border-radius: 6px; }\n' +
+'  .tag-checklist .checkbox-row { margin-top: 10px; margin-bottom: 10px; }\n' +
 '  p.hint.sub, label.sub { margin-left: 26px; }\n' +
 '  select.sub { width: calc(100% - 26px); margin-left: 26px; }\n' +
 '  input[type=range] { padding: 0; border: none; background: none; width: calc(100% - 26px); margin-left: 26px; }\n' +
@@ -362,11 +369,10 @@ projectOptions + '\n' +
 '  <select class="sub" id="defaultTaskEstimateMin">\n' +
 taskEstimateOptions + '\n' +
 '  </select>\n' +
-'  <label for="defaultTagId" class="sub">New task tag</label>\n' +
-'  <select class="sub" id="defaultTagId">\n' +
-'    <option value="">None</option>\n' +
-tagOptions + '\n' +
-'  </select>\n' +
+'  <label class="sub">New task tags</label>\n' +
+(tags.length
+  ? '  <div class="tag-checklist sub">\n' + tagCheckboxes + '\n  </div>\n'
+  : '  <p class="hint sub">No tags yet - add one in the real app first.</p>\n') +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="enableSearch" type="checkbox"' + (enableSearch ? ' checked' : '') + '>\n' +
@@ -556,7 +562,8 @@ backlightOptions + '\n' +
 '      autoMarkParentDone: document.getElementById(\'autoMarkParentDone\').checked,\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
 '      defaultTaskEstimateMin: parseInt(document.getElementById(\'defaultTaskEstimateMin\').value, 10) || 0,\n' +
-'      defaultTagId: document.getElementById(\'defaultTagId\').value,\n' +
+'      defaultTagIds: Array.prototype.map.call(\n' +
+'        document.querySelectorAll(\'.tag-checkbox:checked\'), function (el) { return el.value; }),\n' +
 '      enableHabits: document.getElementById(\'enableHabits\').checked,\n' +
 '      habitStreakNudge: document.getElementById(\'habitStreakNudge\').checked,\n' +
 '      enableAddTask: document.getElementById(\'enableAddTask\').checked,\n' +
