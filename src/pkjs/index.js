@@ -1330,9 +1330,6 @@ function handleTaskRepeatPause(taskId, paused) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload repeat pause: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -1536,8 +1533,8 @@ function doSync() {
       return pullPage();
     });
 
-  // Returned so callers that trigger a sync as a side effect (e.g.
-  // handleTaskToggle's autoSyncOnComplete) can tell once it's actually
+  // Returned so callers that trigger a sync as a side effect (the pairing
+  // page's clear-data/wipe-cache buttons) can tell once it's actually
   // finished, instead of it racing whatever status message they send next.
   return work
     .then(function () {
@@ -1613,8 +1610,8 @@ function uploadOps(ops, config, clientId) {
       // itself, which this code never even looked at - silently losing any
       // ops from other clients that arrived since our last real sync,
       // every single time this ran. lastSeq now only ever advances via
-      // pullPage()'s own per-page-max tracking; runAutoSyncAfterOp's
-      // follow-up sync (on by default) picks up whatever res.newOps would
+      // pullPage()'s own per-page-max tracking; the next real sync (manual
+      // Resync, or the next app open) picks up whatever res.newOps would
       // have piggybacked, correctly this time.
     })
     .catch(function (err) {
@@ -1802,31 +1799,6 @@ function syncTimelinePins(state, config) {
   });
 }
 
-// Runs after a single-op upload (success or failure) when the setting is
-// on. Uploading only pushes that one op - it doesn't pull whatever else has
-// changed server-side, nor re-derive/re-send the watch's own task list
-// (which matters once todayOnly or backlog membership makes a just-changed
-// task's visibility change). Defaults on since "the watch's change reaches
-// the desktop" is the behavior actually being asked for; runs best-effort
-// even after a failed upload so at least the pull side stays current,
-// matching doSync()'s own error handling.
-function runAutoSyncAfterOp(config, failureMsg) {
-  if (config.autoSyncOnComplete === false) {
-    return;
-  }
-  var syncPromise = doSync();
-  if (failureMsg && syncPromise && typeof syncPromise.then === 'function') {
-    // doSync() ends by sending its own STATUS_OK/STATUS_ERROR - without
-    // this, an op that was actually rejected would show "Failed: ..." for
-    // a moment and then get silently overwritten by the follow-up sync's
-    // routine STATUS_OK, hiding the exact failure this whole mechanism
-    // exists to surface.
-    syncPromise.then(function () {
-      sendStatus(STATUS_ERROR, failureMsg);
-    });
-  }
-}
-
 var hideDoneSweepTimerId = null;
 
 // Only relevant when hideDoneTasks is on: getActiveTasks' own grace period
@@ -1956,9 +1928,6 @@ function handleTaskDelete(taskId) {
       toggleFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload task delete: ' + toggleFailureMsg);
       sendStatus(STATUS_ERROR, toggleFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, toggleFailureMsg);
     });
 }
 
@@ -2153,9 +2122,6 @@ function handleTaskToggle(taskId, done) {
       toggleFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload task toggle: ' + toggleFailureMsg);
       sendStatus(STATUS_ERROR, toggleFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, toggleFailureMsg);
     });
 }
 
@@ -2209,11 +2175,11 @@ function handleTaskReschedule(taskId, when, projectId) {
   }
   saveState(state);
 
-  // Push a fresh list right away rather than waiting for the follow-up sync
+  // Push a fresh list right away rather than waiting for the next real sync
   // (same as archive). From the browser it's that project's task list, so the
   // row jumps out of the backlog section there; the today list catches up on
-  // runAutoSyncAfterOp's follow-up sync. Two chunked sends back to back would
-  // fight over the one AppMessage slot, so it's one or the other.
+  // the next real sync. Two chunked sends back to back would fight over the
+  // one AppMessage slot, so it's one or the other.
   if (projectId) {
     sendProjectTasks(String(projectId), state, config);
   } else {
@@ -2226,9 +2192,6 @@ function handleTaskReschedule(taskId, when, projectId) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload task reschedule: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -2263,9 +2226,6 @@ function handleTaskSetDueTime(taskId, dueMin) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload due-time change: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -2309,9 +2269,6 @@ function handleMoveToProject(taskId, targetProjectId) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload project move: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -2349,9 +2306,6 @@ function handleToggleTag(taskId, tagId, assign) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload tag change: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -2381,9 +2335,6 @@ function handleTaskSetEstimate(taskId, ms) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload estimate change: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -2420,9 +2371,6 @@ function handleTaskSetDeadline(taskId, days) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload deadline change: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -2472,9 +2420,6 @@ function handleTaskToggleCheck(taskId, index, checked) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload checklist toggle: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -2526,9 +2471,6 @@ function metricUpsert(changes, label) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload ' + label + ': ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -2597,9 +2539,6 @@ function handleTaskSetBacklog(taskId, projectId, toBacklog) {
       failureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload backlog move: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, failureMsg);
     });
 }
 
@@ -2673,11 +2612,9 @@ function handleTrackTimeStop(taskId, trackedMs) {
   // task's watch-displayed total far exceeding the sum of everything the
   // server had actually ever accepted from it. The watch's own C-side
   // optimistic bump (stop_tracking_and_report) is safe by comparison - it
-  // gets wholesale-replaced (not additively merged) by the next
-  // TASK_SYNC_END, which runAutoSyncAfterOp's follow-up doSync() below
-  // already triggers within moments, so skipping the equivalent bump here
-  // only costs a brief instant of staleness in the phone's own cache, never
-  // permanent drift.
+  // gets wholesale-replaced (not additively merged) by the next real sync's
+  // TASK_SYNC_END, so skipping the equivalent bump here only costs staleness
+  // in the phone's own cache until that next sync, never permanent drift.
   var crypto = getCrypto();
   // Confirmed against time-tracking.actions.ts's syncTimeSpent action
   // creator: the payload is exactly { taskId, date, duration } - duration
@@ -2717,9 +2654,6 @@ function handleTrackTimeStop(taskId, trackedMs) {
       trackFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload tracked time: ' + trackFailureMsg);
       sendStatus(STATUS_ERROR, trackFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, trackFailureMsg);
     });
 }
 
@@ -2790,9 +2724,6 @@ function handleHabitAdjust(habitId, delta) {
       habitFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload habit adjustment: ' + habitFailureMsg);
       sendStatus(STATUS_ERROR, habitFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, habitFailureMsg);
     });
 }
 
@@ -2802,9 +2733,8 @@ function handleHabitAdjust(habitId, delta) {
 // bumping state.simpleCounter here optimistically avoids the exact double-
 // count drift handleTrackTimeStop's own comment documents for tasks. The
 // watch's own C-side optimistic bump (stop_habit_tracking_and_report) gives
-// instant feedback and gets wholesale-replaced by the next
-// MSG_HABIT_SYNC_END, which runAutoSyncAfterOp's follow-up doSync() below
-// triggers moments later by default.
+// instant feedback and gets wholesale-replaced by the next real sync's
+// MSG_HABIT_SYNC_END.
 function handleHabitTrackStop(habitId, trackedMs) {
   var config = loadConfig();
   if (!config || !config.jwt) {
@@ -2847,9 +2777,6 @@ function handleHabitTrackStop(habitId, trackedMs) {
       trackFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload habit tracked time: ' + trackFailureMsg);
       sendStatus(STATUS_ERROR, trackFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, trackFailureMsg);
     });
 }
 
@@ -2944,8 +2871,7 @@ function handleAddTask(title) {
 
   // Unlike toggle/habit-adjust, the watch has no way to render a task it's
   // never seen on its own - push the updated list right away rather than
-  // waiting for uploadSingleOp/runAutoSyncAfterOp's follow-up sync to
-  // eventually get around to it.
+  // waiting for the next real sync to eventually get around to it.
   sendTaskListToWatch(watchTaskList(state, config));
 
   var crypto = getCrypto();
@@ -2972,9 +2898,6 @@ function handleAddTask(title) {
       addTaskFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload new task: ' + addTaskFailureMsg);
       sendStatus(STATUS_ERROR, addTaskFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, addTaskFailureMsg);
     });
 }
 
@@ -3119,9 +3042,6 @@ function handleNoteAppend(taskId, noteText) {
       noteFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload note append: ' + noteFailureMsg);
       sendStatus(STATUS_ERROR, noteFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, noteFailureMsg);
     });
 }
 
@@ -3298,9 +3218,6 @@ function handleProjectNoteAppend(projectId, noteText) {
       noteFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload project note append: ' + noteFailureMsg);
       sendStatus(STATUS_ERROR, noteFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, noteFailureMsg);
     });
 }
 
@@ -3389,9 +3306,6 @@ function handleNotesPageAppend(noteText) {
       noteFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload notes-page append: ' + noteFailureMsg);
       sendStatus(STATUS_ERROR, noteFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, noteFailureMsg);
     });
 }
 
@@ -3458,7 +3372,7 @@ function handleFinishDay() {
   saveState(state);
   // Unlike toggle/habit-adjust, archived tasks vanish from the list rather
   // than just changing in place - push the updated list right away rather
-  // than waiting for uploadSingleOp/runAutoSyncAfterOp's follow-up sync.
+  // than waiting for the next real sync.
   sendTaskListToWatch(watchTaskList(state, config));
 
   var crypto = getCrypto();
@@ -3493,9 +3407,6 @@ function handleFinishDay() {
       finishDayFailureMsg = (err && err.message) || 'upload failed, will retry next sync';
       console.log('[pkjs] failed to upload finish-day archive: ' + finishDayFailureMsg);
       sendStatus(STATUS_ERROR, finishDayFailureMsg);
-    })
-    .then(function () {
-      runAutoSyncAfterOp(config, finishDayFailureMsg);
     });
 }
 
@@ -3956,9 +3867,6 @@ Pebble.addEventListener('showConfiguration', function () {
       todayOnly: !!config.todayOnly,
       hideDoneTasks: !!config.hideDoneTasks,
       autoMarkParentDone: !!config.autoMarkParentDone,
-      // Undefined (never configured before) defaults to on - see the
-      // matching comment in handleTaskToggle for why.
-      autoSyncOnComplete: config.autoSyncOnComplete !== false,
       // Lets the pairing page leave the password/token fields blank on a
       // settings-only visit instead of demanding they be re-pasted - see
       // webviewclosed below for the other half of this.
@@ -4081,7 +3989,6 @@ Pebble.addEventListener('webviewclosed', function (e) {
     todayOnly: !!result.todayOnly,
     hideDoneTasks: !!result.hideDoneTasks,
     autoMarkParentDone: !!result.autoMarkParentDone,
-    autoSyncOnComplete: !!result.autoSyncOnComplete,
     // saveConfig() is a full replace, not a merge - every field the app
     // wants persisted has to be listed here explicitly, or it silently
     // vanishes on the next settings-only save (e.g. toggling todayOnly).

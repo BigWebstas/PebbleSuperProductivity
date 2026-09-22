@@ -22,7 +22,6 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var todayOnly = !!options.todayOnly;
   var hideDoneTasks = !!options.hideDoneTasks;
   var autoMarkParentDone = !!options.autoMarkParentDone;
-  var autoSyncOnComplete = !!options.autoSyncOnComplete;
   var hasPassword = !!options.hasPassword;
   var hasToken = !!options.hasToken;
   var defaultProjectId = options.defaultProjectId || '';
@@ -470,13 +469,6 @@ backlightOptions + '\n' +
 '  <textarea id="statsExport" readonly>' + escapeHtmlAttr(statsMarkdown) + '</textarea>\n' +
 '  <button id="copyStatsBtn" class="secondary">Copy to clipboard</button>\n'
 : '') +
-'  <h2>Sync</h2>\n' +
-'  <div class="checkbox-row">\n' +
-'    <input id="autoSyncOnComplete" type="checkbox"' + (autoSyncOnComplete ? ' checked' : '') + '>\n' +
-'    <label for="autoSyncOnComplete">Sync automatically after a watch change</label>\n' +
-'  </div>\n' +
-'  <p class="hint">Pull from the server right after a watch change, instead of waiting for a manual Resync. Uses a little more battery / data.</p>\n' +
-'\n' +
 '  <h2>Danger zone</h2>\n' +
 '  <p class="hint">Wipe this device\'s cached list + resync position and re-download everything. Account, token and password are untouched. Use it if the list looks stuck, not to unpair.</p>\n' +
 '  <button id="clearDataBtn" class="danger">Clear all data &amp; resync</button>\n' +
@@ -562,7 +554,6 @@ backlightOptions + '\n' +
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
 '      hideDoneTasks: document.getElementById(\'hideDoneTasks\').checked,\n' +
 '      autoMarkParentDone: document.getElementById(\'autoMarkParentDone\').checked,\n' +
-'      autoSyncOnComplete: document.getElementById(\'autoSyncOnComplete\').checked,\n' +
 '      defaultProjectId: document.getElementById(\'defaultProjectId\').value,\n' +
 '      defaultTaskEstimateMin: parseInt(document.getElementById(\'defaultTaskEstimateMin\').value, 10) || 0,\n' +
 '      defaultTagId: document.getElementById(\'defaultTagId\').value,\n' +

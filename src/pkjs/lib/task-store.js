@@ -1496,9 +1496,9 @@ function taskIsPlannedForToday(t, today) {
 
 // A task marked done stays visible for this long after completion even
 // with hideDone on, so completing it on the watch doesn't make it vanish
-// before the user can see it happen - the very next auto-sync
-// (runAutoSyncAfterOp, on by default) used to land within a second or two
-// of the toggle and immediately exclude it. Only meaningful for a task
+// before the user can see it happen - the immediate optimistic re-push
+// right after the toggle would otherwise exclude it straight away. Only
+// meaningful for a task
 // completed VIA THE WATCH: doneOn is stamped by handleTaskToggle's own
 // optimistic update in index.js, which is the only place this replay path
 // sets it reliably - a real op from another client (task.service.ts's own
