@@ -522,6 +522,9 @@ function sendStatus(code, message) {
     // desktop. The watch reclassifies live every minute; the phone just
     // sends the setting, no row-ordering work needed here.
     LATER_TODAY_ENABLED: config.laterToday ? 1 : 0,
+    // "Select on a group header collapses it" (default off) - off, Select
+    // opens the project in the Projects browser. Watch-side only.
+    COLLAPSE_GROUPS: config.collapseGroups ? 1 : 0,
     // Notes page row (default off). Drives main.c's s_notespage_enabled /
     // SECTION0_ROW_NOTESPAGE - today-pinned standalone notes.
     NOTESPAGE_ENABLED: config.enableNotesPage ? 1 : 0,
@@ -3864,6 +3867,7 @@ Pebble.addEventListener('showConfiguration', function () {
       groupBy: groupByMode(config),
       sortBy: config.sortBy || 'name',
       laterToday: !!config.laterToday,
+      collapseGroups: !!config.collapseGroups,
       todayOnly: !!config.todayOnly,
       hideDoneTasks: !!config.hideDoneTasks,
       autoMarkParentDone: !!config.autoMarkParentDone,
@@ -3986,6 +3990,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     groupBy: result.groupBy || 'none',
     sortBy: result.sortBy || 'name',
     laterToday: !!result.laterToday,
+    collapseGroups: !!result.collapseGroups,
     todayOnly: !!result.todayOnly,
     hideDoneTasks: !!result.hideDoneTasks,
     autoMarkParentDone: !!result.autoMarkParentDone,

@@ -19,6 +19,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var groupBy = options.groupBy || (options.groupByProject ? 'project' : 'none');
   var sortBy = options.sortBy || 'name';
   var laterToday = !!options.laterToday;
+  var collapseGroups = !!options.collapseGroups;
   var todayOnly = !!options.todayOnly;
   var hideDoneTasks = !!options.hideDoneTasks;
   var autoMarkParentDone = !!options.autoMarkParentDone;
@@ -273,6 +274,12 @@ sortByOptions + '\n' +
 '    <label for="laterToday">Later Today section</label>\n' +
 '  </div>\n' +
 '  <p class="hint">With grouping on, tasks scheduled later than right now move into one group at the bottom, sorted by time - like the desktop.</p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
+'    <input id="collapseGroups" type="checkbox"' + (collapseGroups ? ' checked' : '') + '>\n' +
+'    <label for="collapseGroups">Select on a group header collapses it</label>\n' +
+'  </div>\n' +
+'  <p class="hint">Off: Select on a project header opens that project. On: Select hides/shows the group\'s tasks (darker header = collapsed). Long-press still opens project notes.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
 '    <input id="todayOnly" type="checkbox"' + (todayOnly ? ' checked' : '') + '>\n' +
@@ -557,6 +564,7 @@ backlightOptions + '\n' +
 '      groupBy: document.getElementById(\'groupBy\').value,\n' +
 '      sortBy: document.getElementById(\'sortBy\').value,\n' +
 '      laterToday: document.getElementById(\'laterToday\').checked,\n' +
+'      collapseGroups: document.getElementById(\'collapseGroups\').checked,\n' +
 '      todayOnly: document.getElementById(\'todayOnly\').checked,\n' +
 '      hideDoneTasks: document.getElementById(\'hideDoneTasks\').checked,\n' +
 '      autoMarkParentDone: document.getElementById(\'autoMarkParentDone\').checked,\n' +

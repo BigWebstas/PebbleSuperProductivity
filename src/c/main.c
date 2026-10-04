@@ -96,6 +96,7 @@
 #define KEY_SCHEDULE_ENABLED MESSAGE_KEY_SCHEDULE_ENABLED
 #define KEY_UPCOMING_ENABLED MESSAGE_KEY_UPCOMING_ENABLED
 #define KEY_LATER_TODAY_ENABLED MESSAGE_KEY_LATER_TODAY_ENABLED
+#define KEY_COLLAPSE_GROUPS MESSAGE_KEY_COLLAPSE_GROUPS
 #define KEY_UPCOMING_TEXT MESSAGE_KEY_UPCOMING_TEXT
 #define KEY_CALENDAR_ENABLED MESSAGE_KEY_CALENDAR_ENABLED
 #define KEY_CAL_MONTH_OFFSET MESSAGE_KEY_CAL_MONTH_OFFSET
@@ -391,6 +392,14 @@ typedef struct {
   // recompute_groups) - it pools tasks from every project, so it isn't a
   // real project: no colour swatch, no per-project notes.
   bool is_later_today;
+  // Select on this group's project row toggles this - see menu_select_click.
+  // recompute_groups() never touches it (unlike is_later_today above, which
+  // it always sets fresh), so a collapsed group stays collapsed across a
+  // normal sync as long as group order doesn't change. Lives on the group
+  // itself rather than a side array so the two places that already hold a
+  // resolved TaskGroup* (menu_draw_row, menu_select_click) can read/flip it
+  // without a second GROUP_SECTION_BASE lookup.
+  bool user_collapsed;
 #endif
 } TaskGroup;
 
@@ -1195,6 +1204,10 @@ static int s_group_count = 0;
 // Recomputed on every regroup (a real sync AND the minute tick), so a task
 // rejoins its normal group the instant its time passes, no re-sync needed.
 static bool s_later_today_enabled = false;
+// "Select on a group header collapses it" (config.collapseGroups, default
+// off). Off: Select on a project header opens it in the Projects browser.
+// On: Select toggles that group's TaskGroup.user_collapsed instead.
+static bool s_collapse_groups = false;
 // Maps a *logical* position (what TaskGroup.start/count and every group-
 // relative row index describe) to the real index into s_tasks. Identity
 // (s_row_map[i] == i) whenever Later Today is off - s_tasks itself is never
@@ -2280,6 +2293,9 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
     return 0; // whole group collapsed - its only task is pinned at the top
   }
   if (s_groups[group_idx].name[0] != '\0') {
+    if (s_collapse_groups && s_groups[group_idx].user_collapsed) {
+      return 1; // just the project row - its tasks are hidden
+    }
     return (uint16_t)(visible + 1);
   }
   return (uint16_t)visible;
@@ -3583,7 +3599,11 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     // other header_bar_w bar (see header_begin_reveal) - a no-op stub off
     // emery, so this is a plain fill everywhere else.
     int16_t bar_w = header_bar_w(bounds.size.w);
-    fill_bg(ctx, GRect(bounds.origin.x, bounds.origin.y, bar_w, bounds.size.h), GColorGreen);
+    // Darker bar = this group's tasks are hidden (Select toggles) - reuses
+    // the existing fill instead of drawing a separate glyph, which is far
+    // cheaper on emery's near-zero .text headroom (see CLAUDE.md).
+    fill_bg(ctx, GRect(bounds.origin.x, bounds.origin.y, bar_w, bounds.size.h),
+            (s_collapse_groups && project_row->user_collapsed) ? GColorIslamicGreen : GColorGreen);
     if (bar_w < bounds.size.w) {
       return;
     }
@@ -4573,11 +4593,16 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     push_live_window();
     return;
   }
-  // The project row - Select opens that project's tasks in the browser,
-  // long-Select opens its notes (menu_select_long_click). Same split the
-  // browser's own project list uses.
+  // The project row - Select toggles its tasks hidden/shown in place when
+  // s_collapse_groups is on, else opens that project's tasks in the browser.
+  // Long-Select opens its notes either way (menu_select_long_click).
   TaskGroup *project_row = resolve_project_row_at(*cell_index);
   if (project_row) {
+    if (s_collapse_groups) {
+      project_row->user_collapsed = !project_row->user_collapsed;
+      menu_layer_reload_data(s_menu_layer);
+      return;
+    }
 #if PROJECTS_BROWSER
     // A non-project group (Later Today, or a tag/deadline/planned-date
     // group) has no project to browse into - swallow the click rather than
@@ -5802,6 +5827,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_tags_enabled = tuple_int(iterator, KEY_TAGS_ENABLED, s_tags_enabled) != 0;
       s_yesterday_stats_enabled = tuple_int(iterator, KEY_YESTERDAY_STATS_ENABLED, s_yesterday_stats_enabled) != 0;
       s_later_today_enabled = tuple_int(iterator, KEY_LATER_TODAY_ENABLED, s_later_today_enabled) != 0;
+      s_collapse_groups = tuple_int(iterator, KEY_COLLAPSE_GROUPS, s_collapse_groups) != 0;
 #endif
       // Only re-applied when the value actually changed - this field is sent on
       // every status push (including routine background syncs), and re-triggering

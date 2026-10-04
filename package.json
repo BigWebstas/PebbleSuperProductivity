@@ -199,7 +199,8 @@
       "CALENDAR_ENABLED",
       "CAL_MONTH_OFFSET",
       "CAL_MONTH_MASK",
-      "CALDAY_DATE"
+      "CALDAY_DATE",
+      "COLLAPSE_GROUPS"
     ]
   }
 }
