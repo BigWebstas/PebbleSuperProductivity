@@ -10,3 +10,4 @@ CLAUDE.md
 .claude/settings.local.json
 pebble_screenshot_*.png
 GEMINI.md
+.claude/
