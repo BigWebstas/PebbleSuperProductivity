@@ -697,11 +697,6 @@ static AppTimer *s_streak_roll_timer = NULL;
 static char s_streak_roll_id[MAX_HABIT_ID_LEN] = "";
 static char s_streak_roll_prev[16] = "";
 static int s_streak_roll_tick = 0;
-// The focus ring flashes bright white the instant a work / break segment ends.
-#define ARC_FLASH_MS 300
-#define ARC_FLASH_STEP_MS 40
-static AppTimer *s_arc_flash_timer = NULL;
-static int s_arc_flash_tick = 0;
 // Marquee for an overflowing habit title on the selected row - the habits menu
 // isn't wired to the main scroll timer, so it runs its own (shared offset).
 static AppTimer *s_habits_marquee_timer = NULL;
@@ -1135,8 +1130,8 @@ static TextLayer *s_live_hint_layer = NULL;
 static StatusBarLayer *s_live_status_bar = NULL;
 static AppTimer *s_live_tick_timer = NULL;
 #ifdef PBL_PLATFORM_EMERY
-// A depleting ring drawn behind the M:SS during a focus session (only). Its own
-// canvas layer, alive only while the live window is - see live_arc_update_proc.
+// Canvas layer behind the live window's text, alive only while the window is -
+// draws the estimate budget bar, see live_arc_update_proc.
 // emery only - no code-space headroom on the 144px slice.
 static Layer *s_live_arc_layer = NULL;
 #endif
@@ -9891,36 +9886,6 @@ static void stop_live_tick(void) {
   }
 }
 
-#ifdef PBL_PLATFORM_EMERY
-// Bright ring pulse when a focus segment ends - drawn by live_arc_update_proc
-// ahead of its depleting-ring guard, so it still shows after a terminal
-// focus_end (when focus_active() is already false).
-static void arc_flash_timer_cb(void *data) {
-  s_arc_flash_timer = NULL;
-  s_arc_flash_tick++;
-  if (s_arc_flash_tick * ARC_FLASH_STEP_MS < ARC_FLASH_MS) {
-    s_arc_flash_timer = app_timer_register(ARC_FLASH_STEP_MS, arc_flash_timer_cb, NULL);
-  } else {
-    s_arc_flash_tick = 0;
-  }
-  if (s_live_arc_layer) {
-    layer_mark_dirty(s_live_arc_layer);
-  }
-}
-
-static void begin_arc_flash(void) {
-  if (!s_live_arc_layer) {
-    return; // not on the live window - nothing to flash
-  }
-  if (s_arc_flash_timer) {
-    app_timer_cancel(s_arc_flash_timer);
-  }
-  s_arc_flash_tick = 1;
-  s_arc_flash_timer = app_timer_register(ARC_FLASH_STEP_MS, arc_flash_timer_cb, NULL);
-  layer_mark_dirty(s_live_arc_layer);
-}
-#endif
-
 // ---- focus mode ----
 // There is NO API to disable PebbleOS's inactivity auto-close. The lever we
 // have: the tracking tick (live_tick_callback) calls light_enable_interaction()
@@ -9933,11 +9898,6 @@ static void begin_arc_flash(void) {
 // strip. `notify` = ran to completion (long buzz + banner); else a plain stop.
 // Nothing to undo for the backlight - the pulses fade themselves.
 static void focus_end(bool ran_out) {
-#ifdef PBL_PLATFORM_EMERY
-  if (ran_out) {
-    begin_arc_flash(); // punctuate the segment boundary (loop or terminal)
-  }
-#endif
   // POMODORO: a break that ran out loops back into the next work session
   // (work -> break -> work -> ... until a long-hold ends it or tracking stops).
   if (ran_out && s_focus_on_break) {
@@ -10054,7 +10014,7 @@ static void live_window_refresh(void) {
   }
 #ifdef PBL_PLATFORM_EMERY
   if (s_live_arc_layer) {
-    layer_mark_dirty(s_live_arc_layer); // depletes with the focus countdown
+    layer_mark_dirty(s_live_arc_layer); // budget bar tracks elapsed time
   }
 #endif
   static char elapsed_buf[32];
@@ -10230,28 +10190,9 @@ static void live_window_click_config_provider(void *context) {
 }
 
 #ifdef PBL_PLATFORM_EMERY
-// Frames the live window with a ring that depletes clockwise from 12 o'clock as
-// the focus session's time runs out. Draws nothing outside a focus session, so
-// plain tracking / remote presence keep the clean text-only look.
 static void live_arc_update_proc(Layer *layer, GContext *ctx) {
-  // Segment-boundary flash: a full white ring that thins to nothing over
-  // ARC_FLASH_MS. Drawn ahead of the focus-session guard so it still shows on a
-  // terminal focus_end (focus_active() already false by then).
-  if (s_arc_flash_tick > 0) {
-    GRect fb = layer_get_bounds(layer);
-    int fr = (fb.size.w < fb.size.h ? fb.size.w : fb.size.h) / 2 - 6;
-    GPoint fc = grect_center_point(&fb);
-    int fw = 10 - s_arc_flash_tick * ARC_FLASH_STEP_MS * 10 / ARC_FLASH_MS;
-    if (fw > 0) {
-      graphics_context_set_stroke_color(ctx, GColorWhite);
-      graphics_context_set_stroke_width(ctx, fw);
-      graphics_draw_arc(ctx, GRect(fc.x - fr, fc.y - fr, 2 * fr, 2 * fr),
-                        GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
-      graphics_context_set_stroke_width(ctx, 1);
-    }
-  }
-  // Budget bar: while tracking locally (not in a focus session - the depleting
-  // ring tells that story) and the task carries an estimate, a thin bar shows
+  // Budget bar: while tracking locally (not in a focus session) and the task
+  // carries an estimate, a thin bar shows
   // spent / estimate, green -> amber (>=75%) -> red (over).
   if (!focus_active() && s_tracking_task_id[0] != '\0') {
     Task *bt = find_task_by_id(s_tracking_task_id);
@@ -10278,50 +10219,6 @@ static void live_arc_update_proc(Layer *layer, GContext *ctx) {
       graphics_fill_rect(ctx, GRect(bx, by, bw * fill / 100, 6), 2, GCornersAll);
     }
   }
-
-  if (!focus_active() || s_focus_end_epoch == 0) {
-    return; // no depleting ring for Flowtime (counts up, no end)
-  }
-  int total_min = s_focus_on_break ? s_pomodoro_break_min
-                  : (s_focus_type == FOCUS_POMODORO ? s_pomodoro_work_min : s_focus_len_min);
-  int total_s = total_min * 60;
-  if (total_s <= 0) {
-    return;
-  }
-  int left_s = (int)(s_focus_end_epoch - time(NULL));
-  if (left_s < 0) {
-    left_s = 0;
-  }
-  if (left_s > total_s) {
-    left_s = total_s;
-  }
-  GRect b = layer_get_bounds(layer);
-  int r = (b.size.w < b.size.h ? b.size.w : b.size.h) / 2 - 6;
-  GPoint c = grect_center_point(&b);
-  GRect ring = GRect(c.x - r, c.y - r, 2 * r, 2 * r);
-  // via degrees to keep the arithmetic in int32 (no 64-bit divmod helper).
-  int32_t sweep = DEG_TO_TRIGANGLE(left_s * 360 / total_s);
-#ifdef PBL_COLOR
-  graphics_context_set_stroke_color(ctx, GColorLightGray);
-  graphics_context_set_stroke_width(ctx, 2);
-  graphics_draw_arc(ctx, ring, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
-#endif
-  // Work sessions warm from green to amber to red as the time drains (last
-  // third / last minute or sixth); a break stays calm cerulean.
-  GColor arc_color;
-  if (s_focus_on_break) {
-    arc_color = PBL_IF_COLOR_ELSE(GColorVividCerulean, GColorBlack);
-  } else if (left_s <= 60 || left_s * 6 <= total_s) {
-    arc_color = PBL_IF_COLOR_ELSE(GColorRed, GColorBlack);
-  } else if (left_s <= 180 || left_s * 3 <= total_s) {
-    arc_color = PBL_IF_COLOR_ELSE(GColorChromeYellow, GColorBlack);
-  } else {
-    arc_color = PBL_IF_COLOR_ELSE(GColorJaegerGreen, GColorBlack);
-  }
-  graphics_context_set_stroke_color(ctx, arc_color);
-  graphics_context_set_stroke_width(ctx, 4);
-  graphics_draw_arc(ctx, ring, GOvalScaleModeFitCircle, 0, sweep);
-  graphics_context_set_stroke_width(ctx, 1);
 }
 #endif // PBL_PLATFORM_EMERY
 
@@ -10335,7 +10232,7 @@ static void live_window_load(Window *window) {
   int16_t bottom = content.origin.y + content.size.h;
 
 #ifdef PBL_PLATFORM_EMERY
-  // The focus ring sits behind everything (added first).
+  // The budget-bar layer sits behind everything (added first).
   s_live_arc_layer = layer_create(content);
   layer_set_update_proc(s_live_arc_layer, live_arc_update_proc);
   layer_add_child(window_layer, s_live_arc_layer);
@@ -10366,11 +10263,6 @@ static void live_window_load(Window *window) {
 static void live_window_unload(Window *window) {
   stop_live_tick();
 #ifdef PBL_PLATFORM_EMERY
-  if (s_arc_flash_timer) {
-    app_timer_cancel(s_arc_flash_timer);
-    s_arc_flash_timer = NULL;
-  }
-  s_arc_flash_tick = 0;
   layer_destroy(s_live_arc_layer);
   s_live_arc_layer = NULL;
 #endif
