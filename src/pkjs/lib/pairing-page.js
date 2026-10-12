@@ -54,6 +54,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var breakReminderMin = options.breakReminderMin || 0;
   var idleReminderMin = options.idleReminderMin || 0;
   var dueReminderMin = options.dueReminderMin || 0;
+  var syncIntervalMin = options.syncIntervalMin || 0;
   var liveTracking = !!options.liveTracking;
   // "Name of this device on other devices" - matches the desktop app's own
   // settings label. Shown on other synced devices while this watch is
@@ -108,6 +109,16 @@ function buildPairingPageUrl(baseUrl, email, options) {
     [30, '30 minutes before'],
   ].map(function (opt) {
     var selected = opt[0] === dueReminderMin ? ' selected' : '';
+    return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
+  }).join('\n');
+  var syncIntervalOptions = [
+    [0, 'Off'],
+    [1, 'Every minute'],
+    [5, 'Every 5 minutes'],
+    [15, 'Every 15 minutes'],
+    [30, 'Every 30 minutes'],
+  ].map(function (opt) {
+    var selected = opt[0] === syncIntervalMin ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
   }).join('\n');
   var breakReminderOptions = [
@@ -435,6 +446,12 @@ idleReminderOptions + '\n' +
 '  <label for="deviceLabel" class="sub">Name of this device on other devices</label>\n' +
 '  <input class="sub" id="deviceLabel" type="text" maxlength="32" placeholder="Pebble" value="' + escapeHtmlAttr(deviceLabel) + '"' + (liveTracking ? '' : ' disabled') + '>\n' +
 '\n' +
+'  <label for="syncIntervalMin">Sync automatically</label>\n' +
+'  <select id="syncIntervalMin">\n' +
+syncIntervalOptions + '\n' +
+'  </select>\n' +
+'  <p class="hint">Re-sync this often while the app is open. Does nothing while it\'s closed.</p>\n' +
+'\n' +
 '  <h2>Notifications</h2>\n' +
 '  <label for="dueReminderMin">Notify before a task is due</label>\n' +
 '  <select id="dueReminderMin">\n' +
@@ -593,6 +610,7 @@ backlightOptions + '\n' +
 '      breakReminderMin: parseInt(document.getElementById(\'breakReminderMin\').value, 10) || 0,\n' +
 '      idleReminderMin: parseInt(document.getElementById(\'idleReminderMin\').value, 10) || 0,\n' +
 '      dueReminderMin: parseInt(document.getElementById(\'dueReminderMin\').value, 10) || 0,\n' +
+'      syncIntervalMin: parseInt(document.getElementById(\'syncIntervalMin\').value, 10) || 0,\n' +
 '      liveTracking: document.getElementById(\'liveTracking\').checked,\n' +
 '      deviceLabel: document.getElementById(\'deviceLabel\').value.trim().slice(0, 32),\n' +
 '      stopAtMidnight: document.getElementById(\'stopAtMidnight\').checked,\n' +

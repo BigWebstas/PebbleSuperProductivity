@@ -72,6 +72,7 @@
 #define KEY_BREAK_REMINDER_MIN MESSAGE_KEY_BREAK_REMINDER_MIN
 #define KEY_IDLE_REMINDER_MIN MESSAGE_KEY_IDLE_REMINDER_MIN
 #define KEY_DUE_REMINDER_MIN MESSAGE_KEY_DUE_REMINDER_MIN
+#define KEY_SYNC_INTERVAL_MIN MESSAGE_KEY_SYNC_INTERVAL_MIN
 #define KEY_FOCUS_LEN_MIN MESSAGE_KEY_FOCUS_LEN_MIN
 #define KEY_POMODORO_WORK_MIN MESSAGE_KEY_POMODORO_WORK_MIN
 #define KEY_POMODORO_BREAK_MIN MESSAGE_KEY_POMODORO_BREAK_MIN
@@ -5285,6 +5286,19 @@ static void request_project_tasks(const char *project_id) {
 // Forcing the backlight on during a sync is disabled (#if 0, not //, because
 // the block contains its own #ifndef/#else the preprocessor would still see).
 // Re-enable by flipping the 0 to 1.
+#ifndef PBL_PLATFORM_APLITE
+// Background sync: each settings push re-arms one wakeup N minutes out; the
+// wakeup relaunches the app, its JS syncs, and set_status_code() exits once that
+// finishes - which re-arms the next one via that launch's own settings push.
+static bool s_wakeup_launch = false;
+static void schedule_next_wakeup(int min) {
+  wakeup_cancel_all();
+  if (min > 0) {
+    wakeup_schedule(time(NULL) + min * 60, 0, false);
+  }
+}
+#endif
+
 static void set_status_code(int32_t new_status_code) {
 #if 0
   bool was_syncing = (s_status_code == STATUS_SYNCING);
@@ -5318,6 +5332,11 @@ static void set_status_code(int32_t new_status_code) {
 #endif
   }
   s_status_code = new_status_code;
+#ifndef PBL_PLATFORM_APLITE
+  if (s_wakeup_launch && new_status_code != STATUS_SYNCING) {
+    window_stack_pop_all(true);
+  }
+#endif
 }
 
 // The TASK_* fields shared by MSG_TASK_ITEM and MSG_PROJECT_TASKS_ITEM. The
@@ -5835,6 +5854,11 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 #endif
       // "Notify before a task is due" - minutes ahead, 0 = off.
       s_due_reminder_min = tuple_int(iterator, KEY_DUE_REMINDER_MIN, s_due_reminder_min);
+#ifndef PBL_PLATFORM_APLITE
+      if (dict_find(iterator, KEY_SYNC_INTERVAL_MIN)) {
+        schedule_next_wakeup(tuple_int(iterator, KEY_SYNC_INTERVAL_MIN, 0));
+      }
+#endif
       // Focus-mode session length in minutes. Only the NEXT session picks up a
       // change; a running one keeps its already-computed end time.
       s_focus_len_min = tuple_int(iterator, KEY_FOCUS_LEN_MIN, s_focus_len_min);
@@ -10732,6 +10756,9 @@ static bool alloc_heap_lists(void) {
 #endif
 
 static void init(void) {
+#ifndef PBL_PLATFORM_APLITE
+  s_wakeup_launch = launch_reason() == APP_LAUNCH_WAKEUP;
+#endif
   // Set the starting status through set_status_code() (not its static
   // initializer - see s_status_code's comment) so this first "Syncing..."
   // stretch goes through the same chokepoint as every later status.

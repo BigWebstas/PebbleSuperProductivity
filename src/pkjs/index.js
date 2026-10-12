@@ -588,6 +588,7 @@ function sendStatus(code, message) {
     // vibrate a banner. 0 = off. Watch-side only (main.c's minute_tick_handler),
     // app-open only. Always included, same reasoning as above.
     DUE_REMINDER_MIN: config.dueReminderMin || 0,
+    SYNC_INTERVAL_MIN: config.syncIntervalMin || 0,
     // Focus-mode session length in minutes (watch-local pomodoro on the
     // full-screen tracking page - main.c's s_focus_len_min). Default 25.
     FOCUS_LEN_MIN: config.focusLenMin || 25,
@@ -3698,6 +3699,20 @@ function applyPresence(config) {
 
 // ---------------- Pebble event wiring ----------------
 
+// "Sync every N minutes" (config.syncIntervalMin, 0 = off). This timer covers
+// the app being open (and aplite, which has no wakeup); the watch separately
+// schedules a wakeup that relaunches the app for a sync while it's closed -
+// see schedule_next_wakeup in main.c. doSync() no-ops while one is in flight.
+var autoSyncTimer = null;
+function applyAutoSync(config) {
+  clearInterval(autoSyncTimer);
+  autoSyncTimer = null;
+  var min = config && config.jwt && config.syncIntervalMin;
+  if (min > 0) {
+    autoSyncTimer = setInterval(doSync, min * 60 * 1000);
+  }
+}
+
 Pebble.addEventListener('ready', function () {
   console.log('[pkjs] ready');
   var config = loadConfig();
@@ -3714,6 +3729,7 @@ Pebble.addEventListener('ready', function () {
     doSync();
   }
   applyPresence(config);
+  applyAutoSync(config);
 });
 
 Pebble.addEventListener('appmessage', function (e) {
@@ -3910,6 +3926,7 @@ Pebble.addEventListener('showConfiguration', function () {
       breakReminderMin: config.breakReminderMin || 0,
       idleReminderMin: config.idleReminderMin || 0,
       dueReminderMin: config.dueReminderMin || 0,
+      syncIntervalMin: config.syncIntervalMin || 0,
       liveTracking: !!config.liveTracking,
       deviceLabel: config.deviceLabel || '',
       enableTimeline: !!config.enableTimeline,
@@ -4021,6 +4038,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     breakReminderMin: parseInt(result.breakReminderMin, 10) || 0,
     idleReminderMin: parseInt(result.idleReminderMin, 10) || 0,
     dueReminderMin: parseInt(result.dueReminderMin, 10) || 0,
+    syncIntervalMin: parseInt(result.syncIntervalMin, 10) || 0,
     liveTracking: !!result.liveTracking,
     deviceLabel: (result.deviceLabel || '').slice(0, 32),
     enableTimeline: !!result.enableTimeline,
@@ -4067,6 +4085,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
 
   // After the crypto caches settle above - a token change rebuilds the client.
   applyPresence(newConfig);
+  applyAutoSync(newConfig);
 
   doSync();
 });
