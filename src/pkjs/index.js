@@ -127,6 +127,9 @@ var MSG_CALDAY_REQUEST = 66;
 // second press on-watch (main.c's s_delete_armed) before this is ever sent -
 // there's no undo once the op uploads, unlike every other action here.
 var MSG_TASK_DELETE = 67;
+// watch -> phone: TASK_ID + TASK_PRIORITY (0 none / 1 high / 2 medium / 3 low).
+// The action menu's "Priority" row cycles through these in place.
+var MSG_TASK_SET_PRIORITY = 68;
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
 // Well under any platform's AppMessage dictionary budget - app_message_open
 // in main.c already requests the platform's own max, and this is one string
@@ -754,6 +757,9 @@ function fillTaskFields(dict, t) {
     // Whole days from today (negative = overdue). Absent = no deadline; the
     // watch defaults the field to its DEADLINE_NONE sentinel.
     dict.TASK_DEADLINE_DAYS = Math.max(-999, Math.min(999, t.deadlineDays));
+  }
+  if (t.priority) {
+    dict.TASK_PRIORITY = t.priority; // 1/2/3 = high/medium/low, absent = none
   }
   if (t.recurs) {
     dict.TASK_RECURS = 1; // has a repeat config - the watch draws a ↻ glyph
@@ -2378,6 +2384,34 @@ function handleTaskSetDeadline(taskId, days) {
     });
 }
 
+// Watch priority row: `code` 0-3 (store.PRIORITY_NAMES). A plain updateTask
+// { priority }; null clears it, same as the desktop's "no priority".
+function handleTaskSetPriority(taskId, code) {
+  var config = loadConfig();
+  if (!config || !config.jwt) {
+    sendStatus(STATUS_NOT_PAIRED);
+    return;
+  }
+  var state = loadState();
+  var task = state.task[taskId];
+  if (!task) {
+    return;
+  }
+  var changes = { priority: store.PRIORITY_NAMES[code] || null };
+  state.task[taskId] = Object.assign({}, task, changes);
+  saveState(state);
+  sendTaskListToWatch(watchTaskList(state, config));
+
+  var clientId = getOrCreateClientId();
+  var failureMsg = null;
+  uploadOps([buildTaskUpdateOp(taskId, changes, clientId)], config, clientId)
+    .catch(function (err) {
+      failureMsg = (err && err.message) || 'upload failed, will retry next sync';
+      console.log('[pkjs] failed to upload priority change: ' + failureMsg);
+      sendStatus(STATUS_ERROR, failureMsg);
+    });
+}
+
 // Matches a markdown checklist line: optional indent, "-" or "*", "[ ]" / "[x]"
 // / "[X]", a space, the rest is the label. Group 1 is the leading run up to and
 // including "[", group 2 the check char, group 3 the trailing "]...".
@@ -3839,6 +3873,9 @@ Pebble.addEventListener('appmessage', function (e) {
       break;
     case MSG_TASK_DELETE:
       handleTaskDelete(payload.TASK_ID);
+      break;
+    case MSG_TASK_SET_PRIORITY:
+      handleTaskSetPriority(payload.TASK_ID, payload.TASK_PRIORITY);
       break;
     case MSG_TASK_REPEAT_REQUEST:
       handleTaskRepeatRequest(payload.TASK_ID);

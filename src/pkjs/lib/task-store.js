@@ -171,6 +171,15 @@ function taskIssueSrc(t) {
   return (t && t.issueType && ISSUE_SRC_BY_TYPE[t.issueType]) || undefined;
 }
 
+// Desktop task.priority ('high' | 'medium' | 'low', null/absent = none) as the
+// watch's 1/2/3 code (0 = none). The index IS the code, so PRIORITY_NAMES
+// doubles as the decode table for the watch's set-priority message.
+var PRIORITY_NAMES = [null, 'high', 'medium', 'low'];
+function taskPriorityCode(t) {
+  var code = t ? PRIORITY_NAMES.indexOf(t.priority) : -1;
+  return code > 0 ? code : undefined;
+}
+
 // state: { task: { [id]: {id, title, isDone, parentId?, projectId?,
 //                          tagIds?, __inBacklog?, ...} },
 //          project: { [id]: {id, title, ...} },
@@ -1729,11 +1738,11 @@ function pushTaskAndSubtasks(rows, state, allTasks, t, groupName, groupProjectId
   // already fully available locally once TAG entities have replayed, so
   // there's no fetch round-trip worth avoiding the way there is for a
   // task's full notes text.
-  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, remindAt: t.remindAt || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, deadlineDays: taskDeadlineDays(t), recurs: t.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(t), issueSrc: taskIssueSrc(t) });
+  rows.push({ id: t.id, title: t.title, isDone: !!t.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, t) || undefined, dueWithTime: t.dueWithTime || undefined, remindAt: t.remindAt || undefined, timeSpent: t.timeSpent || undefined, timeEstimate: t.timeEstimate || undefined, deadlineDays: taskDeadlineDays(t), recurs: t.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(t), issueSrc: taskIssueSrc(t), priority: taskPriorityCode(t) });
   (t.subTaskIds || []).forEach(function (subId) {
     var sub = allTasks[subId];
     if (sub && sub.title && !isHiddenDone(sub, hideDone, graceMs)) {
-      rows.push({ id: sub.id, title: sub.title, isSubtask: 1, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, remindAt: sub.remindAt || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, deadlineDays: taskDeadlineDays(sub), recurs: sub.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(sub), issueSrc: taskIssueSrc(sub) });
+      rows.push({ id: sub.id, title: sub.title, isSubtask: 1, isDone: !!sub.isDone, project: groupName, projectId: groupProjectId || undefined, projectColor: groupColor || undefined, tags: tagTitlesFor(state, sub) || undefined, dueWithTime: sub.dueWithTime || undefined, remindAt: sub.remindAt || undefined, timeSpent: sub.timeSpent || undefined, timeEstimate: sub.timeEstimate || undefined, deadlineDays: taskDeadlineDays(sub), recurs: sub.repeatCfgId ? 1 : undefined, issueKey: taskIssueKey(sub), issueSrc: taskIssueSrc(sub), priority: taskPriorityCode(sub) });
     }
   });
 }
@@ -2680,6 +2689,7 @@ function formatRepeatCfg(cfg) {
 
 module.exports = {
   emptyState: emptyState,
+  PRIORITY_NAMES: PRIORITY_NAMES,
   applyOperation: applyOperation,
   applyOperations: applyOperations,
   getActiveTasks: getActiveTasks,

@@ -201,7 +201,8 @@
       "CAL_MONTH_OFFSET",
       "CAL_MONTH_MASK",
       "CALDAY_DATE",
-      "COLLAPSE_GROUPS"
+      "COLLAPSE_GROUPS",
+      "TASK_PRIORITY"
     ]
   }
 }
