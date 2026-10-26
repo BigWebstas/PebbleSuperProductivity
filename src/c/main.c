@@ -53,6 +53,7 @@
 #define KEY_TASK_PROJECT_COLOR MESSAGE_KEY_TASK_PROJECT_COLOR
 #define KEY_TASK_DEADLINE_DAYS MESSAGE_KEY_TASK_DEADLINE_DAYS
 #define KEY_TASK_RECURS MESSAGE_KEY_TASK_RECURS
+#define KEY_TASK_PRIORITY MESSAGE_KEY_TASK_PRIORITY
 #define KEY_PROJECT_ID MESSAGE_KEY_PROJECT_ID
 #define KEY_PROJECT_INDEX MESSAGE_KEY_PROJECT_INDEX
 #define KEY_PROJECT_TITLE MESSAGE_KEY_PROJECT_TITLE
@@ -247,6 +248,9 @@ enum {
   // delete?" label (s_delete_armed) before this ever sends; no undo once it
   // does. See action_select's ACT_DELETE case.
   MSG_TASK_DELETE = 67,       // watch -> phone: TASK_ID
+  // The action menu's "Priority" row: Select cycles none -> high -> medium ->
+  // low in place. TASK_PRIORITY is the PRIO_* code (0-3).
+  MSG_TASK_SET_PRIORITY = 68, // watch -> phone: TASK_ID + TASK_PRIORITY
 };
 
 // STATUS_CODE values sent from the phone.
@@ -332,6 +336,8 @@ typedef struct {
   // of issue_key so a CalDAV task whose uid was too long for a text badge
   // still gets a marker. 0 (ISSUE_SRC_NONE) draws nothing.
   uint8_t issue_src;
+  // PRIO_* below. Drawn as a right-aligned icon on the subtitle line.
+  uint8_t priority;
 #endif
   bool done;
   bool recurs; // has a repeat config - draws a small ↻ glyph on the row
@@ -375,6 +381,12 @@ typedef struct {
 #define ISSUE_SRC_GIT 1
 #define ISSUE_SRC_TICKET 2
 #define ISSUE_SRC_CALENDAR 3
+// task->priority - mirrors the desktop's High/Medium/Low (task-store.js
+// PRIORITY_NAMES is the index-for-index phone-side table).
+#define PRIO_NONE 0
+#define PRIO_HIGH 1
+#define PRIO_MEDIUM 2
+#define PRIO_LOW 3
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
 // pre-sorts by project when grouping is on). Grouping off = '' for every task =
@@ -2972,6 +2984,34 @@ static void draw_issue_src_glyph(GContext *ctx, GRect box, uint8_t src, GColor f
 }
 #endif
 
+#ifndef PBL_PLATFORM_APLITE
+// Priority icon, matching the desktop's priority_high / horizontal_rule /
+// arrow_downward Material glyphs: "!", a dash, a down arrow. Coloured like the
+// desktop's danger / warning / (low) accents. `box` is the right-aligned slot,
+// PRIORITY_GLYPH_W wide; the icon is centred in it.
+#define PRIORITY_GLYPH_W 12
+static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor fg) {
+  int16_t cx = box.origin.x + box.size.w / 2;
+  int16_t cy = box.origin.y + box.size.h / 2 + 1;
+  GColor c = prio == PRIO_HIGH ? PBL_IF_COLOR_ELSE(GColorRed, fg)
+           : prio == PRIO_MEDIUM ? PBL_IF_COLOR_ELSE(GColorOrange, fg)
+           : PBL_IF_COLOR_ELSE(GColorVividCerulean, fg);
+  graphics_context_set_stroke_color(ctx, c);
+  graphics_context_set_stroke_width(ctx, 2);
+  if (prio == PRIO_MEDIUM) {
+    graphics_draw_line(ctx, GPoint(cx - 4, cy), GPoint(cx + 4, cy));
+  } else if (prio == PRIO_HIGH) {
+    graphics_draw_line(ctx, GPoint(cx, cy - 5), GPoint(cx, cy + 1));
+    graphics_draw_line(ctx, GPoint(cx, cy + 4), GPoint(cx, cy + 4));
+  } else {
+    graphics_draw_line(ctx, GPoint(cx, cy - 5), GPoint(cx, cy + 4));
+    graphics_draw_line(ctx, GPoint(cx - 4, cy), GPoint(cx, cy + 4));
+    graphics_draw_line(ctx, GPoint(cx + 4, cy), GPoint(cx, cy + 4));
+  }
+  graphics_context_set_stroke_width(ctx, 1);
+}
+#endif
+
 // Draws one task row - marquee/ellipsized title plus the "@ due  > spent /
 // estimate" subtitle. Shared by per-group rows and the pinned "TRACKING" row.
 // show_project right-aligns task->project on the subtitle line; only the pinned
@@ -3122,6 +3162,15 @@ static void draw_task_row(GContext *ctx, GRect bounds, Task *task, bool is_selec
 
   GRect left_box = subtitle_box;
 #ifndef PBL_PLATFORM_APLITE
+  // Priority icon: the far-right slot of the subtitle line. Claimed first so the
+  // pinned row's right-aligned project name sits to its left, not under it.
+  if (task->priority != PRIO_NONE) {
+    draw_priority_glyph(ctx, GRect(subtitle_box.origin.x + subtitle_box.size.w - PRIORITY_GLYPH_W,
+                                   subtitle_box.origin.y, PRIORITY_GLYPH_W, subtitle_box.size.h),
+                        task->priority, fg);
+    subtitle_box.size.w -= PRIORITY_GLYPH_W;
+    left_box.size.w -= PRIORITY_GLYPH_W;
+  }
   // Project name for the pinned row, right-aligned - reserve up to half the
   // width and shrink the left (due/time) box to match.
   if (show_project && task->project[0] != '\0') {
@@ -3731,6 +3780,10 @@ static void send_pending_retry(void) {
       break;
     case MSG_TASK_DELETE:
       dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      break;
+    case MSG_TASK_SET_PRIORITY:
+      dict_write_cstring(iter, KEY_TASK_ID, s_retry_str);
+      dict_write_int32(iter, KEY_TASK_PRIORITY, s_retry_int);
       break;
     case MSG_HABIT_TRACK_STOP:
       dict_write_cstring(iter, KEY_HABIT_ID, s_retry_str);
@@ -5358,6 +5411,7 @@ static void parse_common_task_fields(DictionaryIterator *it, Task *dst,
   dst->remind_fired = false;
   str_copy(dst->issue_key, tuple_str(it, KEY_TASK_ISSUE_KEY, ""), sizeof(dst->issue_key));
   dst->issue_src = (uint8_t)tuple_int(it, KEY_TASK_ISSUE_SRC, ISSUE_SRC_NONE);
+  dst->priority = (uint8_t)tuple_int(it, KEY_TASK_PRIORITY, PRIO_NONE);
 #endif
 }
 
@@ -8590,6 +8644,7 @@ static void push_reflect_window(void) {
 enum {
   ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
   ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG,
+  ACT_PRIORITY,
   ACT_DELETE, // always last - destructive, see the arm/confirm state below
   ACT_REPEAT, // appended by act_rows() only for a recurring task
 };
@@ -8602,13 +8657,13 @@ enum {
 // so it needs its own arm/confirm step, unlike everything else here.
 static const int s_act_rows_today[] = {
   ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
-  ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE, ACT_DELETE };
+  ACT_NOTES, ACT_TAGS, ACT_MOVE, ACT_ESTIMATE, ACT_DEADLINE, ACT_PRIORITY, ACT_DELETE };
 static const int s_act_rows_project[] = {
   ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
-  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE, ACT_BACKLOG, ACT_DELETE };
+  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE, ACT_PRIORITY, ACT_BACKLOG, ACT_DELETE };
 static const int s_act_rows_tag[] = {
   ACT_DONE, ACT_TRACK, ACT_TODAY, ACT_TOMORROW, ACT_AT, ACT_UNSCHEDULE,
-  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE, ACT_DELETE };
+  ACT_NOTES, ACT_ESTIMATE, ACT_DEADLINE, ACT_PRIORITY, ACT_DELETE };
 
 // ActionCtx declared with the forward decls.
 static Window *s_action_window = NULL;
@@ -8713,6 +8768,13 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
     case ACT_MOVE:       label = "Move to project"; break;
     case ACT_ESTIMATE:   label = "Set estimate"; break;
     case ACT_DEADLINE:   label = "Set deadline"; break;
+    case ACT_PRIORITY: {
+      static const char *const names[] = { "None", "High", "Medium", "Low" };
+      Task *pt = resolve_action_task();
+      label = "Priority";
+      sub = names[pt ? pt->priority & 3 : 0];
+      break;
+    }
     case ACT_BACKLOG:    label = s_action_in_backlog ? "Move to list" : "Move to backlog"; break;
     case ACT_DELETE:     label = s_delete_armed ? "Confirm delete?" : "Delete"; break;
     case ACT_REPEAT:
@@ -8746,6 +8808,17 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
     s_action_repeat_paused = !s_action_repeat_paused;
     begin_send(MSG_TASK_REPEAT_PAUSE, s_action_task_id, NULL, s_action_repeat_paused ? 1 : 0);
     menu_layer_reload_data(s_action_menu);
+    return;
+  }
+  if (row == ACT_PRIORITY) {
+    // Cycle in place (none -> high -> medium -> low), like the repeat toggle.
+    if (t) {
+      t->priority = (t->priority + 1) & 3;
+      save_tasks();
+      begin_send(MSG_TASK_SET_PRIORITY, s_action_task_id, NULL, t->priority);
+      menu_layer_reload_data(s_action_menu);
+      menu_layer_reload_data(s_menu_layer);
+    }
     return;
   }
   if (row == ACT_DELETE && !s_delete_armed) {
