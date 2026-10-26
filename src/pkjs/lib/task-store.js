@@ -171,13 +171,13 @@ function taskIssueSrc(t) {
   return (t && t.issueType && ISSUE_SRC_BY_TYPE[t.issueType]) || undefined;
 }
 
-// Desktop task.priority ('high' | 'medium' | 'low', null/absent = none) as the
-// watch's 1/2/3 code (0 = none). The index IS the code, so PRIORITY_NAMES
-// doubles as the decode table for the watch's set-priority message.
-var PRIORITY_NAMES = [null, 'high', 'medium', 'low'];
+// Desktop task.priority as the watch's code: 1 low / 2 medium / 3 high, 0 or
+// absent = none. The desktop writes numbers but still reads the legacy
+// 'low'/'medium'/'high' strings, and old data can hold either, so both decode.
+// Mirrors the desktop's getTaskPriority.
+var PRIORITY_BY_VALUE = { low: 1, medium: 2, high: 3, 1: 1, 2: 2, 3: 3 };
 function taskPriorityCode(t) {
-  var code = t ? PRIORITY_NAMES.indexOf(t.priority) : -1;
-  return code > 0 ? code : undefined;
+  return (t && PRIORITY_BY_VALUE[t.priority]) || undefined;
 }
 
 // state: { task: { [id]: {id, title, isDone, parentId?, projectId?,
@@ -2689,7 +2689,6 @@ function formatRepeatCfg(cfg) {
 
 module.exports = {
   emptyState: emptyState,
-  PRIORITY_NAMES: PRIORITY_NAMES,
   applyOperation: applyOperation,
   applyOperations: applyOperations,
   getActiveTasks: getActiveTasks,

@@ -381,12 +381,11 @@ typedef struct {
 #define ISSUE_SRC_GIT 1
 #define ISSUE_SRC_TICKET 2
 #define ISSUE_SRC_CALENDAR 3
-// task->priority - mirrors the desktop's High/Medium/Low (task-store.js
-// PRIORITY_NAMES is the index-for-index phone-side table).
+// task->priority - the desktop's own numeric Low/Medium/High encoding.
 #define PRIO_NONE 0
-#define PRIO_HIGH 1
+#define PRIO_LOW 1
 #define PRIO_MEDIUM 2
-#define PRIO_LOW 3
+#define PRIO_HIGH 3
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
 // pre-sorts by project when grouping is on). Grouping off = '' for every task =
@@ -2985,9 +2984,9 @@ static void draw_issue_src_glyph(GContext *ctx, GRect box, uint8_t src, GColor f
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
-// Priority icon, matching the desktop's priority_high / horizontal_rule /
-// arrow_downward Material glyphs: "!", a dash, a down arrow. Coloured like the
-// desktop's danger / warning / (low) accents. `box` is the right-aligned slot,
+// Priority icon, matching the desktop's default chevron preset: a single
+// chevron down (low), a single chevron up (medium), a double chevron up (high).
+// Coloured red / orange / cerulean. `box` is the right-aligned slot,
 // PRIORITY_GLYPH_W wide; the icon is centred in it.
 #define PRIORITY_GLYPH_W 12
 static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor fg) {
@@ -2998,15 +2997,11 @@ static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor f
            : PBL_IF_COLOR_ELSE(GColorVividCerulean, fg);
   graphics_context_set_stroke_color(ctx, c);
   graphics_context_set_stroke_width(ctx, 2);
-  if (prio == PRIO_MEDIUM) {
-    graphics_draw_line(ctx, GPoint(cx - 4, cy), GPoint(cx + 4, cy));
-  } else if (prio == PRIO_HIGH) {
-    graphics_draw_line(ctx, GPoint(cx, cy - 5), GPoint(cx, cy + 1));
-    graphics_draw_line(ctx, GPoint(cx, cy + 4), GPoint(cx, cy + 4));
-  } else {
-    graphics_draw_line(ctx, GPoint(cx, cy - 5), GPoint(cx, cy + 4));
-    graphics_draw_line(ctx, GPoint(cx - 4, cy), GPoint(cx, cy + 4));
-    graphics_draw_line(ctx, GPoint(cx + 4, cy), GPoint(cx, cy + 4));
+  int16_t dir = prio == PRIO_LOW ? -1 : 1; // chevron points down for low, else up
+  for (int i = 0; i < (prio == PRIO_HIGH ? 2 : 1); i++) {
+    int16_t y = cy + (prio == PRIO_HIGH ? 2 - i * 4 : 0);
+    graphics_draw_line(ctx, GPoint(cx - 4, y + 2 * dir), GPoint(cx, y - 2 * dir));
+    graphics_draw_line(ctx, GPoint(cx, y - 2 * dir), GPoint(cx + 4, y + 2 * dir));
   }
   graphics_context_set_stroke_width(ctx, 1);
 }
@@ -8769,7 +8764,7 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
     case ACT_ESTIMATE:   label = "Set estimate"; break;
     case ACT_DEADLINE:   label = "Set deadline"; break;
     case ACT_PRIORITY: {
-      static const char *const names[] = { "None", "High", "Medium", "Low" };
+      static const char *const names[] = { "None", "Low", "Medium", "High" };
       Task *pt = resolve_action_task();
       label = "Priority";
       sub = names[pt ? pt->priority & 3 : 0];
@@ -8813,7 +8808,7 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
   if (row == ACT_PRIORITY) {
     // Cycle in place (none -> high -> medium -> low), like the repeat toggle.
     if (t) {
-      t->priority = (t->priority + 1) & 3;
+      t->priority = t->priority ? t->priority - 1 : PRIO_HIGH; // none>high>medium>low>none
       save_tasks();
       begin_send(MSG_TASK_SET_PRIORITY, s_action_task_id, NULL, t->priority);
       menu_layer_reload_data(s_action_menu);

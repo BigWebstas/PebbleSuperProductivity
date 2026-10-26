@@ -127,7 +127,8 @@ var MSG_CALDAY_REQUEST = 66;
 // second press on-watch (main.c's s_delete_armed) before this is ever sent -
 // there's no undo once the op uploads, unlike every other action here.
 var MSG_TASK_DELETE = 67;
-// watch -> phone: TASK_ID + TASK_PRIORITY (0 none / 1 high / 2 medium / 3 low).
+// watch -> phone: TASK_ID + TASK_PRIORITY (0 none / 1 low / 2 medium / 3 high,
+// the desktop's own numeric encoding).
 // The action menu's "Priority" row cycles through these in place.
 var MSG_TASK_SET_PRIORITY = 68;
 // Per-message chunk size for the full-notes fetch (see sendNoteChunk below).
@@ -759,7 +760,7 @@ function fillTaskFields(dict, t) {
     dict.TASK_DEADLINE_DAYS = Math.max(-999, Math.min(999, t.deadlineDays));
   }
   if (t.priority) {
-    dict.TASK_PRIORITY = t.priority; // 1/2/3 = high/medium/low, absent = none
+    dict.TASK_PRIORITY = t.priority; // 1/2/3 = low/medium/high, absent = none
   }
   if (t.recurs) {
     dict.TASK_RECURS = 1; // has a repeat config - the watch draws a ↻ glyph
@@ -2384,8 +2385,8 @@ function handleTaskSetDeadline(taskId, days) {
     });
 }
 
-// Watch priority row: `code` 0-3 (store.PRIORITY_NAMES). A plain updateTask
-// { priority }; null clears it, same as the desktop's "no priority".
+// Watch priority row: `code` 0-3. A plain updateTask { priority } with the
+// desktop's numeric encoding; null clears it, same as "no priority".
 function handleTaskSetPriority(taskId, code) {
   var config = loadConfig();
   if (!config || !config.jwt) {
@@ -2397,7 +2398,7 @@ function handleTaskSetPriority(taskId, code) {
   if (!task) {
     return;
   }
-  var changes = { priority: store.PRIORITY_NAMES[code] || null };
+  var changes = { priority: code > 0 && code <= 3 ? code : null };
   state.task[taskId] = Object.assign({}, task, changes);
   saveState(state);
   sendTaskListToWatch(watchTaskList(state, config));
