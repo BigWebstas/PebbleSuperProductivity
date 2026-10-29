@@ -1289,6 +1289,10 @@ function taskCompareBy(sortBy, state) {
         return (a.timeEstimate || 0) - (b.timeEstimate || 0) || titleCompare(a.title, b.title);
       case 'timeSpent':
         return (a.timeSpent || 0) - (b.timeSpent || 0) || titleCompare(a.title, b.title);
+      case 'priority':
+        // high before medium before low, tasks with none last.
+        return (taskPriorityCode(b) || 0) - (taskPriorityCode(a) || 0) ||
+          titleCompare(a.title, b.title);
       case 'tag': {
         // A p1/p2/... priority tag outranks everything else, in priority
         // order, above the plain alphabetical-by-tag fallback.

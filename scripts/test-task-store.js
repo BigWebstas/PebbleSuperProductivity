@@ -1819,6 +1819,20 @@ check('getActiveTasks(sortBy=\'tag\') sorts by first tag title', () => {
   assert.deepStrictEqual(activeSorted(state, 'tag').map((t) => t.id), ['a', 'none', 'z']);
 });
 
+check('getActiveTasks(sortBy=\'priority\') sorts high, medium, low, then none', () => {
+  const state = store.emptyState();
+  store.applyOperations(
+    [
+      addTask({ id: 'none', title: 'A none', isDone: false }),
+      addTask({ id: 'low', title: 'B low', isDone: false, priority: 1 }),
+      addTask({ id: 'high', title: 'C high', isDone: false, priority: 3 }),
+      addTask({ id: 'med', title: 'D med', isDone: false, priority: 2 }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(activeSorted(state, 'priority').map((t) => t.id), ['high', 'med', 'low', 'none']);
+});
+
 check('getActiveTasks(sortBy=\'tag\') puts p1/p2/... priority tags first, in priority order', () => {
   const state = store.emptyState();
   store.applyOperations(
