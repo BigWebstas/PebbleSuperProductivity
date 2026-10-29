@@ -348,6 +348,14 @@ typedef struct {
   // prefix, which worked but gambled on the watch font having that glyph.
   bool is_subtask;
 #ifndef PBL_PLATFORM_APLITE
+#ifdef PBL_PLATFORM_EMERY
+  // Set on a parent task and on each of its subtasks by the action menu's
+  // "Hide subtasks" row; a subtask with it set is skipped by the today list's
+  // row walks (task_row_shown). Carried across a rebuild by id like
+  // remind_fired, so it lasts the app-open session but not a relaunch.
+  // Emery-only: the other platforms have no code space left for it.
+  bool collapsed;
+#endif
   // The task's own reminder fired this app-open session (minute_tick_handler).
   // Carried across a list rebuild by id (MSG_TASK_SYNC_END) so a frequent
   // re-push doesn't re-fire it.
@@ -2205,14 +2213,23 @@ static int group_section_base(void) {
 
 #ifndef PBL_PLATFORM_APLITE
 
+// False for a subtask hidden under a collapsed parent (Task.collapsed).
+static bool task_row_shown(const Task *t) {
+#ifdef PBL_PLATFORM_EMERY
+  return !(t->is_subtask && t->collapsed);
+#else
+  return true;
+#endif
+}
+
 // How many of group g's tasks are drawn - all, minus the pinned task if it's in
-// this group. A group with 0 visible tasks collapses entirely.
+// this group and any subtasks collapsed under their parent. A group with 0 visible tasks collapses entirely.
 static int group_visible_task_count(int g) {
-  int count = s_groups[g].count;
-  if (has_pinned_row()) {
-    int pi = pinned_task_row_map_index();
-    if (pi >= s_groups[g].start && pi < s_groups[g].start + s_groups[g].count) {
-      count--;
+  int pinned_idx = has_pinned_row() ? pinned_task_row_map_index() : -1;
+  int count = 0;
+  for (int i = s_groups[g].start; i < s_groups[g].start + s_groups[g].count; i++) {
+    if (i != pinned_idx && task_row_shown(&s_tasks[s_row_map[i]])) {
+      count++;
     }
   }
   return count;
@@ -2497,7 +2514,7 @@ static Task *resolve_task_at(MenuIndex index) {
   int end = start + s_groups[group_idx].count;
   int seen = 0;
   for (int i = start; i < end && i < s_task_count; i++) {
-    if (i == pinned_idx) {
+    if (i == pinned_idx || !task_row_shown(&s_tasks[s_row_map[i]])) {
       continue;
     }
     if (seen == row) {
@@ -5468,20 +5485,19 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     case MSG_TASK_SYNC_END: {
       int count = s_incoming_total < MAX_TASKS ? s_incoming_total : MAX_TASKS;
 #ifndef PBL_PLATFORM_APLITE
-      // Carry each task's "reminder already fired" flag across the rebuild -
-      // parse_common_task_fields zeroes it, and with the phone re-pushing the
-      // list often (a tracked-task time update, presence) that re-fired the
-      // banner every push. s_tasks still holds the old list here; s_incoming
-      // the new one (unless the OOM path parsed in place).
+      // Carry each task's "reminder already fired" and collapsed flags across
+      // the rebuild - parse_common_task_fields zeroes them, and with the phone
+      // re-pushing the list often (a tracked-task time update, presence) that
+      // re-fired the banner every push. s_tasks still holds the old list here;
+      // s_incoming the new one (unless the OOM path parsed in place).
       if (s_incoming && s_incoming != s_tasks) {
         for (int i = 0; i < count; i++) {
-          if (s_incoming[i].remind_min < 0) {
-            continue;
-          }
           for (int j = 0; j < s_task_count; j++) {
-            if (s_tasks[j].remind_fired &&
-                strncmp(s_tasks[j].id, s_incoming[i].id, MAX_ID_LEN) == 0) {
-              s_incoming[i].remind_fired = true;
+            if (strncmp(s_tasks[j].id, s_incoming[i].id, MAX_ID_LEN) == 0) {
+              s_incoming[i].remind_fired = s_tasks[j].remind_fired;
+#ifdef PBL_PLATFORM_EMERY
+              s_incoming[i].collapsed = s_tasks[j].collapsed;
+#endif
               break;
             }
           }
@@ -8642,6 +8658,7 @@ enum {
   ACT_PRIORITY,
   ACT_DELETE, // always last - destructive, see the arm/confirm state below
   ACT_REPEAT, // appended by act_rows() only for a recurring task
+  ACT_COLLAPSE, // inserted before ACT_DELETE by act_rows() for a task with subtasks
 };
 // The visible rows, in order, per context. ACT_DONE is first (the commonest
 // action, so Select-Select completes a task). Tags / Move open the browse window
@@ -8679,9 +8696,24 @@ static bool s_action_repeat_paused = false;
 #define DELETE_ARM_MS 4000
 static bool s_delete_armed = false;
 static AppTimer *s_delete_arm_timer = NULL;
-static int s_act_rows_buf[14];
+static int s_act_rows_buf[15];
 
 static Task *resolve_action_task(void);
+
+#ifdef PBL_PLATFORM_EMERY
+// How many subtasks directly follow `t` in the today list (s_tasks keeps a
+// parent's subtasks right after it); 0 for a task outside that list.
+static int task_subtask_count(const Task *t) {
+  if (!t || t < s_tasks || t >= s_tasks + s_task_count) {
+    return 0;
+  }
+  int n = 0;
+  while (t + n + 1 < s_tasks + s_task_count && t[n + 1].is_subtask) {
+    n++;
+  }
+  return n;
+}
+#endif
 
 static const int *act_rows(int *count) {
   const int *base;
@@ -8693,6 +8725,13 @@ static const int *act_rows(int *count) {
   }
   memcpy(s_act_rows_buf, base, (size_t)n * sizeof(int));
   Task *t = resolve_action_task();
+#ifdef PBL_PLATFORM_EMERY
+  if (s_action_ctx == ACTX_TODAY && task_subtask_count(t) > 0) {
+    s_act_rows_buf[n] = s_act_rows_buf[n - 1]; // ACT_DELETE stays last
+    s_act_rows_buf[n - 1] = ACT_COLLAPSE;
+    n++;
+  }
+#endif
   if (t && t->recurs && n < (int)ARRLEN(s_act_rows_buf)) {
     s_act_rows_buf[n++] = ACT_REPEAT;
   }
@@ -8771,6 +8810,13 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
       break;
     }
     case ACT_BACKLOG:    label = s_action_in_backlog ? "Move to list" : "Move to backlog"; break;
+#ifdef PBL_PLATFORM_EMERY
+    case ACT_COLLAPSE: {
+      Task *ct = resolve_action_task();
+      label = (ct && ct->collapsed) ? "Expand" : "Collapse";
+      break;
+    }
+#endif
     case ACT_DELETE:     label = s_delete_armed ? "Confirm delete?" : "Delete"; break;
     case ACT_REPEAT:
       label = s_action_repeat_paused ? "Resume repeat" : "Pause repeat";
@@ -8855,6 +8901,18 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
 #endif
       }
       break;
+#ifdef PBL_PLATFORM_EMERY
+    case ACT_COLLAPSE:
+      if (t) {
+        bool collapse = !t->collapsed;
+        t->collapsed = collapse;
+        for (int i = task_subtask_count(t); i > 0; i--) {
+          t[i].collapsed = collapse;
+        }
+        menu_layer_reload_data(s_menu_layer);
+      }
+      break;
+#endif
     case ACT_TRACK:
       if (!t) {
         break;
