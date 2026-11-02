@@ -2,6 +2,19 @@
 // part of this project with real internet access (see README.md for why -
 // the Pebble C SDK has no networking API of its own). Bridges AppMessage
 // to/from the watch and the SuperSync REST API.
+//
+// Sections, top to bottom (search for the "----------------" dividers):
+//   constants + config       MSG_* ids, defaults, display-rule helpers
+//   local storage helpers    config, op-log state, vector clock, KDF keys, ids
+//   AppMessage out           everything sent to the watch (with retry)
+//   projects browser         project/tag lists and a project's tasks
+//   watch page data          stats, upcoming, calendar, search, notes, repeat
+//   sync engine              doSync, op upload, offline queue flush
+//   timeline pins            PebbleOS timeline sync
+//   task changes             toggle, edit, move, delete, checklist
+//   reflect / tracking / habits / add task / notes / finish day
+//   live tracking presence   WebSocket presence to/from other devices
+//   Pebble event wiring      ready, appmessage, webviewclosed handlers
 'use strict';
 
 var supersync = require('./lib/supersync-client.js');
@@ -999,6 +1012,8 @@ function sendProjectTaskAt(idField, rows, index) {
   });
 }
 
+// ---------------- watch page data (stats, upcoming, calendar, search, notes page, repeat) ----------------
+
 // Answers MSG_STATS_REQUEST (the watch's Stats page, non-aplite). One
 // message: the two headline durations in ms, plus STATS_TEXT - the project
 // list preformatted as "Title\tcount" lines the watch prints verbatim under
@@ -1811,6 +1826,8 @@ function syncTimelinePins(state, config) {
 
 var hideDoneSweepTimerId = null;
 
+// ---------------- task changes from the watch (toggle, edit, move, delete) ----------------
+
 // Only relevant when hideDoneTasks is on: getActiveTasks' own grace period
 // (HIDE_DONE_GRACE_MS in task-store.js) keeps a just-completed task visible
 // for a few seconds so marking it done on the watch doesn't make it vanish
@@ -2461,6 +2478,8 @@ function handleTaskToggleCheck(taskId, index, checked) {
     });
 }
 
+// ---------------- daily reflect metrics ----------------
+
 // "[Metric] Upsert Metric" (metric.actions.ts) - a non-task entity on the same
 // generic op-log path SimpleCounter uses (isPersistent + entityType + entityId,
 // no entity-specific meta-reducer). actionPayload is { metric } for upsert.
@@ -2579,6 +2598,8 @@ function handleTaskSetBacklog(taskId, projectId, toBacklog) {
       sendStatus(STATUS_ERROR, failureMsg);
     });
 }
+
+// ---------------- time tracking and habits ----------------
 
 // Phase 2: the watch started tracking `taskId` (elapsedMs > 0 for a session
 // resumed on relaunch). Broadcast it as this watch's own presence so other
@@ -2817,6 +2838,8 @@ function handleHabitTrackStop(habitId, trackedMs) {
       sendStatus(STATUS_ERROR, trackFailureMsg);
     });
 }
+
+// ---------------- add task and notes ----------------
 
 // Watch-dictated "Add Task" - the only watch-initiated write that creates a
 // brand-new entity rather than toggling/adjusting an existing one.
@@ -3346,6 +3369,8 @@ function handleNotesPageAppend(noteText) {
       sendStatus(STATUS_ERROR, noteFailureMsg);
     });
 }
+
+// ---------------- finish day ----------------
 
 // Watch-triggered "Finish Day" - archives every currently-done task, the
 // one core data-mutating effect of the real app's Finish Day flow
