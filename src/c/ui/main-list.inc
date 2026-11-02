@@ -260,14 +260,23 @@ static int group_section_base(void) {
 
 #ifndef PBL_PLATFORM_APLITE
 
+// False for a subtask hidden under a collapsed parent (Task.collapsed).
+static bool task_row_shown(const Task *t) {
+#ifdef PBL_PLATFORM_EMERY
+  return !(t->is_subtask && t->collapsed);
+#else
+  return true;
+#endif
+}
+
 // How many of group g's tasks are drawn - all, minus the pinned task if it's in
-// this group. A group with 0 visible tasks collapses entirely.
+// this group and any subtasks collapsed under their parent. A group with 0 visible tasks collapses entirely.
 static int group_visible_task_count(int g) {
-  int count = s_groups[g].count;
-  if (has_pinned_row()) {
-    int pi = pinned_task_row_map_index();
-    if (pi >= s_groups[g].start && pi < s_groups[g].start + s_groups[g].count) {
-      count--;
+  int pinned_idx = has_pinned_row() ? pinned_task_row_map_index() : -1;
+  int count = 0;
+  for (int i = s_groups[g].start; i < s_groups[g].start + s_groups[g].count; i++) {
+    if (i != pinned_idx && task_row_shown(&s_tasks[s_row_map[i]])) {
+      count++;
     }
   }
   return count;
@@ -552,7 +561,7 @@ static Task *resolve_task_at(MenuIndex index) {
   int end = start + s_groups[group_idx].count;
   int seen = 0;
   for (int i = start; i < end && i < s_task_count; i++) {
-    if (i == pinned_idx) {
+    if (i == pinned_idx || !task_row_shown(&s_tasks[s_row_map[i]])) {
       continue;
     }
     if (seen == row) {
@@ -1039,9 +1048,9 @@ static void draw_issue_src_glyph(GContext *ctx, GRect box, uint8_t src, GColor f
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
-// Priority icon, matching the desktop's priority_high / horizontal_rule /
-// arrow_downward Material glyphs: "!", a dash, a down arrow. Coloured like the
-// desktop's danger / warning / (low) accents. `box` is the right-aligned slot,
+// Priority icon, matching the desktop's default chevron preset: a single
+// chevron down (low), a single chevron up (medium), a double chevron up (high).
+// Coloured red / orange / cerulean. `box` is the right-aligned slot,
 // PRIORITY_GLYPH_W wide; the icon is centred in it.
 #define PRIORITY_GLYPH_W 12
 static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor fg) {
@@ -1052,15 +1061,11 @@ static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor f
            : PBL_IF_COLOR_ELSE(GColorVividCerulean, fg);
   graphics_context_set_stroke_color(ctx, c);
   graphics_context_set_stroke_width(ctx, 2);
-  if (prio == PRIO_MEDIUM) {
-    graphics_draw_line(ctx, GPoint(cx - 4, cy), GPoint(cx + 4, cy));
-  } else if (prio == PRIO_HIGH) {
-    graphics_draw_line(ctx, GPoint(cx, cy - 5), GPoint(cx, cy + 1));
-    graphics_draw_line(ctx, GPoint(cx, cy + 4), GPoint(cx, cy + 4));
-  } else {
-    graphics_draw_line(ctx, GPoint(cx, cy - 5), GPoint(cx, cy + 4));
-    graphics_draw_line(ctx, GPoint(cx - 4, cy), GPoint(cx, cy + 4));
-    graphics_draw_line(ctx, GPoint(cx + 4, cy), GPoint(cx, cy + 4));
+  int16_t dir = prio == PRIO_LOW ? -1 : 1; // chevron points down for low, else up
+  for (int i = 0; i < (prio == PRIO_HIGH ? 2 : 1); i++) {
+    int16_t y = cy + (prio == PRIO_HIGH ? 2 - i * 4 : 0);
+    graphics_draw_line(ctx, GPoint(cx - 4, y + 2 * dir), GPoint(cx, y - 2 * dir));
+    graphics_draw_line(ctx, GPoint(cx, y - 2 * dir), GPoint(cx + 4, y + 2 * dir));
   }
   graphics_context_set_stroke_width(ctx, 1);
 }

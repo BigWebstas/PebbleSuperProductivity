@@ -96,6 +96,14 @@ typedef struct {
   // prefix, which worked but gambled on the watch font having that glyph.
   bool is_subtask;
 #ifndef PBL_PLATFORM_APLITE
+#ifdef PBL_PLATFORM_EMERY
+  // Set on a parent task and on each of its subtasks by the action menu's
+  // "Hide subtasks" row; a subtask with it set is skipped by the today list's
+  // row walks (task_row_shown). Carried across a rebuild by id like
+  // remind_fired, so it lasts the app-open session but not a relaunch.
+  // Emery-only: the other platforms have no code space left for it.
+  bool collapsed;
+#endif
   // The task's own reminder fired this app-open session (minute_tick_handler).
   // Carried across a list rebuild by id (MSG_TASK_SYNC_END) so a frequent
   // re-push doesn't re-fire it.
@@ -129,12 +137,11 @@ typedef struct {
 #define ISSUE_SRC_GIT 1
 #define ISSUE_SRC_TICKET 2
 #define ISSUE_SRC_CALENDAR 3
-// task->priority - mirrors the desktop's High/Medium/Low (task-store.js
-// PRIORITY_NAMES is the index-for-index phone-side table).
+// task->priority - the desktop's own numeric Low/Medium/High encoding.
 #define PRIO_NONE 0
-#define PRIO_HIGH 1
+#define PRIO_LOW 1
 #define PRIO_MEDIUM 2
-#define PRIO_LOW 3
+#define PRIO_HIGH 3
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
 // pre-sorts by project when grouping is on). Grouping off = '' for every task =

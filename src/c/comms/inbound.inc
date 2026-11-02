@@ -183,20 +183,19 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
     case MSG_TASK_SYNC_END: {
       int count = s_incoming_total < MAX_TASKS ? s_incoming_total : MAX_TASKS;
 #ifndef PBL_PLATFORM_APLITE
-      // Carry each task's "reminder already fired" flag across the rebuild -
-      // parse_common_task_fields zeroes it, and with the phone re-pushing the
-      // list often (a tracked-task time update, presence) that re-fired the
-      // banner every push. s_tasks still holds the old list here; s_incoming
-      // the new one (unless the OOM path parsed in place).
+      // Carry each task's "reminder already fired" and collapsed flags across
+      // the rebuild - parse_common_task_fields zeroes them, and with the phone
+      // re-pushing the list often (a tracked-task time update, presence) that
+      // re-fired the banner every push. s_tasks still holds the old list here;
+      // s_incoming the new one (unless the OOM path parsed in place).
       if (s_incoming && s_incoming != s_tasks) {
         for (int i = 0; i < count; i++) {
-          if (s_incoming[i].remind_min < 0) {
-            continue;
-          }
           for (int j = 0; j < s_task_count; j++) {
-            if (s_tasks[j].remind_fired &&
-                strncmp(s_tasks[j].id, s_incoming[i].id, MAX_ID_LEN) == 0) {
-              s_incoming[i].remind_fired = true;
+            if (strncmp(s_tasks[j].id, s_incoming[i].id, MAX_ID_LEN) == 0) {
+              s_incoming[i].remind_fired = s_tasks[j].remind_fired;
+#ifdef PBL_PLATFORM_EMERY
+              s_incoming[i].collapsed = s_tasks[j].collapsed;
+#endif
               break;
             }
           }

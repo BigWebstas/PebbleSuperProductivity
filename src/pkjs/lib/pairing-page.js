@@ -179,6 +179,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
     ['estimate', 'Estimated time'],
     ['timeSpent', 'Time spent'],
     ['tag', 'Tag'],
+    ['priority', 'Priority'],
   ].map(function (opt) {
     var selected = opt[0] === sortBy ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';
