@@ -1,52 +1,52 @@
 #include <pebble.h>
 
-// The .inc files are pasted into this one file, so __FILE_NAME__ would embed a
+// The .h files are pasted into this one file, so __FILE_NAME__ would embed a
 // different name per section in .rodata - bytes emery can't spare. Log under
 // "main.c" so there's a single shared string.
 #undef APP_LOG
 #define APP_LOG(level, fmt, args...) app_log(level, "main.c", __LINE__, fmt, ## args)
 
-// Source map. Everything below is ONE translation unit: the .inc files are
+// Source map. Everything below is ONE translation unit: the .h files are
 // pasted in here in order, so static helpers still inline and the 64 KB emery
 // ceiling is measured exactly as before. Order matters (later sections call
-// earlier ones; forward-decls.inc covers the rest) - don't reorder casually.
+// earlier ones; forward-decls.h covers the rest) - don't reorder casually.
 
 // Protocol and data
-#include "core/protocol.inc"
-#include "core/model.inc"
-#include "ui/metrics.inc"
-#include "core/persistence.inc"
-#include "core/forward-decls.inc"
+#include "core/protocol.h"
+#include "core/model.h"
+#include "ui/metrics.h"
+#include "core/persistence.h"
+#include "core/forward-decls.h"
 
 // Main list, watch -> phone commands, banners, overlays
-#include "ui/main-list.inc"
-#include "comms/outbound.inc"
-#include "ui/banners-tracking.inc"
-#include "ui/overlays.inc"
+#include "ui/main-list.h"
+#include "comms/outbound.h"
+#include "ui/banners-tracking.h"
+#include "ui/overlays.h"
 
 // Phone -> watch
-#include "comms/inbound.inc"
+#include "comms/inbound.h"
 
 // Pages
-#include "pages/habits.inc"
-#include "pages/projects-browser.inc"
+#include "pages/habits.h"
+#include "pages/projects-browser.h"
 
 #ifndef PBL_PLATFORM_APLITE
-#include "ui/notes-touch.inc"
-#include "ui/checklist.inc"
-#include "ui/value-picker.inc"
-#include "pages/reflect.inc"
-#include "ui/action-menu.inc"
+#include "ui/notes-touch.h"
+#include "ui/checklist.h"
+#include "ui/value-picker.h"
+#include "pages/reflect.h"
+#include "ui/action-menu.h"
 #endif
 
 #ifndef PBL_PLATFORM_APLITE
-#include "pages/stats.inc"
-#include "pages/upcoming.inc"
+#include "pages/stats.h"
+#include "pages/upcoming.h"
 #endif
 
-#include "pages/calendar.inc"
-#include "pages/schedule.inc"
-#include "pages/live-focus.inc"
+#include "pages/calendar.h"
+#include "pages/schedule.h"
+#include "pages/live-focus.h"
 
 // App lifecycle: window setup, minute tick, init/deinit, main()
 

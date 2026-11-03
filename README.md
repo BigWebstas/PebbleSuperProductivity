@@ -119,9 +119,9 @@ launch just opens the list.
 
 ## Code layout
 
-- `src/c/main.c` - source map plus app lifecycle (`init`, `deinit`, minute tick). It `#include`s the section files below **in order**; they are pasted into one translation unit, so inlining and the emery 64 KB budget behave exactly as with a single file. The `.inc` extension keeps waf from compiling them on their own.
+- `src/c/main.c` - source map plus app lifecycle (`init`, `deinit`, minute tick). It `#include`s the section files below **in order**; they are pasted into one translation unit, so inlining and the emery 64 KB budget behave exactly as with a single file. They use `.h` rather than `.inc` because some build services copy only `.c`/`.h` files.
   - `core/` - protocol (message keys/ids), data model + globals, persistence, forward declarations
-  - `comms/` - `outbound.inc` (watch -> phone), `inbound.inc` (phone -> watch)
+  - `comms/` - `outbound.h` (watch -> phone), `inbound.h` (phone -> watch)
   - `ui/` - metrics/helpers, main task list, banners + tracking, overlays, notes + touch, checklist, value picker, action menu
   - `pages/` - habits, projects browser, reflect, stats, upcoming, calendar, schedule, live tracking + focus
 - `src/pkjs/index.js` - phone side: AppMessage bridge and sync glue; a table of contents at the top lists its sections. `src/pkjs/lib/` holds the standalone modules (task store, SuperSync client, crypto, presence, timeline, pairing page).
