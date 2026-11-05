@@ -1833,6 +1833,27 @@ check('getActiveTasks(sortBy=\'priority\') sorts high, medium, low, then none', 
   assert.deepStrictEqual(activeSorted(state, 'priority').map((t) => t.id), ['high', 'med', 'low', 'none']);
 });
 
+check('getActiveTasks(sortBy=\'todayOrder\') follows the Today tag\'s replayed reorders', () => {
+  const state = store.emptyState();
+  const move = (type, p) => tagEntry('[WorkContextMeta] ' + type, Object.assign({ workContextId: 'TODAY', workContextType: 'TAG' }, p));
+  store.applyOperations(
+    [
+      addTask({ id: 'a', title: 'A', isDone: false }),
+      addTask({ id: 'b', title: 'B', isDone: false }),
+      addTask({ id: 'c', title: 'C', isDone: false }),
+      addTask({ id: 'd', title: 'D', isDone: false }),
+      tagEntry('[Tag] Update Tag', { tag: { id: 'TODAY', changes: { taskIds: ['a', 'b', 'c'] } } }),
+      move('Move Task in Today', { taskId: 'a', afterTaskId: 'b' }),
+      move('Move Task To Top in Today', { taskId: 'c', doneTaskIds: ['b', 'a', 'c'] }),
+      move('Move Task Down in Today', { taskId: 'c', doneTaskIds: ['c', 'b', 'a'] }),
+    ],
+    state
+  );
+  assert.deepStrictEqual(state.tag.TODAY.taskIds, ['b', 'c', 'a']);
+  // d isn't in the order, so it goes last.
+  assert.deepStrictEqual(activeSorted(state, 'todayOrder').map((t) => t.id), ['b', 'c', 'a', 'd']);
+});
+
 check('getActiveTasks(sortBy=\'tag\') puts p1/p2/... priority tags first, in priority order', () => {
   const state = store.emptyState();
   store.applyOperations(

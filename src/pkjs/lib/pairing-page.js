@@ -180,6 +180,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
     ['timeSpent', 'Time spent'],
     ['tag', 'Tag'],
     ['priority', 'Priority'],
+    ['todayOrder', 'Today order (as on desktop)'],
   ].map(function (opt) {
     var selected = opt[0] === sortBy ? ' selected' : '';
     return '<option value="' + opt[0] + '"' + selected + '>' + opt[1] + '</option>';

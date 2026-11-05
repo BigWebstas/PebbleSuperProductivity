@@ -737,11 +737,75 @@ function applyTagAction(op, actionPayload, state) {
       (actionPayload.ids || []).forEach(function (id) { delete tags[id]; });
       break;
 
+    // The Today page's manual order (TODAY tag's taskIds). Other work
+    // contexts' reorders carry nothing the watch shows.
+    case '[WorkContextMeta] Move Task in Today':
+    case '[WorkContextMeta] Move Task Up in Today':
+    case '[WorkContextMeta] Move Task Down in Today':
+    case '[WorkContextMeta] Move Task To Top in Today':
+    case '[WorkContextMeta] Move Task To Bottom in Today':
+      applyTodayReorder(op.actionType, actionPayload, tags);
+      break;
+
     default:
-      // Reorder and advanced-config actions don't touch title - nothing to
-      // mirror.
+      // Advanced-config actions don't touch title - nothing to mirror.
       break;
   }
+}
+
+// Replays a Today reorder onto tags.TODAY.taskIds, the order the Today
+// page shows. Move in Today mirrors moveItemAfterAnchor (work-context-meta
+// .helper.ts). Up/Down/Top/Bottom carry a snapshot of the not-done ids
+// (the wire-frozen "doneTaskIds" field); they're replayed as "just before
+// the snapshot's upper neighbour" etc. - the same result as the desktop's
+// helpers absent a concurrent edit.
+function applyTodayReorder(actionType, p, tags) {
+  if (!p.taskId || p.workContextId !== 'TODAY') {
+    return;
+  }
+  var today = tags.TODAY || (tags.TODAY = { id: 'TODAY' });
+  var list = (today.taskIds || []).filter(function (id) { return id !== p.taskId; });
+  var had = list.length !== (today.taskIds || []).length;
+  var undone = p.doneTaskIds || [];
+  var at = undone.indexOf(p.taskId);
+  var anchor;
+  var before = false;
+  switch (actionType) {
+    case '[WorkContextMeta] Move Task in Today':
+      anchor = p.afterTaskId;
+      if (anchor === null || anchor === undefined) {
+        today.taskIds = [p.taskId].concat(list);
+        return;
+      }
+      break;
+    case '[WorkContextMeta] Move Task Up in Today':
+      anchor = at > 0 ? undone[at - 1] : undefined;
+      before = true;
+      break;
+    case '[WorkContextMeta] Move Task Down in Today':
+      anchor = at >= 0 ? undone[at + 1] : undefined;
+      break;
+    case '[WorkContextMeta] Move Task To Top in Today':
+      anchor = undone[0] === p.taskId ? undone[1] : undone[0];
+      before = true;
+      break;
+    default:
+      anchor = undone[undone.length - 1] === p.taskId ?
+        undone[undone.length - 2] : undone[undone.length - 1];
+      break;
+  }
+  var idx = anchor === undefined ? -1 : list.indexOf(anchor);
+  if (idx === -1) {
+    // Anchor gone: an item already in the list keeps its place, a new one
+    // goes last (as the desktop does).
+    if (!had) {
+      list.push(p.taskId);
+      today.taskIds = list;
+    }
+    return;
+  }
+  list.splice(before ? idx : idx + 1, 0, p.taskId);
+  today.taskIds = list;
 }
 
 // "Habits" in the real app's UI are actually the SimpleCounter feature
@@ -1293,6 +1357,14 @@ function taskCompareBy(sortBy, state) {
         // high before medium before low, tasks with none last.
         return (taskPriorityCode(b) || 0) - (taskPriorityCode(a) || 0) ||
           titleCompare(a.title, b.title);
+      case 'todayOrder': {
+        // Position in the Today page's manual order; tasks not in it go
+        // last, by title.
+        var order = (state && state.tag && state.tag.TODAY && state.tag.TODAY.taskIds) || [];
+        var ai = order.indexOf(a.id), bi = order.indexOf(b.id);
+        return (ai === -1 ? Infinity : ai) - (bi === -1 ? Infinity : bi) ||
+          titleCompare(a.title, b.title);
+      }
       case 'tag': {
         // A p1/p2/... priority tag outranks everything else, in priority
         // order, above the plain alphabetical-by-tag fallback.
