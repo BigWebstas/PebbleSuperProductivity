@@ -207,9 +207,10 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
   if (row == ACT_PRIORITY) {
     // Cycle in place (none -> high -> medium -> low), like the repeat toggle.
     if (t) {
-      t->priority = t->priority ? t->priority - 1 : PRIO_HIGH; // none>high>medium>low>none
+      uint8_t p = t->priority & 3; // the phone's resend restores the numbers flag
+      t->priority = p ? p - 1 : PRIO_HIGH; // none>high>medium>low>none
       save_tasks();
-      begin_send(MSG_TASK_SET_PRIORITY, s_action_task_id, NULL, t->priority);
+      begin_send(MSG_TASK_SET_PRIORITY, s_action_task_id, NULL, t->priority); // phone masks the numbers flag
       menu_layer_reload_data(s_action_menu);
       menu_layer_reload_data(s_menu_layer);
     }

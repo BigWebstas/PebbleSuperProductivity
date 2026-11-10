@@ -142,6 +142,7 @@ typedef struct {
 #define PRIO_LOW 1
 #define PRIO_MEDIUM 2
 #define PRIO_HIGH 3
+#define PRIO_NUMBERS 4 // flag bit: draw circled numbers (desktop priorityIconPreset)
 
 // One entry per contiguous run of equal Task.project in s_tasks (the phone
 // pre-sorts by project when grouping is on). Grouping off = '' for every task =

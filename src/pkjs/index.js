@@ -271,9 +271,17 @@ function saveConfig(config) {
   localStorage.setItem('sp_config', JSON.stringify(config));
 }
 
+// Desktop globalConfig.tasks.priorityIconPreset ('chevrons' | 'numbers'),
+// refreshed on every loadState() so fillTaskFields needn't re-parse state per
+// task. The watch gets it as bit 4 of TASK_PRIORITY.
+var s_priorityNumbers = false;
+
 function loadState() {
   try {
-    return JSON.parse(localStorage.getItem('sp_entities') || 'null') || store.emptyState();
+    var st = JSON.parse(localStorage.getItem('sp_entities') || 'null') || store.emptyState();
+    var tc = st.globalConfig && st.globalConfig.tasks;
+    s_priorityNumbers = !!tc && tc.priorityIconPreset === 'numbers';
+    return st;
   } catch (e) {
     return store.emptyState();
   }
@@ -773,7 +781,7 @@ function fillTaskFields(dict, t) {
     dict.TASK_DEADLINE_DAYS = Math.max(-999, Math.min(999, t.deadlineDays));
   }
   if (t.priority) {
-    dict.TASK_PRIORITY = t.priority; // 1/2/3 = low/medium/high, absent = none
+    dict.TASK_PRIORITY = t.priority | (s_priorityNumbers ? 4 : 0); // 1/2/3 = low/medium/high (+4 = circled numbers), absent = none
   }
   if (t.recurs) {
     dict.TASK_RECURS = 1; // has a repeat config - the watch draws a ↻ glyph
@@ -2415,7 +2423,8 @@ function handleTaskSetPriority(taskId, code) {
   if (!task) {
     return;
   }
-  var changes = { priority: code > 0 && code <= 3 ? code : null };
+  code &= 3;
+  var changes = { priority: code > 0 ? code : null };
   state.task[taskId] = Object.assign({}, task, changes);
   saveState(state);
   sendTaskListToWatch(watchTaskList(state, config));

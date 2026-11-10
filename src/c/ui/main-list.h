@@ -1054,8 +1054,8 @@ static void draw_issue_src_glyph(GContext *ctx, GRect box, uint8_t src, GColor f
 // PRIORITY_GLYPH_W wide; the icon is centred in it.
 #define PRIORITY_GLYPH_W 12
 static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor fg) {
-  int16_t cx = box.origin.x + box.size.w / 2;
-  int16_t cy = box.origin.y + box.size.h / 2 + 1;
+  bool numbers = prio > PRIO_HIGH; // desktop's "numbers" icon preset
+  prio &= 3;
   GColor c = prio == PRIO_HIGH ? PBL_IF_COLOR_ELSE(GColorRed, fg)
            : prio == PRIO_MEDIUM ? PBL_IF_COLOR_ELSE(GColorOrange, fg)
            : PBL_IF_COLOR_ELSE(GColorVividCerulean, fg);
@@ -1071,6 +1071,18 @@ static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor f
 }
 #endif
 
+  int16_t cx = box.origin.x + box.size.w / 2;
+  int16_t cy = box.origin.y + box.size.h / 2 + 1;
+  if (numbers) {
+    // 1/2/3 in the level's colour (the desktop's counter_N icons, ringed).
+    char d[2] = { (char)('0' + prio), 0 };
+    graphics_context_set_stroke_color(ctx, c);
+    graphics_draw_circle(ctx, GPoint(cx, cy - 1), 6);
+    graphics_context_set_text_color(ctx, c);
+    draw_text(ctx, d, FONT_KEY_GOTHIC_14_BOLD, GRect(cx - 6, cy - 9, 12, 16),
+              GTextOverflowModeFill, GTextAlignmentCenter);
+    return;
+  }
 // Draws one task row - marquee/ellipsized title plus the "@ due  > spent /
 // estimate" subtitle. Shared by per-group rows and the pinned "TRACKING" row.
 // show_project right-aligns task->project on the subtitle line; only the pinned
