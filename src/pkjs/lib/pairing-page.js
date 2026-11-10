@@ -211,8 +211,8 @@ function buildPairingPageUrl(baseUrl, email, options) {
 '            --btn-2-bg: #2c2c2e; --btn-2-fg: #e6e6e9; --danger: #ff6b6b; --danger-bg: #1c1c1e; --ok: #4ade80; }\n' +
 '  }\n' +
 '  body { font-family: -apple-system, Roboto, sans-serif; margin: 0; padding: 16px; background: var(--bg); color: var(--fg); }\n' +
-'  h1 { font-size: 18px; }\n' +
-'  h2 { font-size: 15px; margin-top: 24px; }\n' +
+'  h1 { font-size: 18px; text-align: center; }\n' +
+'  h2 { font-size: 15px; margin-top: 28px; padding-top: 14px; text-align: center; border-top: 2px solid var(--field-border); }\n' +
 '  label { display: block; margin-top: 14px; font-size: 13px; font-weight: 600; }\n' +
 '  input, select { width: 100%; box-sizing: border-box; padding: 10px; font-size: 15px; margin-top: 4px; border: 1px solid var(--field-border); border-radius: 6px; background: var(--field-bg); color: var(--fg); }\n' +
 '  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }\n' +
