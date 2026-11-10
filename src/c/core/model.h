@@ -736,7 +736,7 @@ static bool s_upcoming_have_data = false;
 // optional row. Reuses the Projects-browser window (s_browse_*) with
 // s_browse_mode == BROWSE_TAGS; see TAGS_ROW_ACTIVE(). aplite-excluded with the
 // browser it borrows.
-static bool s_tags_enabled = false;
+static uint8_t s_tags_enabled = 0; // bit 0 Tags row, bit 1 Views row
 #endif
 
 // The Projects browser is built on every platform except aplite (too little

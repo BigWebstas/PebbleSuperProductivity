@@ -787,7 +787,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 }
 
 static void inbox_dropped_handler(AppMessageResult reason, void *context) {
-  APP_LOG(APP_LOG_LEVEL_WARNING, "AppMessage dropped: %d", (int)reason);
+  (void)reason; // no log: the string cost ~30B of code space
 }
 
 #ifndef PBL_PLATFORM_APLITE
@@ -827,7 +827,6 @@ static void retry_timer_callback(void *data) {
 #endif
 
 static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
-  APP_LOG(APP_LOG_LEVEL_WARNING, "AppMessage send failed: %d", (int)reason);
 #ifndef PBL_PLATFORM_APLITE
   s_close_after_finish_day_sent = false; // don't let a later send close the app
   // Retry the same message (short backoff) before the error overlay - transient
