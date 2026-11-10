@@ -19,6 +19,7 @@ typedef enum {
   SECTION0_ROW_HABITS,
   SECTION0_ROW_PROJECTS, // projects browser, between Habits and Add Task (non-aplite)
   SECTION0_ROW_TAGS,     // tags page, right after Projects, opt-in / default off (non-aplite)
+  SECTION0_ROW_VIEWS,    // saved desktop views, right after Tags, shown only when the phone has any (non-aplite)
   SECTION0_ROW_STATS,    // stats page, between Projects and Add Task (non-aplite)
   SECTION0_ROW_SCHEDULE, // schedule page, between Stats and Add Task (non-aplite)
   SECTION0_ROW_CALENDAR, // calendar month view, right after Schedule, opt-in / default off (non-aplite)
@@ -50,9 +51,11 @@ typedef enum {
 // Whether the "Tags" row sits in section 0 - opt-in (default off) and only
 // where the browser it reuses is built.
 #if PROJECTS_BROWSER
-#define TAGS_ROW_ACTIVE() (s_tags_enabled)
+#define TAGS_ROW_ACTIVE() (s_tags_enabled & 1)
+#define VIEWS_ROW_ACTIVE() (s_tags_enabled & 2) // bit 1 of TAGS_ENABLED
 #else
 #define TAGS_ROW_ACTIVE() false
+#define VIEWS_ROW_ACTIVE() false
 #endif
 
 // Whether the "Stats" row sits in section 0. Compile-time false on aplite.
@@ -108,6 +111,9 @@ static int section0_row_count(void) {
   if (TAGS_ROW_ACTIVE()) {
     count++;
   }
+  if (VIEWS_ROW_ACTIVE()) {
+    count++;
+  }
   if (STATS_ROW_ACTIVE()) {
     count++;
   }
@@ -155,6 +161,12 @@ static Section0RowKind section0_row_kind(int row) {
   if (TAGS_ROW_ACTIVE()) {
     if (row == next) {
       return SECTION0_ROW_TAGS;
+    }
+    next++;
+  }
+  if (VIEWS_ROW_ACTIVE()) {
+    if (row == next) {
+      return SECTION0_ROW_VIEWS;
     }
     next++;
   }
@@ -1054,11 +1066,23 @@ static void draw_issue_src_glyph(GContext *ctx, GRect box, uint8_t src, GColor f
 // PRIORITY_GLYPH_W wide; the icon is centred in it.
 #define PRIORITY_GLYPH_W 12
 static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor fg) {
-  int16_t cx = box.origin.x + box.size.w / 2;
-  int16_t cy = box.origin.y + box.size.h / 2 + 1;
+  bool numbers = prio > PRIO_HIGH; // desktop's "numbers" icon preset
+  prio &= 3;
   GColor c = prio == PRIO_HIGH ? PBL_IF_COLOR_ELSE(GColorRed, fg)
            : prio == PRIO_MEDIUM ? PBL_IF_COLOR_ELSE(GColorOrange, fg)
            : PBL_IF_COLOR_ELSE(GColorVividCerulean, fg);
+  int16_t cx = box.origin.x + box.size.w / 2;
+  int16_t cy = box.origin.y + box.size.h / 2 + 1;
+  if (numbers) {
+    // 1/2/3 in the level's colour (the desktop's counter_N icons, ringed).
+    char d[2] = { (char)('0' + prio), 0 };
+    graphics_context_set_stroke_color(ctx, c);
+    graphics_draw_circle(ctx, GPoint(cx, cy - 1), 6);
+    graphics_context_set_text_color(ctx, c);
+    draw_text(ctx, d, FONT_KEY_GOTHIC_14_BOLD, GRect(cx - 6, cy - 9, 12, 16),
+              GTextOverflowModeFill, GTextAlignmentCenter);
+    return;
+  }
   graphics_context_set_stroke_color(ctx, c);
   graphics_context_set_stroke_width(ctx, 2);
   int16_t dir = prio == PRIO_LOW ? -1 : 1; // chevron points down for low, else up
@@ -1393,20 +1417,24 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
       return;
     }
 
-    if (kind == SECTION0_ROW_TAGS) {
-      // Opens the Tags page (Projects browser reused in BROWSE_TAGS mode). Mint
-      // green - distinct from every other section-0 row (the old Limerick read
-      // as the same yellow as the Schedule row). Darkens to JaegerGreen with
-      // white text on select. A "#" hash glyph on the right, from primitives.
+    if (kind == SECTION0_ROW_TAGS || kind == SECTION0_ROW_VIEWS) {
+      // Tags page (mint, "#" glyph) or saved Views (pink, no glyph) - both
+      // the Projects browser reused in a tag-flavoured mode. Select darkens
+      // the fill with white text.
+      bool views = kind == SECTION0_ROW_VIEWS;
       GColor icon = is_selected ? GColorWhite : GColorBlack;
-      fill_bg(ctx, bounds, is_selected ? GColorJaegerGreen : GColorMintGreen);
+      fill_bg(ctx, bounds, views ? (is_selected ? GColorFashionMagenta : GColorRichBrilliantLavender)
+                                 : (is_selected ? GColorJaegerGreen : GColorMintGreen));
       graphics_context_set_text_color(ctx, icon);
       GRect tags_title_box = GRect(TITLE_BOX_X, HEADING_TITLE_Y(bounds.size.h),
                                     bounds.size.w - TITLE_BOX_X * 2 - ROW_ICON_SIZE - 8, HEADING_TITLE_H);
-      draw_text(ctx, "Tags", HEADING_FONT_KEY, tags_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+      draw_text(ctx, views ? "Views" : "Tags", HEADING_FONT_KEY, tags_title_box, GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
       int16_t hx = bounds.size.w - ROW_ICON_SIZE - 4;
       int16_t hy = bounds.size.h / 2;
       graphics_context_set_stroke_color(ctx, icon);
+      if (views) {
+        return; // no glyph - the pink fill and title identify it
+      }
       graphics_draw_line(ctx, GPoint(hx + 2, hy - 6), GPoint(hx, hy + 6));       // "#" left bar
       graphics_draw_line(ctx, GPoint(hx + 8, hy - 6), GPoint(hx + 6, hy + 6));   // "#" right bar
       graphics_draw_line(ctx, GPoint(hx - 2, hy - 2), GPoint(hx + 10, hy - 2));  // "#" top bar

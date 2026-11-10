@@ -71,7 +71,7 @@ var MSG_PRESENCE_STOP_LOCAL = 30; // phone -> watch: a remote device stopped the
 // replies are START / ITEM* / END sequences, same retrying send pattern as
 // the task/habit lists. Project-task ITEMs reuse the TASK_* keys plus
 // PROJECT_TASK_BACKLOG (0 = regular list, 1 = that project's backlog).
-var MSG_PROJECT_LIST_REQUEST = 31;  // watch -> phone: IS_TAGS (0 projects, 1 tags)
+var MSG_PROJECT_LIST_REQUEST = 31;  // watch -> phone: IS_TAGS (0 projects, 1 tags, 2 saved views)
 var MSG_PROJECT_LIST_START = 32;    // phone -> watch: PROJECT_TOTAL
 var MSG_PROJECT_LIST_ITEM = 33;     // phone -> watch: PROJECT_INDEX, PROJECT_ID, PROJECT_TITLE, PROJECT_COLOR
 var MSG_PROJECT_LIST_END = 34;      // phone -> watch: (no keys)
@@ -271,9 +271,21 @@ function saveConfig(config) {
   localStorage.setItem('sp_config', JSON.stringify(config));
 }
 
+// Desktop globalConfig.tasks.priorityIconPreset ('chevrons' | 'numbers'),
+// refreshed on every loadState() so fillTaskFields needn't re-parse state per
+// task. The watch gets it as bit 4 of TASK_PRIORITY.
+var s_priorityNumbers = false;
+// Number of saved desktop views (boards) - the watch's Views row only shows
+// when there is at least one. Refreshed with the same loadState() pass.
+var s_viewCount = 0;
+
 function loadState() {
   try {
-    return JSON.parse(localStorage.getItem('sp_entities') || 'null') || store.emptyState();
+    var st = JSON.parse(localStorage.getItem('sp_entities') || 'null') || store.emptyState();
+    var tc = st.globalConfig && st.globalConfig.tasks;
+    s_priorityNumbers = !!tc && tc.priorityIconPreset === 'numbers';
+    s_viewCount = Object.keys(st.board || {}).length;
+    return st;
   } catch (e) {
     return store.emptyState();
   }
@@ -552,7 +564,9 @@ function sendStatus(code, message) {
     // s_tags_enabled / SECTION0_ROW_TAGS: every tag with its open-task count,
     // drill in for that tag's tasks. Reuses the projects-browser plumbing with
     // an IS_TAGS flag on the list / tasks requests.
-    TAGS_ENABLED: config.enableTags === true ? 1 : 0,
+    // Bit 1 (value 2) = the Views row: saved desktop views, shown only when
+    // there is at least one. Packed here so it costs no extra message key.
+    TAGS_ENABLED: (config.enableTags === true ? 1 : 0) | (config.enableViews !== false && s_viewCount > 0 ? 2 : 0),
     // Calendar month view row - default OFF, emery-only watch UI (see
     // main.c's CALENDAR_ROW_ACTIVE comment). Drives s_calendar_enabled /
     // SECTION0_ROW_CALENDAR.
@@ -773,7 +787,7 @@ function fillTaskFields(dict, t) {
     dict.TASK_DEADLINE_DAYS = Math.max(-999, Math.min(999, t.deadlineDays));
   }
   if (t.priority) {
-    dict.TASK_PRIORITY = t.priority; // 1/2/3 = low/medium/high, absent = none
+    dict.TASK_PRIORITY = t.priority | (s_priorityNumbers ? 4 : 0); // 1/2/3 = low/medium/high (+4 = circled numbers), absent = none
   }
   if (t.recurs) {
     dict.TASK_RECURS = 1; // has a repeat config - the watch draws a ↻ glyph
@@ -893,16 +907,18 @@ function sendHabitAt(habits, index) {
 // isTags: the same request with IS_TAGS=1 asks for the TAG list instead (the
 // Tags page reuses this whole path; a tag entry has the same id/title/color/
 // count shape a project entry does).
-function handleProjectListRequest(isTags, editTaskId) {
+// isViews: IS_TAGS=2, the saved-views list (same shape again).
+function handleProjectListRequest(isTags, editTaskId, isViews) {
   var config = loadConfig();
   if (!config || !config.jwt) {
     sendStatus(STATUS_NOT_PAIRED);
     return;
   }
-  if (isTags ? config.enableTags !== true : config.enableProjects === false) {
+  if (isViews ? config.enableViews === false : isTags ? config.enableTags !== true : config.enableProjects === false) {
     return;
   }
-  var projects = isTags ? store.getTagList(loadState()) : store.getProjectList(loadState());
+  var projects = isViews ? store.getViewList(loadState())
+    : isTags ? store.getTagList(loadState()) : store.getProjectList(loadState());
   if (isTags && editTaskId) {
     // Tag editor: PROJECT_TASK_COUNT carries "assigned to this task" (0/1),
     // not a count.
@@ -912,7 +928,7 @@ function handleProjectListRequest(isTags, editTaskId) {
       p.taskCount = have.indexOf(p.id) !== -1 ? 1 : 0;
     });
   }
-  sendWithRetry({ MSG_TYPE: MSG_PROJECT_LIST_START, PROJECT_TOTAL: projects.length, IS_TAGS: isTags ? 1 : 0 }, function () {
+  sendWithRetry({ MSG_TYPE: MSG_PROJECT_LIST_START, PROJECT_TOTAL: projects.length, IS_TAGS: isViews ? 2 : isTags ? 1 : 0 }, function () {
     sendProjectListAt(projects, 0);
   }, function (e) {
     console.log('[pkjs] giving up on PROJECT_LIST_START after retries: ' + JSON.stringify(e));
@@ -958,7 +974,8 @@ function handleProjectTasksRequest(projectId, isTags) {
     sendStatus(STATUS_NOT_PAIRED);
     return;
   }
-  if (isTags ? config.enableTags !== true : config.enableProjects === false) {
+  if (isTags && store.isViewId(projectId) ? config.enableViews === false
+      : isTags ? config.enableTags !== true : config.enableProjects === false) {
     return;
   }
   if (projectId === undefined || projectId === null) {
@@ -976,7 +993,9 @@ function sendProjectTasks(pid, state, config, isTags) {
   var rows;
   var graceMs = hideDoneGraceMs();
   if (isTags) {
-    rows = store.getTagTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks, graceMs)
+    rows = (store.isViewId(pid)
+      ? store.getViewTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks, graceMs)
+      : store.getTagTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks, graceMs))
       .map(function (t) { return { t: t, backlog: 0 }; });
   } else {
     var split = store.getProjectTasks(state, pid, MAX_TASKS, !!config.hideDoneTasks, graceMs);
@@ -2415,7 +2434,8 @@ function handleTaskSetPriority(taskId, code) {
   if (!task) {
     return;
   }
-  var changes = { priority: code > 0 && code <= 3 ? code : null };
+  code &= 3;
+  var changes = { priority: code > 0 ? code : null };
   state.task[taskId] = Object.assign({}, task, changes);
   saveState(state);
   sendTaskListToWatch(watchTaskList(state, config));
@@ -3874,13 +3894,13 @@ Pebble.addEventListener('appmessage', function (e) {
       handleProjectNoteRequest(payload.PROJECT_ID);
       break;
     case MSG_PROJECT_LIST_REQUEST:
-      handleProjectListRequest(payload.IS_TAGS === 1, payload.TASK_ID);
+      handleProjectListRequest(payload.IS_TAGS >= 1, payload.TASK_ID, payload.IS_TAGS === 2);
       break;
     case MSG_TASK_TOGGLE_TAG:
       handleToggleTag(payload.TASK_ID, payload.PROJECT_ID, payload.PROJECT_TASK_BACKLOG === 1);
       break;
     case MSG_PROJECT_TASKS_REQUEST:
-      handleProjectTasksRequest(payload.PROJECT_ID, payload.IS_TAGS === 1);
+      handleProjectTasksRequest(payload.PROJECT_ID, payload.IS_TAGS >= 1);
       break;
     case MSG_STATS_REQUEST:
       handleStatsRequest();
@@ -3977,6 +3997,7 @@ Pebble.addEventListener('showConfiguration', function () {
       enableNotesPage: !!config.enableNotesPage,
       enableSearch: !!config.enableSearch,
       enableTags: config.enableTags === true,
+      enableViews: config.enableViews !== false,
       enableCalendar: config.enableCalendar === true,
       yesterdayStats: !!config.yesterdayStats,
       backlightMode: config.backlightMode || 0,
@@ -4089,6 +4110,7 @@ Pebble.addEventListener('webviewclosed', function (e) {
     enableNotesPage: !!result.enableNotesPage,
     enableSearch: !!result.enableSearch,
     enableTags: !!result.enableTags,
+    enableViews: !!result.enableViews,
     enableCalendar: !!result.enableCalendar,
     yesterdayStats: !!result.yesterdayStats,
     backlightMode: parseInt(result.backlightMode, 10) || 0,

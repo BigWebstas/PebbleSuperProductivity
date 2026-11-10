@@ -2415,6 +2415,66 @@ check('startOfNextDay: logical day is the previous calendar day before the rollo
   }
 });
 
+// ---- Saved views (desktop boards) -----------------------------------------
+function viewState() {
+  const st = store.emptyState();
+  store.applyOperation(taskEntry('[Task Shared] addTask', { task: { id: 't1', title: 'A', tagIds: ['x'], projectId: 'p', priority: 3, dueDay: today } }), st);
+  store.applyOperation(taskEntry('[Task Shared] addTask', { task: { id: 't2', title: 'B', tagIds: ['x', 'y'], projectId: 'p' } }), st);
+  store.applyOperation(taskEntry('[Task Shared] addTask', { task: { id: 't3', title: 'C', tagIds: [], projectId: 'p', isDone: true } }), st);
+  return st;
+}
+const PANEL = { id: 'pan1', title: 'P', includedTagIds: ['x'], excludedTagIds: ['y'], includedTagsMatch: 'all', taskDoneState: 3, scheduledState: 1, isParentTasksOnly: false, projectIds: [''], taskIds: [] };
+
+check('board replay: add / update / panel update / remove', () => {
+  const st = viewState();
+  store.applyOperation(entry('BOARD', '[Boards] Add Board', { board: { id: 'b1', title: 'My view', cols: 1, panels: [PANEL] } }), st);
+  assert.strictEqual(st.board.b1.title, 'My view');
+  store.applyOperation(entry('BOARD', '[Boards] Update Board', { id: 'b1', updates: { title: 'Renamed' } }), st);
+  assert.strictEqual(st.board.b1.title, 'Renamed');
+  store.applyOperation(entry('BOARD', '[Boards] Update Panel Cfg', { panelCfg: Object.assign({}, PANEL, { title: 'P2' }) }), st);
+  assert.strictEqual(st.board.b1.panels[0].title, 'P2');
+  store.applyOperation(entry('BOARD', '[Boards] Remove Board', { id: 'b1' }), st);
+  assert.strictEqual(st.board.b1, undefined);
+});
+
+check('view list + tasks honour tag include/exclude and done state', () => {
+  const st = viewState();
+  store.applyOperation(entry('BOARD', '[Boards] Add Board', { board: { id: 'b1', title: 'My view', cols: 1, panels: [PANEL] } }), st);
+  const list = store.getViewList(st);
+  assert.strictEqual(list.length, 1);
+  assert.strictEqual(list[0].title, 'My view');
+  assert.strictEqual(list[0].id, 'v:pan1');
+  assert.strictEqual(list[0].taskCount, 1); // A only: B excluded by y, C done
+  const rows = store.getViewTasks(st, 'v:pan1', 50, false, 0);
+  assert.deepStrictEqual(rows.map(r => r.id), ['t1']);
+  assert.ok(store.isViewId('v:pan1') && !store.isViewId('tagid'));
+});
+
+check('multi-panel board lists "Board / Panel"; default key titles are prettified', () => {
+  const st = viewState();
+  store.applyOperation(entry('BOARD', '[Boards] Add Board', { board: { id: 'b2', title: 'F.BOARDS.DEFAULT.KANBAN', cols: 2, panels: [Object.assign({}, PANEL, { id: 'pa', title: 'Todo' }), Object.assign({}, PANEL, { id: 'pb', title: 'Done', taskDoneState: 2, includedTagIds: [], excludedTagIds: [] })] } }), st);
+  const titles = store.getViewList(st).map(v => v.title).sort();
+  assert.deepStrictEqual(titles, ['Kanban / Done', 'Kanban / Todo']);
+  assert.deepStrictEqual(store.getViewTasks(st, 'v:pb', 50, false, 0).map(r => r.id), ['t3']);
+});
+
+check('view rules: priority, planned date today, scheduled/unscheduled', () => {
+  const st = viewState();
+  const mk = (extra) => Object.assign({}, PANEL, { includedTagIds: [], excludedTagIds: [], taskDoneState: 1 }, extra);
+  const ids = (pn) => { st.board = { b: { id: 'b', title: 'T', panels: [Object.assign({}, pn, { id: 'v' })] } }; return store.getViewTasks(st, 'v:v', 50, false, 0).map(r => r.id).sort(); };
+  assert.deepStrictEqual(ids(mk({ priorityRule: '3' })), ['t1']);
+  assert.deepStrictEqual(ids(mk({ priorityRule: 'none' })), ['t2', 't3']);
+  assert.deepStrictEqual(ids(mk({ dueState: 'today' })), ['t1']);
+  assert.deepStrictEqual(ids(mk({ scheduledState: 3 })), ['t2', 't3']);
+  assert.deepStrictEqual(ids(mk({ isUntagged: true })), ['t3']);
+});
+
+check('SYNC_IMPORT seeds boards from boards.boardCfgs', () => {
+  const st = store.emptyState();
+  store.applyOperation({ serverSeq: 1, op: { opType: 'SYNC_IMPORT', entityType: 'ALL', payload: { boards: { boardCfgs: [{ id: 'b9', title: 'Seeded', panels: [] }] } } }, receivedAt: 1 }, st);
+  assert.strictEqual(st.board.b9.title, 'Seeded');
+});
+
 console.log('');
 if (failures > 0) {
   console.log(`${failures} check(s) FAILED`);

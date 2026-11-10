@@ -28,18 +28,18 @@ static void send_presence_stop(void) {
 // Projects browser: ask the phone for the project list / one project's task
 // list. Both replies are chunked (START / ITEM* / END) - see the MSG_PROJECT_*
 // handlers in inbox_received_handler.
-// int_val carries IS_TAGS (1 for any tag-flavoured mode) - see send_pending_retry
+// int_val carries IS_TAGS (1 tag-flavoured, 2 saved views) - see send_pending_retry
 // and the phone's handleProjectListRequest / handleProjectTasksRequest. In
 // BROWSE_TAG_EDIT the str_val is the task id whose tags are being edited (the
 // phone then marks each tag assigned/not in PROJECT_TASK_COUNT).
 static void request_project_list(void) {
   const char *edit_id = (s_browse_mode == BROWSE_TAG_EDIT && s_browse_edit_task_id[0] != '\0')
                             ? s_browse_edit_task_id : NULL;
-  begin_send(MSG_PROJECT_LIST_REQUEST, edit_id, NULL, browse_wants_tags() ? 1 : 0);
+  begin_send(MSG_PROJECT_LIST_REQUEST, edit_id, NULL, browse_wants_tags() ? 1 + (s_browse_mode == BROWSE_VIEWS) : 0);
 }
 
 static void request_project_tasks(const char *project_id) {
-  begin_send(MSG_PROJECT_TASKS_REQUEST, project_id, NULL, browse_wants_tags() ? 1 : 0);
+  begin_send(MSG_PROJECT_TASKS_REQUEST, project_id, NULL, browse_wants_tags() ? 1 : 0); // the phone spots a view by its "v:" id prefix
 }
 #endif
 
@@ -563,7 +563,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_upcoming_enabled = tuple_int(iterator, KEY_UPCOMING_ENABLED, s_upcoming_enabled) != 0;
       s_notespage_enabled = tuple_int(iterator, KEY_NOTESPAGE_ENABLED, s_notespage_enabled) != 0;
       s_search_enabled = tuple_int(iterator, KEY_SEARCH_ENABLED, s_search_enabled) != 0;
-      s_tags_enabled = tuple_int(iterator, KEY_TAGS_ENABLED, s_tags_enabled) != 0;
+      s_tags_enabled = tuple_int(iterator, KEY_TAGS_ENABLED, s_tags_enabled);
       s_yesterday_stats_enabled = tuple_int(iterator, KEY_YESTERDAY_STATS_ENABLED, s_yesterday_stats_enabled) != 0;
       s_later_today_enabled = tuple_int(iterator, KEY_LATER_TODAY_ENABLED, s_later_today_enabled) != 0;
       s_collapse_groups = tuple_int(iterator, KEY_COLLAPSE_GROUPS, s_collapse_groups) != 0;
@@ -787,7 +787,7 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
 }
 
 static void inbox_dropped_handler(AppMessageResult reason, void *context) {
-  APP_LOG(APP_LOG_LEVEL_WARNING, "AppMessage dropped: %d", (int)reason);
+  (void)reason; // no log: the string cost ~30B of code space
 }
 
 #ifndef PBL_PLATFORM_APLITE
@@ -827,7 +827,6 @@ static void retry_timer_callback(void *data) {
 #endif
 
 static void outbox_failed_handler(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
-  APP_LOG(APP_LOG_LEVEL_WARNING, "AppMessage send failed: %d", (int)reason);
 #ifndef PBL_PLATFORM_APLITE
   s_close_after_finish_day_sent = false; // don't let a later send close the app
   // Retry the same message (short backoff) before the error overlay - transient

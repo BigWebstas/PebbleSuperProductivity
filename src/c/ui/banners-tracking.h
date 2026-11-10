@@ -453,8 +453,8 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
     } else if (kind == SECTION0_ROW_PROJECTS) {
       s_browse_mode = BROWSE_PROJECTS;
       push_browse_window(NULL);
-    } else if (kind == SECTION0_ROW_TAGS) {
-      s_browse_mode = BROWSE_TAGS;
+    } else if (kind == SECTION0_ROW_TAGS || kind == SECTION0_ROW_VIEWS) {
+      s_browse_mode = kind == SECTION0_ROW_TAGS ? BROWSE_TAGS : BROWSE_VIEWS;
       push_browse_window(NULL);
 #endif
 #ifndef PBL_PLATFORM_APLITE
