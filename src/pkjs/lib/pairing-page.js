@@ -44,6 +44,7 @@ function buildPairingPageUrl(baseUrl, email, options) {
   var enableNotesPage = !!options.enableNotesPage;
   var enableSearch = !!options.enableSearch;
   var enableTags = options.enableTags === true; // default off, unlike the others
+  var enableViews = options.enableViews !== false; // the Views row (saved desktop views)
   var enableCalendar = options.enableCalendar === true; // default off; emery-only watch UI
   var touchNav = !!options.touchNav;
   var overtimeNotify = !!options.overtimeNotify;
@@ -362,6 +363,12 @@ sortByOptions + '\n' +
 '  <p class="hint">Each tag with its open-task count. Off by default.</p>\n' +
 '\n' +
 '  <div class="checkbox-row">\n' +
+'    <input id="enableViews" type="checkbox"' + (enableViews ? ' checked' : '') + '>\n' +
+'    <label for="enableViews">Views</label>\n' +
+'  </div>\n' +
+'  <p class="hint">Your desktop saved views (from the task list\'s \"Save as view\"), as their own row. Shown once you have at least one. On by default.</p>\n' +
+'\n' +
+'  <div class="checkbox-row">\n' +
 '    <input id="enableCalendar" type="checkbox"' + (enableCalendar ? ' checked' : '') + '>\n' +
 '    <label for="enableCalendar">Calendar</label>\n' +
 '  </div>\n' +
@@ -603,6 +610,7 @@ backlightOptions + '\n' +
 '      enableSearch: document.getElementById(\'enableSearch\').checked,\n' +
 '      enableReflect: document.getElementById(\'enableReflect\').checked,\n' +
 '      enableTags: document.getElementById(\'enableTags\').checked,\n' +
+'      enableViews: document.getElementById(\'enableViews\').checked,\n' +
 '      enableCalendar: document.getElementById(\'enableCalendar\').checked,\n' +
 '      touchNav: document.getElementById(\'touchNav\').checked,\n' +
 '      overtimeNotify: document.getElementById(\'overtimeNotify\').checked,\n' +

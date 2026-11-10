@@ -365,7 +365,7 @@ static bool s_notes_is_loading = false;
 #define NOTES_LOADING_TEXT "Loading notes..."
 #define NOTES_EMPTY_TEXT "(No notes for this task)"
 #define PROJECT_NOTES_EMPTY_TEXT "(No notes for this project)"
-#define NOTES_TIMEOUT_TEXT "Couldn't load notes - back out and try again."
+#define NOTES_TIMEOUT_TEXT "Couldn't load notes. Go back, retry."
 // Guards a fetch that never completes (not paired, dropped AppMessage) from
 // leaving the overlay stuck on "Loading..." with no signal. Canceled when a
 // matching SYNC_START/END arrives; restarted on every new request.
@@ -830,13 +830,13 @@ static int s_browse_level = 0;              // 0 = project list, 1 = one project
 // the Calendar month view's day tap (push_browse_window's jump-to path),
 // never level 0 - s_browse_project_id carries the "YYYY-MM-DD" date instead
 // of a project/tag id. emery-only (Calendar itself is), see browse_descend.
-typedef enum { BROWSE_PROJECTS, BROWSE_TAGS, BROWSE_TAG_EDIT, BROWSE_MOVE, BROWSE_CALENDAR_DAY } BrowseMode;
+typedef enum { BROWSE_PROJECTS, BROWSE_TAGS, BROWSE_VIEWS, BROWSE_TAG_EDIT, BROWSE_MOVE, BROWSE_CALENDAR_DAY } BrowseMode;
 static BrowseMode s_browse_mode = BROWSE_PROJECTS;
 static char s_browse_edit_task_id[MAX_ID_LEN] = ""; // the task TAG_EDIT / MOVE acts on
 // Tag-flavoured modes want the TAG list (IS_TAGS) and have no notes/backlog/
 // cache. BROWSE_MOVE is NOT one - it uses the plain project list.
 static bool browse_wants_tags(void) {
-  return s_browse_mode == BROWSE_TAGS || s_browse_mode == BROWSE_TAG_EDIT;
+  return s_browse_mode >= BROWSE_TAGS && s_browse_mode <= BROWSE_TAG_EDIT; // TAGS, VIEWS, TAG_EDIT
 }
 static Window *s_browse_window = NULL;
 static MenuLayer *s_browse_menu = NULL;
