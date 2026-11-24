@@ -1908,6 +1908,32 @@ function buildTaskUpdateOp(taskId, changes, clientId) {
 // (actionPayload.task.id). opType 'UPD', not a dedicated delete code -
 // moveToArchive (also a "remove from the active view" action) uses the same
 // convention; the op log's opType tracks CRT-vs-not, not CRUD semantics.
+// "[Task Shared] planTasksForToday" - the desktop's "Add to Today". Replay
+// (task-store.js) reads taskIds + today; parentTaskMap/isShowSnack match the
+// real action's shape (we only ever plan one top-level task).
+function buildPlanForTodayOp(taskId, today, clientId) {
+  var crypto = getCrypto();
+  var payload = {
+    actionPayload: { taskIds: [taskId], today: today, parentTaskMap: {}, isShowSnack: false },
+    entityChanges: [],
+  };
+  var newVectorClock = incrementVectorClock(loadVectorClock(), clientId);
+  saveVectorClock(newVectorClock);
+  return {
+    id: generateOpId(),
+    opType: 'UPD',
+    actionType: '[Task Shared] planTasksForToday',
+    entityType: 'TASK',
+    entityId: taskId,
+    payload: crypto ? crypto.encrypt(payload) : payload,
+    isPayloadEncrypted: !!crypto,
+    vectorClock: newVectorClock,
+    clientId: clientId,
+    timestamp: Date.now(),
+    schemaVersion: SCHEMA_VERSION,
+  };
+}
+
 function buildTaskDeleteOp(taskId, clientId) {
   var crypto = getCrypto();
   var payload = { actionPayload: { task: { id: taskId } }, entityChanges: [] };
@@ -2188,10 +2214,20 @@ function handleTaskReschedule(taskId, when, projectId) {
   // null (not undefined) so the cleared fields survive JSON.stringify onto the
   // wire and actually clear on other clients, not just locally.
   var changes = { dueDay: newDueDay, dueWithTime: null, remindAt: null };
-  state.task[taskId] = Object.assign({}, task, changes);
-
   var clientId = getOrCreateClientId();
-  var ops = [buildTaskUpdateOp(taskId, changes, clientId)];
+  var ops;
+  if (when === 'today') {
+    // The desktop's "Add to Today" dispatches planTasksForToday, not a plain
+    // updateTask: it keeps a dueWithTime that already lands on today and
+    // clears any other. Mirror that locally and send the same action.
+    if (task.dueWithTime && store.msIsToday(task.dueWithTime)) {
+      delete changes.dueWithTime;
+    }
+    ops = [buildPlanForTodayOp(taskId, newDueDay, clientId)];
+  } else {
+    ops = [buildTaskUpdateOp(taskId, changes, clientId)];
+  }
+  state.task[taskId] = Object.assign({}, task, changes);
 
   // Scheduling a task that's sitting in its project's backlog moves it into the
   // regular list, both here and on other clients ([Project] Move Task from

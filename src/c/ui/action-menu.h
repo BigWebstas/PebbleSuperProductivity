@@ -146,7 +146,7 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
       break;
     }
     case ACT_TRACK:      label = action_task_is_tracked() ? "Stop tracking" : "Start tracking"; break;
-    case ACT_TODAY:      label = "Schedule today"; break;
+    case ACT_TODAY:      label = "Add to Today"; break;
     case ACT_TOMORROW:   label = "Schedule tomorrow"; break;
     case ACT_AT:         label = "Schedule Time"; break;
     case ACT_UNSCHEDULE: label = "Unschedule"; break;
