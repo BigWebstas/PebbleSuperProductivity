@@ -11,7 +11,6 @@ enum {
   ACT_PRIORITY,
   ACT_DELETE, // always last - destructive, see the arm/confirm state below
   ACT_REPEAT, // appended by act_rows() only for a recurring task
-  ACT_COLLAPSE, // inserted before ACT_DELETE by act_rows() for a task with subtasks
 };
 // The visible rows, in order, per context. ACT_DONE is first (the commonest
 // action, so Select-Select completes a task). Tags / Move open the browse window
@@ -53,20 +52,6 @@ static int s_act_rows_buf[15];
 
 static Task *resolve_action_task(void);
 
-#ifdef PBL_PLATFORM_EMERY
-// How many subtasks directly follow `t` in the today list (s_tasks keeps a
-// parent's subtasks right after it); 0 for a task outside that list.
-static int task_subtask_count(const Task *t) {
-  if (!t || t < s_tasks || t >= s_tasks + s_task_count) {
-    return 0;
-  }
-  int n = 0;
-  while (t + n + 1 < s_tasks + s_task_count && t[n + 1].is_subtask) {
-    n++;
-  }
-  return n;
-}
-#endif
 
 static const int *act_rows(int *count) {
   const int *base;
@@ -78,13 +63,6 @@ static const int *act_rows(int *count) {
   }
   memcpy(s_act_rows_buf, base, (size_t)n * sizeof(int));
   Task *t = resolve_action_task();
-#ifdef PBL_PLATFORM_EMERY
-  if (s_action_ctx == ACTX_TODAY && task_subtask_count(t) > 0) {
-    s_act_rows_buf[n] = s_act_rows_buf[n - 1]; // ACT_DELETE stays last
-    s_act_rows_buf[n - 1] = ACT_COLLAPSE;
-    n++;
-  }
-#endif
   if (t && t->recurs && n < (int)ARRLEN(s_act_rows_buf)) {
     s_act_rows_buf[n++] = ACT_REPEAT;
   }
@@ -163,13 +141,6 @@ static void action_draw_row(GContext *ctx, const Layer *cell, MenuIndex *idx, vo
       break;
     }
     case ACT_BACKLOG:    label = s_action_in_backlog ? "Move to list" : "Move to backlog"; break;
-#ifdef PBL_PLATFORM_EMERY
-    case ACT_COLLAPSE: {
-      Task *ct = resolve_action_task();
-      label = (ct && ct->collapsed) ? "Expand" : "Collapse";
-      break;
-    }
-#endif
     case ACT_DELETE:     label = s_delete_armed ? "Confirm delete?" : "Delete"; break;
     case ACT_REPEAT:
       label = s_action_repeat_paused ? "Resume repeat" : "Pause repeat";
@@ -254,18 +225,6 @@ static void action_select(MenuLayer *ml, MenuIndex *idx, void *c) {
 #endif
       }
       break;
-#ifdef PBL_PLATFORM_EMERY
-    case ACT_COLLAPSE:
-      if (t) {
-        bool collapse = !t->collapsed;
-        t->collapsed = collapse;
-        for (int i = task_subtask_count(t); i > 0; i--) {
-          t[i].collapsed = collapse;
-        }
-        menu_layer_reload_data(s_menu_layer);
-      }
-      break;
-#endif
     case ACT_TRACK:
       if (!t) {
         break;

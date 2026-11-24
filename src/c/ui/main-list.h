@@ -1042,6 +1042,31 @@ static void draw_issue_src_glyph(GContext *ctx, GRect box, uint8_t src, GColor f
 }
 #endif
 
+#ifdef PBL_PLATFORM_EMERY
+// How many subtasks directly follow `t` in the today list (s_tasks keeps a
+// parent's subtasks right after it); 0 for a task outside that list.
+static int task_subtask_count(const Task *t) {
+  if (!t || t < s_tasks || t >= s_tasks + s_task_count) {
+    return 0;
+  }
+  int n = 0;
+  while (t + n + 1 < s_tasks + s_task_count && t[n + 1].is_subtask) {
+    n++;
+  }
+  return n;
+}
+
+// Hides / shows `t`'s subtasks in the today list (session-only, Task.collapsed).
+static void toggle_task_collapse(Task *t) {
+  bool collapse = !t->collapsed;
+  t->collapsed = collapse;
+  for (int i = task_subtask_count(t); i > 0; i--) {
+    t[i].collapsed = collapse;
+  }
+  menu_layer_reload_data(s_menu_layer);
+}
+#endif
+
 #ifndef PBL_PLATFORM_APLITE
 // Priority icon, matching the desktop's default chevron preset: a single
 // chevron down (low), a single chevron up (medium), a double chevron up (high).
