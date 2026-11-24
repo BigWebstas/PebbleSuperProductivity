@@ -14,7 +14,7 @@
 // error - a real resilience regression there, but honest: the user sees the
 // same error and can Resync manually.
 #ifndef PBL_PLATFORM_APLITE
-#define MAX_SEND_RETRIES 3
+#define MAX_SEND_RETRIES 5
 #define RETRY_BACKOFF_BASE_MS 1000
 static int s_retry_msg_type = 0; // 0 = no message to retry if this send fails
 // Sized for the largest payload: a task id (MAX_ID_LEN), habit id, or dictated

@@ -660,8 +660,11 @@ function sendStatus(code, message) {
 // back sends, more chances for one to be dropped) and went away entirely
 // once there were fewer total habits to send - exactly the "goes missing
 // when I add habits, comes back when I remove them" symptom this fixes.
-var ITEM_SEND_RETRIES = 3;
-var ITEM_SEND_RETRY_DELAY_MS = 400;
+// Six retries, each waiting a bit longer than the last (0.5s, 1s ... 3s): a
+// busy or briefly-disconnected watch link needs more than a couple of quick
+// back-to-back attempts to recover.
+var ITEM_SEND_RETRIES = 6;
+var ITEM_SEND_RETRY_DELAY_MS = 500;
 function sendWithRetry(dict, onSuccess, onGiveUp, attemptsLeft) {
   if (attemptsLeft === undefined) {
     attemptsLeft = ITEM_SEND_RETRIES;
@@ -670,7 +673,7 @@ function sendWithRetry(dict, onSuccess, onGiveUp, attemptsLeft) {
     if (attemptsLeft > 0) {
       setTimeout(function () {
         sendWithRetry(dict, onSuccess, onGiveUp, attemptsLeft - 1);
-      }, ITEM_SEND_RETRY_DELAY_MS);
+      }, ITEM_SEND_RETRY_DELAY_MS * (ITEM_SEND_RETRIES - attemptsLeft + 1));
     } else {
       onGiveUp(e);
     }
@@ -1621,7 +1624,9 @@ function uploadOps(ops, config, clientId) {
       var results = (res && res.results) || [];
       var rejected = null;
       for (var i = 0; i < results.length; i++) {
-        if (results[i] && !results[i].accepted) {
+        // DUPLICATE_OPERATION: an earlier attempt (one the phone saw time out)
+        // actually reached the server - the op is in, not a rejection.
+        if (results[i] && !results[i].accepted && results[i].errorCode !== 'DUPLICATE_OPERATION') {
           rejected = results[i];
           break;
         }
@@ -1746,7 +1751,7 @@ function timelineRequest(method, path, userToken, body) {
     };
     xhr.onerror = function () { reject(new Error('timeline network error')); };
     xhr.ontimeout = function () { reject(new Error('timeline request timed out')); };
-    xhr.timeout = 15000;
+    xhr.timeout = 30000;
     xhr.send(body ? JSON.stringify(body) : undefined);
   });
 }

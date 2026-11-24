@@ -253,7 +253,40 @@ function bytesToUtf8(bytes) {
 
 // ---------------- HTTP ----------------
 
+// A flaky connection (phone on the edge of wifi/cellular) drops or stalls
+// requests that would succeed a moment later, so transport-level failures are
+// retried with backoff and a timeout that grows each attempt. Retried: no
+// response at all (network error / timeout), 5xx, 408 and 429. Anything else
+// is the server's real answer (auth, validation, ...) and is returned as-is.
+// Re-sending an upload is safe - every op carries a unique id, and the server
+// answers a repeat with DUPLICATE_OPERATION (index.js's uploadOps treats that
+// as "already landed").
+var ATTEMPT_TIMEOUTS_MS = [30000, 45000, 60000, 60000];
+var RETRY_BASE_DELAY_MS = 1500;
+
+function isRetryable(err) {
+  var s = err && err.status;
+  return !s || s >= 500 || s === 408 || s === 429;
+}
+
 function request(method, baseUrl, path, token, body) {
+  var attempt = 0;
+  var run = function () {
+    return requestOnce(method, baseUrl, path, token, body, ATTEMPT_TIMEOUTS_MS[attempt]).catch(function (err) {
+      attempt++;
+      if (attempt >= ATTEMPT_TIMEOUTS_MS.length || !isRetryable(err)) {
+        throw err;
+      }
+      var delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 500);
+      console.log('[supersync] ' + method + ' ' + path + ' failed (' + (err && err.message) +
+        '), retry ' + attempt + '/' + (ATTEMPT_TIMEOUTS_MS.length - 1) + ' in ' + delay + 'ms');
+      return new Promise(function (resolve) { setTimeout(resolve, delay); }).then(run);
+    });
+  };
+  return run();
+}
+
+function requestOnce(method, baseUrl, path, token, body, timeoutMs) {
   return new Promise(function (resolve, reject) {
     var xhr = new XMLHttpRequest();
     xhr.open(method, baseUrl + path, true);
@@ -289,7 +322,7 @@ function request(method, baseUrl, path, token, body) {
     xhr.ontimeout = function () {
       reject(new Error('Timed out calling ' + path));
     };
-    xhr.timeout = 15000;
+    xhr.timeout = timeoutMs;
     xhr.send(body ? JSON.stringify(body) : undefined);
   });
 }
@@ -341,4 +374,5 @@ module.exports = {
   SuperSyncClient: SuperSyncClient,
   createCrypto: createCrypto,
   DEFAULT_BASE_URL: DEFAULT_BASE_URL,
+  _isRetryable: isRetryable,
 };
