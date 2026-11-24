@@ -564,6 +564,9 @@ static void inbox_received_handler(DictionaryIterator *iterator, void *context) 
       s_notespage_enabled = tuple_int(iterator, KEY_NOTESPAGE_ENABLED, s_notespage_enabled) != 0;
       s_search_enabled = tuple_int(iterator, KEY_SEARCH_ENABLED, s_search_enabled) != 0;
       s_tags_enabled = tuple_int(iterator, KEY_TAGS_ENABLED, s_tags_enabled) != 0;
+#ifdef PRIORITY_NUMBERS_UI
+      s_priority_numbers = tuple_int(iterator, KEY_PRIORITY_NUMBERS, s_priority_numbers) != 0;
+#endif
       s_yesterday_stats_enabled = tuple_int(iterator, KEY_YESTERDAY_STATS_ENABLED, s_yesterday_stats_enabled) != 0;
       s_later_today_enabled = tuple_int(iterator, KEY_LATER_TODAY_ENABLED, s_later_today_enabled) != 0;
       s_collapse_groups = tuple_int(iterator, KEY_COLLAPSE_GROUPS, s_collapse_groups) != 0;

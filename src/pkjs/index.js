@@ -280,6 +280,7 @@ function loadState() {
 }
 
 function saveState(state) {
+  cachedPriorityNumbers = priorityNumbersOf(state);
   localStorage.setItem('sp_entities', JSON.stringify(state));
 }
 
@@ -553,6 +554,10 @@ function sendStatus(code, message) {
     // drill in for that tag's tasks. Reuses the projects-browser plumbing with
     // an IS_TAGS flag on the list / tasks requests.
     TAGS_ENABLED: config.enableTags === true ? 1 : 0,
+    // Mirrors the desktop's Settings > Tasks > priority icon style
+    // (globalConfig.tasks.priorityIconPreset, 'chevrons' | 'numbers'),
+    // replayed into state like the pomodoro section. Watch draws 1/2/3 when set.
+    PRIORITY_NUMBERS: priorityNumbersFromState(),
     // Calendar month view row - default OFF, emery-only watch UI (see
     // main.c's CALENDAR_ROW_ACTIVE comment). Drives s_calendar_enabled /
     // SECTION0_ROW_CALENDAR.
@@ -1903,11 +1908,6 @@ function buildTaskUpdateOp(taskId, changes, clientId) {
   };
 }
 
-// Same envelope as buildTaskUpdateOp, just the delete action/payload shape -
-// matches task-store.js's own '[Task Shared] deleteTask' replay case
-// (actionPayload.task.id). opType 'UPD', not a dedicated delete code -
-// moveToArchive (also a "remove from the active view" action) uses the same
-// convention; the op log's opType tracks CRT-vs-not, not CRUD semantics.
 // "[Task Shared] planTasksForToday" - the desktop's "Add to Today". Replay
 // (task-store.js) reads taskIds + today; parentTaskMap/isShowSnack match the
 // real action's shape (we only ever plan one top-level task).
@@ -1934,6 +1934,11 @@ function buildPlanForTodayOp(taskId, today, clientId) {
   };
 }
 
+// Same envelope as buildTaskUpdateOp, just the delete action/payload shape -
+// matches task-store.js's own '[Task Shared] deleteTask' replay case
+// (actionPayload.task.id). opType 'UPD', not a dedicated delete code -
+// moveToArchive (also a "remove from the active view" action) uses the same
+// convention; the op log's opType tracks CRT-vs-not, not CRUD semantics.
 function buildTaskDeleteOp(taskId, clientId) {
   var crypto = getCrypto();
   var payload = { actionPayload: { task: { id: taskId } }, entityChanges: [] };
@@ -2436,6 +2441,19 @@ function handleTaskSetDeadline(taskId, days) {
       console.log('[pkjs] failed to upload deadline change: ' + failureMsg);
       sendStatus(STATUS_ERROR, failureMsg);
     });
+}
+
+function priorityNumbersOf(state) {
+  var gc = state && state.globalConfig;
+  return gc && gc.tasks && gc.tasks.priorityIconPreset === 'numbers' ? 1 : 0;
+}
+// Cached by saveState so sendStatus (fires constantly) never parses the state.
+var cachedPriorityNumbers = null;
+function priorityNumbersFromState() {
+  if (cachedPriorityNumbers === null) {
+    cachedPriorityNumbers = priorityNumbersOf(loadState());
+  }
+  return cachedPriorityNumbers;
 }
 
 // Watch priority row: `code` 0-3. A plain updateTask { priority } with the

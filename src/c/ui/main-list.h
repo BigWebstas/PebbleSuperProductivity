@@ -1073,19 +1073,29 @@ static void toggle_task_collapse(Task *t) {
 // Coloured red / orange / cerulean. `box` is the right-aligned slot,
 // PRIORITY_GLYPH_W wide; the icon is centred in it.
 #define PRIORITY_GLYPH_W 12
-static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor fg) {
-  int16_t cx = box.origin.x + box.size.w / 2;
-  int16_t cy = box.origin.y + box.size.h / 2 + 1;
-  GColor c = prio == PRIO_HIGH ? PBL_IF_COLOR_ELSE(GColorRed, fg)
-           : prio == PRIO_MEDIUM ? PBL_IF_COLOR_ELSE(GColorOrange, fg)
-           : PBL_IF_COLOR_ELSE(GColorVividCerulean, fg);
+__attribute__((noinline)) static void draw_priority_glyph(GContext *ctx, GRect box, uint8_t prio, GColor fg) {
+#ifdef PBL_COLOR
+  static const GColor cols[] = { { GColorVividCeruleanARGB8 }, { GColorOrangeARGB8 }, { GColorRedARGB8 } };
+  GColor c = cols[prio - 1];
+#else
+  GColor c = fg;
+#endif
+#ifdef PRIORITY_NUMBERS_UI
+  if (s_priority_numbers) {
+    char digit[2] = { (char)('0' + prio), '\0' };
+    graphics_context_set_text_color(ctx, c);
+    draw_text(ctx, digit, SUBTITLE_FONT_KEY, box, GTextOverflowModeFill, GTextAlignmentCenter);
+    return;
+  }
+#endif
+  int16_t x = box.origin.x + box.size.w / 2;
+  int16_t y = box.origin.y + box.size.h / 2 + 1;
+  int16_t d = prio == PRIO_LOW ? -2 : 2; // chevron points down for low, else up
   graphics_context_set_stroke_color(ctx, c);
   graphics_context_set_stroke_width(ctx, 2);
-  int16_t dir = prio == PRIO_LOW ? -1 : 1; // chevron points down for low, else up
-  for (int i = 0; i < (prio == PRIO_HIGH ? 2 : 1); i++) {
-    int16_t y = cy + (prio == PRIO_HIGH ? 2 - i * 4 : 0);
-    graphics_draw_line(ctx, GPoint(cx - 4, y + 2 * dir), GPoint(cx, y - 2 * dir));
-    graphics_draw_line(ctx, GPoint(cx, y - 2 * dir), GPoint(cx + 4, y + 2 * dir));
+  for (int n = prio == PRIO_HIGH ? 2 : 1, yy = y + (n == 2 ? 2 : 0); n > 0; n--, yy -= 4) {
+    graphics_draw_line(ctx, GPoint(x - 4, yy + d), GPoint(x, yy - d));
+    graphics_draw_line(ctx, GPoint(x, yy - d), GPoint(x + 4, yy + d));
   }
   graphics_context_set_stroke_width(ctx, 1);
 }

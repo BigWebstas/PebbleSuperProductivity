@@ -735,6 +735,13 @@ static bool s_upcoming_have_data = false;
 // s_browse_mode == BROWSE_TAGS; see TAGS_ROW_ACTIVE(). aplite-excluded with the
 // browser it borrows.
 static bool s_tags_enabled = false;
+// basalt/chalk have no spare code space for the digit path (emery only fits it
+// with the deadline-stripe animation gone); they stay on chevrons.
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_DIORITE)
+#define PRIORITY_NUMBERS_UI 1
+// Desktop globalConfig.tasks.priorityIconPreset == 'numbers': draw 1/2/3, not chevrons.
+static bool s_priority_numbers = false;
+#endif
 #endif
 
 // The Projects browser is built on every platform except aplite (too little
