@@ -907,11 +907,6 @@ static void refresh_scroll_state(bool reset_offset) {
 static void menu_selection_changed(MenuLayer *menu_layer, MenuIndex new_index, MenuIndex old_index, void *context) {
   refresh_scroll_state(true);
   backlight_touch();
-#ifdef PBL_PLATFORM_EMERY
-  if (s_scroll_pip_layer) {
-    layer_mark_dirty(s_scroll_pip_layer);
-  }
-#endif
 #if defined(PBL_TOUCH)
   // A tap that moved the highlight to a new row is select-only; a tap on the
   // already-selected row (no move) activates it - see menu_select_click.
@@ -1301,14 +1296,6 @@ static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cel
     // draw. In the actionable case section 0 draws below as for a full list.
     return;
   }
-#ifdef PBL_PLATFORM_EMERY
-  // The scroll pip is a sibling layer, so it isn't repainted when the menu
-  // scrolls on its own (a touch drag especially). Any row repaint means the
-  // viewport moved - re-mark it so the thumb keeps up with the selection.
-  if (s_scroll_pip_layer) {
-    layer_mark_dirty(s_scroll_pip_layer);
-  }
-#endif
   if (cell_index->section == 0) {
     bool is_selected = menu_layer_get_selected_index(s_menu_layer).section == cell_index->section &&
                         menu_layer_get_selected_index(s_menu_layer).row == cell_index->row;
