@@ -354,8 +354,7 @@ static void dictation_status_callback(DictationSession *session, DictationSessio
     return;
   }
   // Every other failure already gets a dialog from the OS's own dictation UI,
-  // so no error overlay here. Logged only.
-  APP_LOG(APP_LOG_LEVEL_INFO, "dictation failed, status=%d", (int)status);
+  // so no error overlay here (and no log - the string cost ~60B of code space).
 }
 
 static void start_add_task_dictation(void) {

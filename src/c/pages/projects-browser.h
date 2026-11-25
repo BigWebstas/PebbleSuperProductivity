@@ -181,7 +181,7 @@ static void browse_menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuInd
   // tasks do) passes show_project so each row names its project.
   bool show_project = false;
 #ifndef PBL_PLATFORM_APLITE
-  show_project = (s_browse_mode == BROWSE_TAGS); // TAG_EDIT is level-0 only
+  show_project = (unsigned)(s_browse_mode - BROWSE_TAGS) < 2; // TAGS or VIEWS (TAG_EDIT is level-0 only)
 #ifdef PBL_PLATFORM_EMERY
   show_project = show_project || s_browse_mode == BROWSE_CALENDAR_DAY;
 #endif

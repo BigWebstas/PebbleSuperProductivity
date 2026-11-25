@@ -706,6 +706,53 @@ function applyNoteAction(op, actionPayload, state) {
 // PROJECT/NOTE already use, no entity-specific meta-reducer). Only `title`
 // is needed for the watch's read-only tags overlay - see main.c's
 // show_tags_overlay/MSG_TASK_TAGS.
+// Saved views = the desktop's BOARD entities (task-view-customizer's "Save as
+// view"). state.board = { id: BoardCfg }. Panel edits address the panel's id,
+// so they search the boards for the one holding it.
+function applyBoardAction(op, actionPayload, state) {
+  var boards = ensureCollection(state, 'board');
+  if (!actionPayload) {
+    return;
+  }
+  function withPanel(panelId, fn) {
+    Object.keys(boards).forEach(function (bid) {
+      var b = boards[bid];
+      (b.panels || []).forEach(function (pn, i) {
+        if (pn && pn.id === panelId) {
+          b.panels[i] = fn(pn);
+        }
+      });
+    });
+  }
+  switch (op.actionType) {
+    case '[Boards] Add Board':
+      if (actionPayload.board && actionPayload.board.id) {
+        boards[actionPayload.board.id] = actionPayload.board;
+      }
+      break;
+    case '[Boards] Update Board':
+      if (actionPayload.id) {
+        boards[actionPayload.id] = Object.assign({}, boards[actionPayload.id], actionPayload.updates);
+      }
+      break;
+    case '[Boards] Remove Board':
+      delete boards[actionPayload.id];
+      break;
+    case '[Boards] Update Panel Cfg':
+      if (actionPayload.panelCfg) {
+        withPanel(actionPayload.panelCfg.id, function () { return actionPayload.panelCfg; });
+      }
+      break;
+    case '[Boards] Update Panel Cfg TaskIds':
+      withPanel(actionPayload.panelId, function (pn) {
+        return Object.assign({}, pn, { taskIds: actionPayload.taskIds });
+      });
+      break;
+    default:
+      break;
+  }
+}
+
 function applyTagAction(op, actionPayload, state) {
   var tags = ensureCollection(state, 'tag');
   if (!actionPayload) {
@@ -1091,6 +1138,8 @@ function applyOperation(entry, state, crypto) {
           ensureCollection(state, 'note')[lwwData.id] = lwwData;
         } else if (entityType === 'tag') {
           ensureCollection(state, 'tag')[lwwData.id] = lwwData;
+        } else if (entityType === 'board') {
+          ensureCollection(state, 'board')[lwwData.id] = lwwData;
         } else if (entityType === 'simple_counter') {
           ensureCollection(state, 'simpleCounter')[lwwData.id] = lwwData;
         } else if (entityType === 'task_repeat_cfg') {
@@ -1122,6 +1171,10 @@ function applyOperation(entry, state, crypto) {
     }
     if (entityType === 'tag') {
       applyTagAction(op, payload && payload.actionPayload, state);
+      return;
+    }
+    if (entityType === 'board') {
+      applyBoardAction(op, payload && payload.actionPayload, state);
       return;
     }
     if (entityType === 'task_repeat_cfg') {
@@ -1201,6 +1254,16 @@ function applyOperation(entry, state, crypto) {
         }
         if (payload && payload.tag && payload.tag.entities) {
           state.tag = payload.tag.entities;
+        }
+        // Boards are an array-pattern slice ({ boardCfgs: [...] }); accept the
+        // other shapes a snapshot might use too. Unverified against a live
+        // snapshot - falls back to ops-only if none match.
+        var bsrc = payload && (payload.boards || payload.board);
+        var blist = bsrc && (Array.isArray(bsrc) ? bsrc : bsrc.boardCfgs ||
+          (bsrc.entities && Object.keys(bsrc.entities).map(function (k) { return bsrc.entities[k]; })));
+        if (blist) {
+          state.board = {};
+          blist.forEach(function (b) { if (b && b.id) { state.board[b.id] = b; } });
         }
         if (payload && payload.taskRepeatCfg && payload.taskRepeatCfg.entities) {
           state.taskRepeatCfg = payload.taskRepeatCfg.entities;
@@ -1548,6 +1611,203 @@ function getTagTasks(state, tagId, limit, hideDone, graceMs) {
     pushTaskAndSubtasks(rows, state, allTasks, t, projectTitleFor(state, t),
                         t.projectId || undefined, proj ? projectColorRgb(proj) : undefined, hideDone, graceMs);
   });
+  return rows.slice(0, limit);
+}
+
+
+// ---- Saved views (desktop boards) ------------------------------------------
+// Each board panel becomes one entry in the Tags page list, id 'v:'+panelId
+// (<=31 chars, the watch's id buffer); a one-panel list view uses just the
+// board's title. The watch needs no changes - it browses them like a tag.
+var VIEW_ID_PREFIX = 'v:';
+
+// Default boards store translation keys ('F.BOARDS.DEFAULT.KANBAN'); the last
+// segment, title-cased, reads fine without the app's i18n tables.
+function viewTitleText(t) {
+  var str = String(t || '');
+  if (/^[A-Z0-9_]+(\.[A-Z0-9_]+)+$/.test(str)) {
+    str = str.split('.').pop().toLowerCase().replace(/_/g, ' ');
+    str = str.charAt(0).toUpperCase() + str.slice(1);
+  }
+  return str;
+}
+
+function viewEntries(state) {
+  var out = [];
+  var boards = state.board || {};
+  Object.keys(boards).forEach(function (bid) {
+    var b = boards[bid];
+    var panels = (b && b.panels) || [];
+    panels.forEach(function (pn) {
+      if (!pn || !pn.id) { return; }
+      out.push({
+        id: (VIEW_ID_PREFIX + pn.id).slice(0, 31),
+        title: panels.length > 1 ? viewTitleText(b.title) + ' / ' + viewTitleText(pn.title) : viewTitleText(b.title),
+        panel: pn,
+      });
+    });
+  });
+  return out;
+}
+
+// Day-offset range [lo, hi] (from today) for a date rule; null = not a range.
+function dateRuleRange(rule, firstDow) {
+  var now = logicalNow();
+  var dom = now.getDate();
+  var dim = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  var dimNext = new Date(now.getFullYear(), now.getMonth() + 2, 0).getDate();
+  var ws = -((now.getDay() - firstDow + 7) % 7);
+  switch (rule) {
+    case 'today': return [0, 0];
+    case 'tomorrow': return [1, 1];
+    case 'next7Days': return [0, 6];
+    case 'thisWeek': return [ws, ws + 6];
+    case 'nextWeek': return [ws + 7, ws + 13];
+    case 'thisMonth': return [1 - dom, dim - dom];
+    case 'nextMonth': return [dim - dom + 1, dim - dom + dimNext];
+    default: return null;
+  }
+}
+
+// `d` = day offset from today (undefined = no date), same encoding as
+// taskPlannedDays/taskDeadlineDays.
+function matchesDateRule(d, rule, firstDow) {
+  if (rule === 'none') { return d === undefined; }
+  if (d === undefined) { return false; }
+  if (rule === 'overdue') { return d < 0; }
+  if (rule === 'todayOrOverdue') { return d <= 0; }
+  var r = dateRuleRange(rule, firstDow);
+  return !r || (d >= r[0] && d <= r[1]); // unknown rule = any
+}
+
+function totalTimeSpent(t) {
+  var by = t.timeSpentOnDay;
+  if (!by) { return t.timeSpent || 0; }
+  return Object.keys(by).reduce(function (n, k) { return n + (by[k] || 0); }, 0);
+}
+
+// A panel's rules against one task - mirrors the desktop's
+// matchesTaskCriteria (panelToCriteria). Unknown rule values mean "any".
+function taskMatchesPanel(t, pn, firstDow) {
+  var tagIds = t.tagIds || [];
+  var inc = pn.includedTagIds || [];
+  var exc = pn.excludedTagIds || [];
+  if (pn.isUntagged === true && !inc.length) {
+    if (tagIds.length) { return false; }
+  } else {
+    if (inc.length) {
+      var has = function (id) { return tagIds.indexOf(id) !== -1; };
+      if (!(pn.includedTagsMatch === 'any' ? inc.some(has) : inc.every(has))) { return false; }
+    }
+    if (exc.length) {
+      var hit = function (id) { return tagIds.indexOf(id) !== -1; };
+      if (pn.excludedTagsMatch === 'all' ? exc.every(hit) : exc.some(hit)) { return false; }
+    }
+  }
+  var pids = (pn.projectIds || []).filter(function (id) { return id !== ''; });
+  if ((pn.projectIds || []).indexOf('') === -1 && pids.length && pids.indexOf(t.projectId) === -1) {
+    return false;
+  }
+  if (pn.taskDoneState === 2 && !t.isDone) { return false; }
+  if (pn.taskDoneState === 3 && t.isDone) { return false; }
+  if (pn.isParentTasksOnly && t.parentId) { return false; }
+  var planned = taskPlannedDays(t);
+  var rule = pn.dueState;
+  if (rule && rule !== '') {
+    if (!matchesDateRule(planned, rule, firstDow)) { return false; }
+  } else if (pn.scheduledState === 2 && planned === undefined) {
+    return false;
+  } else if (pn.scheduledState === 3 && planned !== undefined) {
+    return false;
+  }
+  if (pn.backlogState === 3 && !t.__inBacklog) { return false; }
+  if (pn.backlogState === 2 && t.__inBacklog) { return false; }
+  if (pn.deadlineState && !matchesDateRule(taskDeadlineDays(t), pn.deadlineState, firstDow)) { return false; }
+  var est = pn.estimateRule;
+  if (est === 'none' && t.timeEstimate) { return false; }
+  if (est && est !== 'none' && Number(est) > 0 && !((t.timeEstimate || 0) >= Number(est))) { return false; }
+  var sp = pn.timeSpentRule;
+  if (sp === 'none' && t.timeSpent) { return false; }
+  if (sp && sp !== 'none' && Number(sp) > 0 && !(totalTimeSpent(t) >= Number(sp))) { return false; }
+  var pr = pn.priorityRule;
+  if (pr) {
+    var code = taskPriorityCode(t) || 0;
+    if (pr === 'none' ? code !== 0 : (pr === '1' || pr === '2' || pr === '3') && code !== Number(pr)) { return false; }
+  }
+  return true;
+}
+
+// Panel order: its own sort (sortBy / sortKey) else its manual taskIds order.
+function panelSorter(pn) {
+  var key = pn.sortBy || pn.sortKey;
+  var dir = pn.sortDir === 'desc' ? -1 : 1;
+  var val = function (t) {
+    switch (key) {
+      case 'dueDate': case 'plannedDate': return taskPlannedDays(t);
+      case 'deadline': return taskDeadlineDays(t);
+      case 'created': return t.created;
+      case 'timeEstimate': case 'estimate': return t.timeEstimate || 0;
+      case 'timeSpent': return totalTimeSpent(t);
+      case 'priority': return taskPriorityCode(t) || 0;
+      default: return undefined;
+    }
+  };
+  var manual = pn.taskIds || [];
+  return function (a, b) {
+    if (!!a.isDone !== !!b.isDone) { return a.isDone ? 1 : -1; }
+    if (key === 'title') { return dir * titleCompare(a.title, b.title); }
+    var va = val(a), vb = val(b);
+    if (va !== undefined || vb !== undefined) {
+      if (va === undefined) { return 1; }
+      if (vb === undefined) { return -1; }
+      if (va !== vb) { return dir * (va < vb ? -1 : 1); }
+      return titleCompare(a.title, b.title);
+    }
+    var ia = manual.indexOf(a.id), ib = manual.indexOf(b.id);
+    if (ia !== -1 || ib !== -1) {
+      return ia === -1 ? 1 : ib === -1 ? -1 : ia - ib;
+    }
+    return titleCompare(a.title, b.title);
+  };
+}
+
+function viewMatchedTasks(state, pn) {
+  var gc = state.globalConfig && state.globalConfig.localization;
+  var firstDow = gc && typeof gc.firstDayOfWeek === 'number' ? gc.firstDayOfWeek : 1;
+  var all = state.task || {};
+  var matched = Object.keys(all)
+    .map(function (id) { return all[id]; })
+    .filter(function (t) { return t && t.title && taskMatchesPanel(t, pn, firstDow); });
+  var ids = {};
+  matched.forEach(function (t) { ids[t.id] = true; });
+  // A matching subtask whose parent also matches nests under it instead.
+  return matched.filter(function (t) { return !(t.parentId && ids[t.parentId]); })
+    .sort(panelSorter(pn));
+}
+
+function getViewList(state) {
+  return viewEntries(state).map(function (v) {
+    var open = viewMatchedTasks(state, v.panel).filter(function (t) { return !t.isDone; }).length;
+    return { id: v.id, title: v.title, color: 0, taskCount: open };
+  }).sort(function (a, b) { return titleCompare(a.title, b.title); });
+}
+
+function isViewId(id) {
+  return String(id).indexOf(VIEW_ID_PREFIX) === 0;
+}
+
+function getViewTasks(state, viewId, limit, hideDone, graceMs) {
+  var entry = viewEntries(state).filter(function (v) { return v.id === viewId; })[0];
+  if (!entry) { return []; }
+  var all = state.task || {};
+  var rows = [];
+  viewMatchedTasks(state, entry.panel)
+    .filter(function (t) { return !isHiddenDone(t, hideDone, graceMs); })
+    .forEach(function (t) {
+      var proj = t.projectId && state.project && state.project[t.projectId];
+      pushTaskAndSubtasks(rows, state, all, t, projectTitleFor(state, t),
+                          t.projectId || undefined, proj ? projectColorRgb(proj) : undefined, hideDone, graceMs);
+    });
   return rows.slice(0, limit);
 }
 
@@ -2775,6 +3035,9 @@ module.exports = {
   getProjectTasks: getProjectTasks,
   getTagList: getTagList,
   getTagTasks: getTagTasks,
+  getViewList: getViewList,
+  getViewTasks: getViewTasks,
+  isViewId: isViewId,
   computeStats: computeStats,
   statsToMarkdown: statsToMarkdown,
   computeSearch: computeSearch,
