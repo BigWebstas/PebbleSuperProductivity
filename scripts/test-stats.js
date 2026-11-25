@@ -102,7 +102,7 @@ check('worked today sums timeSpentOnDay[today] across leaf tasks only', () => {
 });
 
 check('week: 7 buckets oldest-first, last labelled "Today", workedWeekMs is their sum', () => {
-  const iso = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
+  const iso = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return store.dateToDateStr(d); };
   const s = build([
     addTask({ id: 'a', title: 'A', timeSpentOnDay: { [iso(0)]: 600000, [iso(3)]: 1200000, [iso(9)]: 999 } }),
     addTask({ id: 'b', title: 'B', timeSpentOnDay: { [iso(0)]: 300000 } }),
