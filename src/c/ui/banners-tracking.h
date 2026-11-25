@@ -388,8 +388,9 @@ static void menu_select_click(MenuLayer *menu_layer, MenuIndex *cell_index, void
 #endif
     if (!pending_window) {
       bool pinned_row = has_pinned_row() && cell_index->section == 1;
-      if (!pinned_row && resolve_task_at(*cell_index)) {
-        menu_select_long_click(s_menu_layer, cell_index, NULL);
+      Task *tapped = pinned_row ? NULL : resolve_task_at(*cell_index);
+      if (tapped) {
+        push_action_menu(tapped->id, ACTX_TODAY, false);
         return;
       }
     }
@@ -584,6 +585,14 @@ static void menu_select_long_click(MenuLayer *menu_layer, MenuIndex *cell_index,
   if (!task) {
     return;
   }
+#ifdef PBL_PLATFORM_EMERY
+  // Long-Select on a parent task folds / unfolds its subtasks (Select already
+  // opens the action menu, so the hold was a duplicate).
+  if (task_subtask_count(task) > 0) {
+    toggle_task_collapse(task);
+    return;
+  }
+#endif
 #ifndef PBL_PLATFORM_APLITE
   push_action_menu(task->id, ACTX_TODAY, false);
 #else

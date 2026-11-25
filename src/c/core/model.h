@@ -227,7 +227,6 @@ static int s_habit_incoming_total = 0;
 static Window *s_main_window;
 static MenuLayer *s_menu_layer;
 #ifdef PBL_PLATFORM_EMERY
-static Layer *s_scroll_pip_layer = NULL; // faint scrollbar overlay on the task list
 #endif
 static Window *s_habits_window;
 static MenuLayer *s_habits_menu_layer;

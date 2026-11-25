@@ -56,47 +56,6 @@
 // single (toggle / double-click notes) and long (the per-task action menu, where
 // scheduling now lives - it used to be long-press UP/DOWN here).
 
-#ifdef PBL_PLATFORM_EMERY
-// A scrollbar on the far right of the task list - a faint track with a red
-// thumb whose position tracks the MenuLayer's real scroll viewport (via its
-// backing ScrollLayer's content offset/size), not the selected row: a touch
-// drag scrolls the list without moving the selection, so a selection-index
-// thumb sat frozen mid-drag even though menu_draw_row was marking this layer
-// dirty on every row repaint. Hidden when the whole list fits (< PIP_MIN_ROWS).
-// Its own overlay layer (s_scroll_pip_layer, declared up by s_menu_layer)
-// above s_menu_layer. On a touch watch, dragging the right edge scrubs the
-// selection - pip_total_rows / pip_scrub_to are defined up by touch_handler.
-static void scroll_pip_update_proc(Layer *layer, GContext *ctx) {
-  int total = pip_total_rows();
-  if (total < PIP_MIN_ROWS) {
-    return;
-  }
-  ScrollLayer *sl = menu_layer_get_scroll_layer(s_menu_layer);
-  int16_t viewport_h = layer_get_bounds(scroll_layer_get_layer(sl)).size.h;
-  int16_t max_scroll = scroll_layer_get_content_size(sl).h - viewport_h;
-  int16_t scroll_y = -scroll_layer_get_content_offset(sl).y;
-  if (scroll_y < 0) {
-    scroll_y = 0;
-  } else if (max_scroll > 0 && scroll_y > max_scroll) {
-    scroll_y = max_scroll;
-  }
-
-  GRect b = layer_get_bounds(layer);
-  int16_t tx = b.origin.x + b.size.w - 4;
-  int16_t top = b.origin.y + 4;
-  int16_t th = b.size.h - 8;
-  graphics_context_set_fill_color(ctx, GColorLightGray);
-  graphics_fill_rect(ctx, GRect(tx + 1, top, 2, th), 1, GCornersAll);
-  int thumb = th / 5;
-  if (thumb < 14) {
-    thumb = 14;
-  }
-  int ty = top + (max_scroll > 0 ? (th - thumb) * scroll_y / max_scroll : 0);
-  graphics_context_set_fill_color(ctx, GColorRed);
-  graphics_fill_rect(ctx, GRect(tx, ty, 3, thumb), 1, GCornersAll);
-}
-#endif
-
 static void window_load(Window *window) {
   Layer *window_layer;
   GRect content_bounds = window_chrome(window, &s_status_bar, &window_layer);
@@ -114,11 +73,6 @@ static void window_load(Window *window) {
   });
   menu_layer_set_click_config_onto_window(s_menu_layer, window);
   layer_add_child(window_layer, menu_layer_get_layer(s_menu_layer));
-#ifdef PBL_PLATFORM_EMERY
-  s_scroll_pip_layer = layer_create(content_bounds);
-  layer_set_update_proc(s_scroll_pip_layer, scroll_pip_update_proc);
-  layer_add_child(window_layer, s_scroll_pip_layer);
-#endif
   // A cached list may already have a selection that needs to scroll.
   refresh_scroll_state(true);
 
@@ -230,11 +184,6 @@ static void window_appear(Window *window) {
   }
   menu_layer_reload_data(s_menu_layer);
   refresh_scroll_state(true);
-#ifdef PBL_PLATFORM_EMERY
-  if (s_scroll_pip_layer) {
-    layer_mark_dirty(s_scroll_pip_layer);
-  }
-#endif
 }
 
 static void window_unload(Window *window) {
@@ -247,10 +196,6 @@ static void window_unload(Window *window) {
   cancel_unpin_timer();   // the pinned-section grace timer
 #endif
   stop_syncing_animation();
-#ifdef PBL_PLATFORM_EMERY
-  layer_destroy(s_scroll_pip_layer);
-  s_scroll_pip_layer = NULL;
-#endif
   menu_layer_destroy(s_menu_layer);
   text_layer_destroy(s_empty_layer);
 #ifndef PBL_PLATFORM_APLITE

@@ -65,54 +65,6 @@ static bool s_touch_moved = false;       // finger has left the tap zone (scroll
 static bool s_touch_swipe_fired = false; // the left-swipe already handled this gesture
 // s_tap_moved_sel / s_touch_longpress_fired are declared up by s_touch_nav_enabled.
 
-#ifdef PBL_PLATFORM_EMERY
-// Scroll-pip drag (see scroll_pip_update_proc): a touch that starts in the
-// right-edge PIP_TOUCH_ZONE_PX and a list long enough to show the pip enters a
-// scrub - PositionUpdates map the finger's Y straight onto a list row.
-#define PIP_MIN_ROWS 7
-#define PIP_TOUCH_ZONE_PX 24
-static bool s_touch_pip_scrub = false;
-
-// Total rows across every section of the main list menu.
-static int pip_total_rows(void) {
-  if (!s_menu_layer || s_task_count == 0) {
-    return 0;
-  }
-  uint16_t nsec = menu_get_num_sections(s_menu_layer, NULL);
-  int total = 0;
-  for (uint16_t s = 0; s < nsec; s++) {
-    total += menu_get_num_rows(s_menu_layer, s, NULL);
-  }
-  return total;
-}
-
-// Map a screen-space Y to a flat list row and select it.
-static void pip_scrub_to(int16_t screen_y) {
-  int total = pip_total_rows();
-  if (total < PIP_MIN_ROWS || !s_scroll_pip_layer) {
-    return;
-  }
-  int16_t th = layer_get_bounds(s_scroll_pip_layer).size.h - 8;
-  int rel = screen_y - (STATUS_BAR_LAYER_HEIGHT + 4);
-  if (rel < 0) {
-    rel = 0;
-  } else if (rel > th) {
-    rel = th;
-  }
-  int flat = th > 0 ? rel * (total - 1) / th : 0;
-  uint16_t nsec = menu_get_num_sections(s_menu_layer, NULL);
-  for (uint16_t s = 0; s < nsec; s++) {
-    int n = menu_get_num_rows(s_menu_layer, s, NULL);
-    if (flat < n) {
-      menu_layer_set_selected_index(s_menu_layer, MenuIndex(s, (uint16_t)flat),
-                                    MenuRowAlignCenter, false);
-      return;
-    }
-    flat -= n;
-  }
-}
-#endif
-
 static void touch_longpress_timer_cancel(void) {
   if (s_touch_longpress_timer) {
     app_timer_cancel(s_touch_longpress_timer);
@@ -232,9 +184,6 @@ static void touch_handler(const TouchEvent *event, void *context) {
     s_touch_swipe_fired = false;
     s_tap_moved_sel = false;
     s_touch_longpress_fired = false;
-#ifdef PBL_PLATFORM_EMERY
-    s_touch_pip_scrub = false;
-#endif
     // non_navigational: contact without the watch being woken first - don't arm.
     s_touch_armed = !event->non_navigational;
     if (!s_touch_armed) {
@@ -246,26 +195,9 @@ static void touch_handler(const TouchEvent *event, void *context) {
     // Arm now - the bridge can synthesise its tap SELECT click before the raw
     // Liftoff even reaches us. Re-armed on Liftoff to cover a late one.
     arm_tap_select_guard();
-#ifdef PBL_PLATFORM_EMERY
-    // A touch on the right-edge scrollbar zone (long lists only) starts a scrub.
-    if (window_stack_get_top_window() == s_main_window && s_scroll_pip_layer &&
-        pip_total_rows() >= PIP_MIN_ROWS &&
-        event->x >= layer_get_bounds(s_scroll_pip_layer).size.w - PIP_TOUCH_ZONE_PX) {
-      s_touch_pip_scrub = true;
-      s_tap_moved_sel = true;  // its trailing SELECT must not activate a row
-      touch_longpress_timer_cancel();
-      pip_scrub_to(event->y);
-    }
-#endif
     break;
 
   case TouchEvent_PositionUpdate: {
-#ifdef PBL_PLATFORM_EMERY
-    if (s_touch_pip_scrub) {
-      pip_scrub_to(event->y);
-      break;
-    }
-#endif
     if (!s_touch_armed || s_touch_swipe_fired) {
       break;
     }
@@ -299,14 +231,6 @@ static void touch_handler(const TouchEvent *event, void *context) {
 
   case TouchEvent_Liftoff: {
     touch_longpress_timer_cancel();
-#ifdef PBL_PLATFORM_EMERY
-    if (s_touch_pip_scrub) {
-      s_touch_pip_scrub = false;
-      arm_tap_select_guard();  // swallow the bridge's release SELECT
-      s_touch_armed = false;
-      break;
-    }
-#endif
     if (s_touch_armed && !s_touch_swipe_fired) {
       int dx = event->x - s_touch_down_point.x;
       int dy = event->y - s_touch_down_point.y;

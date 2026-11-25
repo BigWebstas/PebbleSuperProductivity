@@ -3050,6 +3050,7 @@ module.exports = {
   repeatOccurrences: repeatOccurrences,
   NO_PROJECT_ID: NO_PROJECT_ID,
   todayStr: todayStr,
+  msIsToday: msIsToday,
   yesterdayStr: yesterdayStr,
   dateToDateStr: dateToDateStr,
   HIDE_DONE_GRACE_MS: HIDE_DONE_GRACE_MS,
