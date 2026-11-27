@@ -1607,7 +1607,7 @@ check('[Tag] Delete Tag / Delete multiple Tags removes tags', () => {
 
 check('getActiveTasks: deadlineDays is whole days from today, negative when overdue, absent otherwise', () => {
   const state = store.emptyState();
-  const iso = (d) => d.toISOString().slice(0, 10);
+  const iso = (d) => store.dateToDateStr(d); // local date, like the code under test (toISOString is UTC)
   const plus = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return iso(d); };
   store.applyOperations(
     [
